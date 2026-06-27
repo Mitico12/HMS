@@ -261,7 +261,7 @@ input[type="checkbox"], input[type="radio"] {
 
 .drag-handle:active { cursor: grabbing; }
 
-.card.dragging {
+.card.dragging, .row.dragging {
   opacity: .45;
   border-color: var(--primary);
 }
