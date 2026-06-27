@@ -28,7 +28,7 @@
   })();
 
   async function loadProfiles() {
-    const { data } = await db.from('profiles').select('id, full_name, email, role').order('full_name');
+    const { data } = await db.from('profiles').select('id, full_name, email, role, is_verified').order('full_name');
     state.profiles = data || [];
   }
   const nameOf = (id) => state.profiles.find(p => p.id === id)?.full_name || '—';
@@ -61,7 +61,8 @@
       if (!email || !password) return toast('Email and password are required.', 'err');
       if (mode === 'signup') {
         const full_name = $('#fn').value.trim();
-        const { error } = await db.auth.signUp({ email, password, options: { data: { full_name } } });
+        const { error } = await db.auth.signUp({ email, password,
+          options: { data: { full_name }, emailRedirectTo: new URL('confirmed.html', location.href).href } });
         if (error) return toast(error.message, 'err');
         toast('Account created. Ask an admin to grant access, then sign in.');
         mode = 'login'; render();
@@ -147,7 +148,19 @@
       async render(app) {
         const { data } = await db.from('groups').select('*').order('sort_order');
         state.groups = data || [];
+        await loadProfiles();
+        const pending = state.profiles.filter(p => !p.is_verified && p.role !== 'admin').length;
         const grid = el('div', { class: 'tile-grid' });
+
+        // fixed admin-only tile: account verifications
+        grid.append(el('button', { class: 'tile', onclick: () => go(verificationsView()) }, [
+          el('span', { class: 'glyph' }, '🛡️'),
+          el('div', {}, [
+            el('div', { class: 't-name' }, 'Verifications'),
+            el('div', { class: 't-meta' }, pending ? `${pending} waiting for approval` : 'Accounts & access'),
+          ]),
+        ]));
+
         for (const g of state.groups) {
           grid.append(el('button', { class: 'tile', onclick: () => go(groupView(g)) }, [
             el('span', { class: 'glyph' }, g.icon || '📁'),
@@ -615,27 +628,61 @@
     return {
       title: 'Settings', tab: 'settings',
       async render(app) {
+        app.append(el('div', { class: 'row', onclick: () => go(verificationsView()), style: 'cursor:pointer' }, [
+          el('div', { class: 'grow' }, [el('div', {}, 'Verifications'),
+            el('div', { class: 'sub' }, 'Approve accounts and grant admin access')]),
+          el('span', { class: 'muted' }, '›'),
+        ]));
         app.append(el('div', { class: 'row', onclick: () => go(categoriesView()), style: 'cursor:pointer' }, [
           el('div', { class: 'grow' }, [el('div', {}, 'Incident categories'),
             el('div', { class: 'sub' }, 'Manage root-cause and consequence options')]),
           el('span', { class: 'muted' }, '›'),
         ]));
+      },
+    };
+  }
 
-        app.append(el('h2', { class: 'display', style: 'margin:22px 0 12px' }, 'People & access'));
+  // ════════════════════════════════════════════════════════
+  //  VERIFICATIONS — approve accounts, grant admin
+  // ════════════════════════════════════════════════════════
+  function verificationsView() {
+    return {
+      title: 'Verifications', tab: 'groups',
+      async render(app) {
         await loadProfiles();
-        for (const p of state.profiles) {
-          const sel = el('select', { onchange: async e => {
+        const pending = state.profiles.filter(p => !p.is_verified && p.role !== 'admin');
+        const settled = state.profiles.filter(p => p.is_verified || p.role === 'admin');
+
+        const label = (p) => p.full_name || p.email;
+        const personRow = (p) => {
+          const roleSel = el('select', { onchange: async e => {
             const { error } = await db.from('profiles').update({ role: e.target.value }).eq('id', p.id);
-            if (error) { toast(error.message, 'err'); return; }
-            toast(`${p.full_name || p.email} is now ${e.target.value}.`);
+            if (error) return toast(error.message, 'err');
+            toast(`${label(p)} is now ${e.target.value}.`); refresh();
           } }, [opt('user', 'User'), opt('admin', 'Admin')]);
-          sel.value = p.role;
-          app.append(el('div', { class: 'row' }, [
-            el('div', { class: 'grow' }, [el('div', {}, p.full_name || p.email),
-              el('div', { class: 'sub' }, p.email)]),
-            sel,
-          ]));
-        }
+          roleSel.value = p.role;
+          const approveBtn = el('button', {
+            class: 'btn ' + (p.is_verified ? 'btn-danger' : 'btn-primary'),
+            onclick: async () => {
+              const { error } = await db.from('profiles').update({ is_verified: !p.is_verified }).eq('id', p.id);
+              if (error) return toast(error.message, 'err');
+              toast(p.is_verified ? 'Access revoked.' : 'Account approved.'); refresh();
+            } }, p.is_verified ? 'Revoke' : 'Approve');
+          return el('div', { class: 'row' }, [
+            el('div', { class: 'grow' }, [el('div', {}, label(p)),
+              el('div', { class: 'sub' }, p.email + (p.role === 'admin' ? ' · admin'
+                : p.is_verified ? ' · approved' : ' · awaiting approval'))]),
+            roleSel, approveBtn,
+          ]);
+        };
+
+        app.append(el('h2', { class: 'display', style: 'font-size:1.15rem;margin:0 0 12px' },
+          pending.length ? `Waiting for approval (${pending.length})` : 'Waiting for approval'));
+        if (!pending.length) app.append(el('p', { class: 'muted', style: 'margin-bottom:8px' }, 'No accounts waiting.'));
+        for (const p of pending) app.append(personRow(p));
+
+        app.append(el('h2', { class: 'display', style: 'font-size:1.15rem;margin:24px 0 12px' }, 'All accounts'));
+        for (const p of settled) app.append(personRow(p));
       },
     };
   }

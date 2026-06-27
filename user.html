@@ -20,9 +20,23 @@
     const res = await requireSession();
     if (!res.ok) return showAuth();
     state.profile = res.profile;
+    if (!res.profile.is_verified && res.profile.role !== 'admin') return showWaiting();
     showApp();
     go(homeView(), { reset: true });
   })();
+
+  // Shown to a signed-in account that an admin hasn't approved yet.
+  function showWaiting() {
+    screen.innerHTML = '';
+    screen.append(el('div', { class: 'auth-screen' },
+      el('div', { class: 'auth-card', style: 'text-align:center' }, [
+        el('div', { style: 'font-size:2.4rem;margin-bottom:8px' }, '⏳'),
+        el('div', { class: 'brand' }, 'Waiting for verification'),
+        el('div', { class: 'tag' }, 'Your account is set up, but an admin needs to approve it before you can use the app. You\'ll get in as soon as they do.'),
+        el('button', { class: 'btn btn-primary btn-block', onclick: () => location.reload() }, 'Check again'),
+        el('button', { class: 'btn btn-ghost btn-block', style: 'margin-top:10px', onclick: signOut }, 'Sign out'),
+      ])));
+  }
 
   // ── auth ───────────────────────────────────────────────
   function showAuth() {
@@ -49,7 +63,8 @@
       if (!email || !password) return toast('Email and password are required.', 'err');
       if (mode === 'signup') {
         const full_name = $('#fn').value.trim();
-        const { error } = await db.auth.signUp({ email, password, options: { data: { full_name } } });
+        const { error } = await db.auth.signUp({ email, password,
+          options: { data: { full_name }, emailRedirectTo: new URL('confirmed.html', location.href).href } });
         if (error) return toast(error.message, 'err');
         toast('Account created. You can sign in now.'); mode = 'login'; render();
       } else {
