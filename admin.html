@@ -143,6 +143,7 @@
       )));
   }
   async function signOut() { await db.auth.signOut(); location.reload(); }
+  function goIndex() { location.href = new URL('./index.html', location.href).href; }
 
   // ── app shell ──────────────────────────────────────────
   function showApp() {
@@ -181,6 +182,7 @@
     if (viewStack.length > 1) bar.append(el('button', { class: 'iconbtn', onclick: back }, '‹'));
     bar.append(el('h1', {}, view.title));
     bar.append(el('span', { class: 'role-pill' }, state.profile.role === 'super_admin' ? 'super admin' : 'admin'));
+    bar.append(el('button', { class: 'iconbtn', title: 'Return to start', onclick: goIndex }, '⌂'));
     bar.append(el('button', { class: 'iconbtn', title: 'Sign out', onclick: signOut }, '⏻'));
     if (view.action) bar.append(view.action);
     const app = $('#app'); app.innerHTML = '';
