@@ -193,6 +193,10 @@ h1, h2, h3, p {
 
 .req { color: var(--danger); }
 
+.language-field {
+  margin-bottom: 14px;
+}
+
 input, select, textarea {
   width: 100%;
   min-height: 42px;

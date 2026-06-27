@@ -22,9 +22,10 @@
   <div id="screen"></div>
 
   <script type="module">
-  import { db, requireSession, el, $, fmt, toast, initTheme, themeToggleButton } from './config.js';
+  import { db, requireSession, el, $, fmt, toast, initTheme, themeToggleButton, initLanguage, languageSelect, t } from './config.js';
 
   initTheme();
+  initLanguage();
   const screen = $('#screen');
   const state = { profile: null, groups: [] };
   const viewStack = [];
@@ -59,22 +60,23 @@
     const render = () => {
       card.innerHTML = '';
       const fields = mode === 'login'
-        ? [labeled('Username or email', el('input', { type: 'text', id: 'lid', autocomplete: 'username' })),
-           labeled('Password', el('input', { type: 'password', id: 'pw', autocomplete: 'current-password' }))]
-        : [labeled('Email', el('input', { type: 'email', id: 'em', autocomplete: 'email' })),
+        ? [labeled(t('usernameOrEmail'), el('input', { type: 'text', id: 'lid', autocomplete: 'username' })),
+           labeled(t('password'), el('input', { type: 'password', id: 'pw', autocomplete: 'current-password' }))]
+        : [labeled(t('email'), el('input', { type: 'email', id: 'em', autocomplete: 'email' })),
            labeled('Username', el('input', { type: 'text', id: 'un', autocomplete: 'username' })),
            labeled('Full name', el('input', { type: 'text', id: 'fn' })),
-           labeled('Password', el('input', { type: 'password', id: 'pw', autocomplete: 'new-password' }))];
+           labeled(t('password'), el('input', { type: 'password', id: 'pw', autocomplete: 'new-password' }))];
       card.append(
         el('div', { class: 'card-actions' }, themeToggleButton()),
         el('div', { class: 'brand' }, 'Nicosoft HMS manager'),
-        el('div', { class: 'tag' }, mode === 'login' ? 'Sign in to your workplace tools.' : 'Create your account.'),
+        languageSelect(render),
+        el('div', { class: 'tag' }, mode === 'login' ? t('signInTools') : t('createAccount')),
         ...fields,
         el('button', { class: 'btn btn-primary btn-block', style: 'margin-top:8px', onclick: submit },
-          mode === 'login' ? 'Sign in' : 'Create account'),
+          mode === 'login' ? t('signIn') : t('createAccount')),
         el('button', { class: 'btn btn-ghost btn-block', style: 'margin-top:10px',
           onclick: () => { mode = mode === 'login' ? 'signup' : 'login'; render(); } },
-          mode === 'login' ? 'Create an account' : 'Have an account? Sign in'),
+          mode === 'login' ? t('createAccount') : t('haveAccount')),
       );
     };
     async function submit() {
@@ -90,11 +92,11 @@
         toast('Account created. Confirm your email, then wait for admin approval.'); mode = 'login'; render();
       } else {
         const ident = $('#lid').value.trim();
-        if (!ident || !password) return toast('Enter your username or email and password.', 'err');
+        if (!ident || !password) return toast(t('enterLogin'), 'err');
         let email = ident;
         if (!ident.includes('@')) {
           const { data: resolved } = await db.rpc('get_email_for_username', { p_username: ident });
-          if (!resolved) return toast('No account found for that username.', 'err');
+          if (!resolved) return toast(t('userEmailNotFound'), 'err');
           email = resolved;
         }
         const { error } = await db.auth.signInWithPassword({ email, password });
@@ -120,9 +122,9 @@
   function renderBotnav(active) {
     const nav = $('#botnav'); nav.innerHTML = '';
     const tabs = [
-      { id: 'groups',  ic: '▦', label: 'Groups',     onclick: () => go(homeView(), { reset: true }) },
-      { id: 'reports', ic: '⚠', label: 'My reports', onclick: () => go(myReportsView(), { reset: true }) },
-      { id: 'settings', ic: '⚙', label: 'Settings', onclick: () => go(settingsView(), { reset: true }) },
+      { id: 'groups',  ic: '▦', label: t('groups'),     onclick: () => go(homeView(), { reset: true }) },
+      { id: 'reports', ic: '⚠', label: t('myReports'), onclick: () => go(myReportsView(), { reset: true }) },
+      { id: 'settings', ic: '⚙', label: t('settings'), onclick: () => go(settingsView(), { reset: true }) },
     ];
     for (const t of tabs)
       nav.append(el('button', { class: active === t.id ? 'active' : '', onclick: t.onclick },
@@ -133,11 +135,11 @@
   function paint() {
     const view = viewStack[viewStack.length - 1];
     const bar = $('#topbar'); bar.innerHTML = '';
-    bar.append(el('button', { class: 'iconbtn', title: 'Return to start', onclick: goIndex }, '⌂'));
+    bar.append(el('button', { class: 'iconbtn', title: t('returnStart'), onclick: goIndex }, '⌂'));
     bar.append(themeToggleButton());
     if (viewStack.length > 1) bar.append(el('button', { class: 'iconbtn', onclick: back }, '‹'));
     bar.append(el('h1', {}, view.title));
-    bar.append(el('button', { class: 'iconbtn', title: 'Sign out', onclick: signOut }, '⏻'));
+    bar.append(el('button', { class: 'iconbtn', title: t('signOut'), onclick: signOut }, '⏻'));
     if (view.action) bar.append(view.action);
     const app = $('#app'); app.innerHTML = '';
     renderBotnav(view.tab || 'groups');
@@ -153,7 +155,7 @@
   // ── home ───────────────────────────────────────────────
   function homeView() {
     return {
-      title: 'Groups', tab: 'groups',
+      title: t('groups'), tab: 'groups',
       async render(app) {
         const { data } = await db.from('groups').select('*').order('sort_order');
         state.groups = data || [];
@@ -402,7 +404,7 @@
 
   function myReportsView() {
     return {
-      title: 'My reports', tab: 'reports',
+      title: t('myReports'), tab: 'reports',
       async render(app) {
         const { data } = await db.from('incidents').select('*')
           .eq('reporter_id', state.profile.id).order('created_at', { ascending: false });
@@ -486,7 +488,7 @@
   // ── helpers ────────────────────────────────────────────
   function settingsView() {
     return {
-      title: 'Settings', tab: 'settings',
+      title: t('settings'), tab: 'settings',
       async render(app) {
         const fresh = await reloadMyProfile();
         if (fresh) state.profile = fresh;
@@ -502,7 +504,8 @@
         email.value = p.email || '';
 
         app.append(el('div', { class: 'card settings-card' }, [
-          el('h3', {}, 'Your details'),
+          el('h3', {}, t('yourDetails')),
+          languageSelect(() => go(settingsView(), { reset: true })),
           el('div', { class: 'settings-current' }, [
             kv('Name', p.full_name || '-'),
             kv('Username', p.username ? `@${p.username}` : '-'),

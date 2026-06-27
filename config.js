@@ -67,7 +67,7 @@ export function initTheme() {
 
 export function themeToggleButton() {
   initTheme();
-  const btn = el('button', { class: 'iconbtn theme-toggle', title: 'Toggle dark mode', onclick: toggleTheme }, themeIcon());
+  const btn = el('button', { class: 'iconbtn theme-toggle', title: t('toggleDarkMode'), onclick: toggleTheme }, themeIcon());
   function toggleTheme() {
     const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
     document.documentElement.dataset.theme = next;
@@ -79,6 +79,113 @@ export function themeToggleButton() {
 
 function themeIcon() {
   return document.documentElement.dataset.theme === 'dark' ? '☀' : '◐';
+}
+
+const LANG_KEY = 'language';
+const DEFAULT_LANG = 'en';
+
+const TEXT = {
+  en: {
+    adminConsole: 'Admin console',
+    adminConsoleMeta: 'Manage groups, incidents, and access',
+    createAccount: 'Create account',
+    createOne: 'Create one',
+    email: 'Email',
+    enterLogin: 'Enter your username or email and password.',
+    groups: 'Groups',
+    haveAccount: 'Have an account? Sign in',
+    language: 'Language',
+    languageSaved: 'Language updated.',
+    myReports: 'My reports',
+    needAccount: 'Need an account? ',
+    password: 'Password',
+    returnStart: 'Return to start',
+    settings: 'Settings',
+    signIn: 'Sign in',
+    signInContinue: 'Sign in to continue.',
+    signInTools: 'Sign in to your workplace tools.',
+    signOut: 'Sign out',
+    signedInAs: 'Signed in as {name}.',
+    toggleDarkMode: 'Toggle dark mode',
+    usernameOrEmail: 'Username or email',
+    userEmailNotFound: 'No account found for that username.',
+    workerApp: 'Worker app',
+    workerAppMeta: 'Checklists, reports, and documents',
+    yourDetails: 'Your details',
+  },
+  no: {
+    adminConsole: 'Administrasjon',
+    adminConsoleMeta: 'Administrer grupper, hendelser og tilgang',
+    createAccount: 'Opprett konto',
+    createOne: 'Opprett en',
+    email: 'E-post',
+    enterLogin: 'Skriv inn brukernavn eller e-post og passord.',
+    groups: 'Grupper',
+    haveAccount: 'Har du konto? Logg inn',
+    language: 'Språk',
+    languageSaved: 'Språk oppdatert.',
+    myReports: 'Mine rapporter',
+    needAccount: 'Trenger du konto? ',
+    password: 'Passord',
+    returnStart: 'Tilbake til start',
+    settings: 'Innstillinger',
+    signIn: 'Logg inn',
+    signInContinue: 'Logg inn for å fortsette.',
+    signInTools: 'Logg inn for å bruke verktøyene.',
+    signOut: 'Logg ut',
+    signedInAs: 'Logget inn som {name}.',
+    toggleDarkMode: 'Bytt mørk modus',
+    usernameOrEmail: 'Brukernavn eller e-post',
+    userEmailNotFound: 'Fant ingen konto med det brukernavnet.',
+    workerApp: 'Arbeiderapp',
+    workerAppMeta: 'Sjekklister, rapporter og dokumenter',
+    yourDetails: 'Dine detaljer',
+  },
+};
+
+export const languages = [
+  ['en', 'English'],
+  ['no', 'Norsk'],
+];
+
+export function initLanguage() {
+  const saved = localStorage.getItem(LANG_KEY);
+  const lang = TEXT[saved] ? saved : DEFAULT_LANG;
+  document.documentElement.lang = lang;
+  localStorage.setItem(LANG_KEY, lang);
+  return lang;
+}
+
+export function currentLanguage() {
+  return initLanguage();
+}
+
+export function setLanguage(lang) {
+  const next = TEXT[lang] ? lang : DEFAULT_LANG;
+  localStorage.setItem(LANG_KEY, next);
+  document.documentElement.lang = next;
+  return next;
+}
+
+export function t(key, vars = {}) {
+  const lang = currentLanguage();
+  const template = TEXT[lang]?.[key] || TEXT[DEFAULT_LANG][key] || key;
+  return Object.entries(vars).reduce((out, [name, value]) => out.replaceAll(`{${name}}`, value ?? ''), template);
+}
+
+export function languageSelect(onChange = null) {
+  const select = el('select', { class: 'language-select', title: t('language') },
+    languages.map(([code, label]) => el('option', { value: code }, label)));
+  select.value = currentLanguage();
+  select.addEventListener('change', () => {
+    setLanguage(select.value);
+    if (onChange) onChange(select.value);
+  });
+  return labeledSelect(t('language'), select);
+}
+
+function labeledSelect(label, select) {
+  return el('label', { class: 'field language-field' }, [el('span', {}, label), select]);
 }
 
 // Format an ISO timestamp as a short local string.
