@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <script>try{document.documentElement.dataset.theme=localStorage.getItem('theme')||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light')}catch(e){}</script>
   <title>Nicosoft HMS manager</title>
   <link rel="stylesheet" href="./styles.css">
   <style>
@@ -41,8 +42,9 @@
   <div id="screen"></div>
 
   <script type="module">
-  import { db, requireSession, currentProfile, el, $, fmt, toast, newAuthClient } from './config.js';
+  import { db, requireSession, currentProfile, el, $, fmt, toast, newAuthClient, initTheme, themeToggleButton } from './config.js';
 
+  initTheme();
   const screen = $('#screen');
   const state = { profile: null, groups: [], profiles: [] };
   const viewStack = [];                 // each entry: { title, render }
@@ -87,6 +89,7 @@
     const render = () => {
       card.innerHTML = '';
       card.append(
+        el('div', { class: 'card-actions' }, themeToggleButton()),
         el('div', { class: 'brand' }, 'Nicosoft HMS manager'),
         el('div', { class: 'tag' }, mode === 'login' ? 'Sign in to manage groups and incidents.' : 'Create an account, then ask an admin to grant access.'),
         ...(mode === 'login'
@@ -180,6 +183,7 @@
     const view = viewStack[viewStack.length - 1];
     const bar = $('#topbar'); bar.innerHTML = '';
     bar.append(el('button', { class: 'iconbtn', title: 'Return to start', onclick: goIndex }, '⌂'));
+    bar.append(themeToggleButton());
     if (viewStack.length > 1) bar.append(el('button', { class: 'iconbtn', onclick: back }, '‹'));
     bar.append(el('h1', {}, view.title));
     bar.append(el('span', { class: 'role-pill' }, state.profile.role === 'super_admin' ? 'super admin' : 'admin'));

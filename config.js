@@ -59,6 +59,28 @@ export function el(tag, props = {}, kids = []) {
 
 export const $ = (sel, root = document) => root.querySelector(sel);
 
+export function initTheme() {
+  const saved = localStorage.getItem('theme');
+  const prefersDark = window.matchMedia?.('(prefers-color-scheme: dark)')?.matches;
+  document.documentElement.dataset.theme = saved || (prefersDark ? 'dark' : 'light');
+}
+
+export function themeToggleButton() {
+  initTheme();
+  const btn = el('button', { class: 'iconbtn theme-toggle', title: 'Toggle dark mode', onclick: toggleTheme }, themeIcon());
+  function toggleTheme() {
+    const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+    document.documentElement.dataset.theme = next;
+    localStorage.setItem('theme', next);
+    btn.textContent = themeIcon();
+  }
+  return btn;
+}
+
+function themeIcon() {
+  return document.documentElement.dataset.theme === 'dark' ? '☀' : '◐';
+}
+
 // Format an ISO timestamp as a short local string.
 export function fmt(ts) {
   if (!ts) return '';
