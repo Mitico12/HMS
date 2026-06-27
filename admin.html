@@ -336,6 +336,7 @@
       title: t('logs'), tab: 'groups',
       async render(app) {
         await loadProfiles();
+        const isSuper = state.profile.role === 'super_admin';
         const archived = await fetchArchivedReports();
         const runsQ = await db.from('checklist_runs').select('*').not('submitted_at', 'is', null).order('submitted_at', { ascending: false });
         const runs = runsQ.error ? [] : (runsQ.data || []);
@@ -395,17 +396,32 @@
           for (const [k, group] of byType) {
             reportsHost.append(el('h3', { style: 'margin:14px 0 8px' }, `${typeLabel(k)} (${group.length})`));
             for (const i of group) {
-              reportsHost.append(el('div', { class: 'row', onclick: () => go(incidentView(i.id)), style: 'cursor:pointer' }, [
+              const cells = [
                 el('div', { class: 'grow' }, [
                   el('div', {}, truncate(i.what_happened, 70)),
                   el('div', { class: 'sub' }, `${reporterOf(i)} · ${fmt(i.created_at)}`),
                 ]),
                 el('span', { class: `pill ${incidentStatusClass(i)}`, style: incidentStatusStyle(i) }, statusLabel(i.status)),
-              ]));
+              ];
+              if (isSuper) cells.push(el('button', { class: 'btn btn-danger', title: t('deleteLog'),
+                onclick: e => { e.stopPropagation(); deleteReportLog(i); } }, '🗑'));
+              reportsHost.append(el('div', { class: 'row', onclick: () => go(incidentView(i.id)), style: 'cursor:pointer' }, cells));
             }
           }
         }
         drawReports();
+
+        async function deleteReportLog(i) {
+          if (!confirm('Delete this report log permanently? This cannot be undone.')) return;
+          if ((i.photo_paths || []).length) {
+            await db.storage.from('incident-photos').remove(i.photo_paths); // best effort
+          }
+          const { error } = await db.rpc('delete_report', { p_id: i.id });
+          if (error) return toast(error.message, 'err');
+          const idx = archived.findIndex(r => r.id === i.id);
+          if (idx > -1) archived.splice(idx, 1);
+          toast('Log deleted.'); drawReports();
+        }
 
         // ════════ CHECKLISTS ════════
         app.append(el('h2', { class: 'display', style: 'font-size:1.15rem;margin:24px 0 10px' }, t('checklistLogs')));
@@ -456,8 +472,12 @@
                   el('h3', {}, checklist?.title || t('checklist')),
                   el('div', { class: 'sub' }, `${nameOf(run.user_id)} - ${fmt(run.submitted_at || run.updated_at)}`),
                 ]),
-                el('span', { class: 'pill', style: needsReview ? 'background:#f2c94c;color:#17212b;border-color:#f2c94c' : '' },
-                  needsReview ? t('checklistLogNeedsAttention') : t('completed')),
+                el('div', { style: 'display:flex;gap:8px;align-items:center' }, [
+                  el('span', { class: 'pill', style: needsReview ? 'background:#f2c94c;color:#17212b;border-color:#f2c94c' : '' },
+                    needsReview ? t('checklistLogNeedsAttention') : t('completed')),
+                  isSuper ? el('button', { class: 'btn btn-danger', title: t('deleteLog'),
+                    onclick: () => deleteChecklistLog(run) }, '🗑') : null,
+                ]),
               ]),
               el('div', { class: 'sub' }, missing.length ? t('missingItems', { count: missing.length }) : t('completed')),
             ]);
@@ -470,6 +490,15 @@
           }
         }
         drawChecklists();
+
+        async function deleteChecklistLog(run) {
+          if (!confirm('Delete this checklist log permanently? This cannot be undone.')) return;
+          const { error } = await db.rpc('delete_checklist_run', { p_id: run.id });
+          if (error) return toast(error.message, 'err');
+          const idx = runs.findIndex(r => r.id === run.id);
+          if (idx > -1) runs.splice(idx, 1);
+          toast('Log deleted.'); drawChecklists();
+        }
       },
     };
   }
