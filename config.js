@@ -11,6 +11,18 @@ const SUPABASE_ANON_KEY = 'sb_publishable_BfCizLoxWkUk2L9sUXzv9w_M5TdA3uD';
 
 export const db = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
+// A throwaway auth client used by admins when creating accounts.
+// It prevents the admin's own browser session from being replaced by the new user session.
+export function newAuthClient() {
+  return createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+    auth: {
+      persistSession: false,
+      autoRefreshToken: false,
+      detectSessionInUrl: false,
+    },
+  });
+}
+
 // Return the signed-in user's profile (with role), or null.
 export async function currentProfile() {
   const { data: { user } } = await db.auth.getUser();
