@@ -610,11 +610,17 @@
             ]));
             continue;
           } else if (f.type === 'slider') {
-            const min = Number(f.min ?? 1), max = Number(f.max ?? 5), step = Number(f.step ?? 1);
-            answers[f.key] = min;
-            const valueOut = el('div', { style: 'font-weight:750;font-size:1.25rem;text-align:center;margin-bottom:4px' }, String(min));
+            const min = Number(f.min ?? 1), max = Number(f.max ?? 5);
+            const round = f.round === 'up' ? Math.ceil : Math.round;
+            const step = max > min ? (max - min) / 100 : 1; // fine step for smooth dragging
+            answers[f.key] = round(min);
+            const valueOut = el('div', { style: 'font-weight:750;font-size:1.25rem;text-align:center;margin-bottom:4px' }, String(round(min)));
             const range = el('input', { type: 'range', min, max, step, value: min,
-              oninput: e => { answers[f.key] = Number(e.target.value); valueOut.textContent = e.target.value; } });
+              oninput: e => {
+                const shown = round(Number(e.target.value));
+                answers[f.key] = shown;
+                valueOut.textContent = String(shown);
+              } });
             const ends = el('div', { style: 'display:flex;justify-content:space-between;font-size:.82rem;color:var(--steel);margin-top:2px' }, [
               el('span', {}, f.leftLabel || String(min)),
               el('span', {}, f.rightLabel || String(max)),

@@ -934,6 +934,7 @@
         const title = el('input', { type: 'text', value: existing?.title || '', placeholder: 'Procedure title' });
         const desc = el('textarea', { placeholder: 'Short description (optional)' }); desc.value = existing?.description || '';
         let fields = (existing?.fields || []).map(f => ({ ...f }));
+        let dragIdx = null;
         const list = el('div', {});
         const draw = () => {
           list.innerHTML = '';
@@ -943,18 +944,41 @@
             const typeSel = el('select', { onchange: e => { f.type = e.target.value; draw(); } },
               FIELD_TYPES.map(([v, key]) => opt(v, t(key))));
             typeSel.value = f.type;
-            const reqBox = el('label', { style: 'display:flex;align-items:center;gap:6px;font-size:.85rem' }, [
+            const reqBox = el('label', { class: 'req-toggle' }, [
               el('input', { type: 'checkbox', onchange: e => f.required = e.target.checked }),
               document.createTextNode(t('required')),
             ]);
             reqBox.querySelector('input').checked = !!f.required;
+            const handle = el('span', { class: 'drag-handle', draggable: 'true', title: t('dragReorder') }, '⠿');
             const card = el('div', { class: 'card' }, [
               el('div', { class: 'section-head' }, [
-                el('strong', {}, t('field', { n: idx + 1 })),
+                el('div', { style: 'display:flex;align-items:center;gap:8px;min-width:0' }, [
+                  handle, el('strong', {}, t('field', { n: idx + 1 })),
+                ]),
                 el('button', { class: 'btn btn-danger', onclick: () => { fields.splice(idx, 1); draw(); } }, '✕'),
               ]),
               labeled(t('label'), labelInp), labeled(t('type'), typeSel), reqBox,
             ]);
+
+            // Drag to reorder: only the handle starts a drag, so the inputs stay editable.
+            handle.addEventListener('dragstart', e => {
+              dragIdx = idx;
+              e.dataTransfer.effectAllowed = 'move';
+              e.dataTransfer.setData('text/plain', String(idx));
+              try { e.dataTransfer.setDragImage(card, 20, 20); } catch (_) {}
+              card.classList.add('dragging');
+            });
+            handle.addEventListener('dragend', () => { card.classList.remove('dragging'); dragIdx = null; });
+            card.addEventListener('dragover', e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; });
+            card.addEventListener('drop', e => {
+              e.preventDefault();
+              if (dragIdx === null || dragIdx === idx) return;
+              const [moved] = fields.splice(dragIdx, 1);
+              fields.splice(idx, 0, moved);
+              dragIdx = null;
+              draw();
+            });
+
             if (f.type === 'dropdown' || f.type === 'checkboxes') {
               const optsInp = el('input', { type: 'text', value: (f.options || []).join(', '),
                 placeholder: 'Option A, Option B, Option C',
@@ -964,13 +988,17 @@
             if (f.type === 'slider') {
               if (f.min == null) f.min = 1;
               if (f.max == null) f.max = 5;
-              if (f.step == null) f.step = 1;
+              if (f.round == null) f.round = 'nearest';
               const minInp = el('input', { type: 'number', value: f.min, oninput: e => f.min = Number(e.target.value) });
               const maxInp = el('input', { type: 'number', value: f.max, oninput: e => f.max = Number(e.target.value) });
               const leftInp = el('input', { type: 'text', value: f.leftLabel || '',
                 placeholder: 'e.g. Not at all', oninput: e => f.leftLabel = e.target.value });
               const rightInp = el('input', { type: 'text', value: f.rightLabel || '',
                 placeholder: 'e.g. Very much', oninput: e => f.rightLabel = e.target.value });
+              const roundSel = el('select', { onchange: e => f.round = e.target.value }, [
+                opt('nearest', t('roundNearest')), opt('up', t('roundUp')),
+              ]);
+              roundSel.value = f.round;
               card.append(
                 el('div', { style: 'display:flex;gap:10px' }, [
                   el('div', { style: 'flex:1' }, labeled(t('sliderMin'), minInp)),
@@ -978,6 +1006,7 @@
                 ]),
                 labeled(t('sliderLeft'), leftInp),
                 labeled(t('sliderRight'), rightInp),
+                labeled(t('sliderRound'), roundSel),
               );
             }
             list.append(card);
