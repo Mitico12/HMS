@@ -593,14 +593,52 @@
             input = el('input', { type: 'checkbox', onchange: e => answers[f.key] = e.target.checked });
             app.append(el('label', { class: 'check-item' }, [input, el('span', {}, f.label + (f.required ? ' *' : ''))]));
             continue;
+          } else if (f.type === 'checkboxes') {
+            const picked = [];
+            answers[f.key] = picked;
+            const group = el('div', {});
+            for (const o of (f.options || [])) {
+              const box = el('input', { type: 'checkbox', onchange: e => {
+                if (e.target.checked) { if (!picked.includes(o)) picked.push(o); }
+                else { const i = picked.indexOf(o); if (i > -1) picked.splice(i, 1); }
+              } });
+              group.append(el('label', { class: 'check-item' }, [box, el('span', {}, o)]));
+            }
+            app.append(el('div', { class: 'field' }, [
+              el('span', {}, [f.label, f.required ? el('span', { class: 'req' }, ' *') : null]),
+              group,
+            ]));
+            continue;
+          } else if (f.type === 'slider') {
+            const min = Number(f.min ?? 1), max = Number(f.max ?? 5), step = Number(f.step ?? 1);
+            answers[f.key] = min;
+            const valueOut = el('div', { style: 'font-weight:750;font-size:1.25rem;text-align:center;margin-bottom:4px' }, String(min));
+            const range = el('input', { type: 'range', min, max, step, value: min,
+              oninput: e => { answers[f.key] = Number(e.target.value); valueOut.textContent = e.target.value; } });
+            const ends = el('div', { style: 'display:flex;justify-content:space-between;font-size:.82rem;color:var(--steel);margin-top:2px' }, [
+              el('span', {}, f.leftLabel || String(min)),
+              el('span', {}, f.rightLabel || String(max)),
+            ]);
+            app.append(el('div', { class: 'field' }, [
+              el('span', {}, [f.label, f.required ? el('span', { class: 'req' }, ' *') : null]),
+              valueOut, range, ends,
+            ]));
+            continue;
           } else input = el('input', { type: 'text', oninput: e => answers[f.key] = e.target.value });
           app.append(labeled(f.label, input, f.required));
         }
         app.append(el('button', { class: 'btn btn-primary btn-block btn-lg', onclick: submit }, t('submit')));
         async function submit() {
-          for (const f of p.fields)
-            if (f.required && !answers[f.key] && f.type !== 'checkbox')
-              return toast(`"${f.label}" is required.`, 'err');
+          for (const f of p.fields) {
+            if (!f.required) continue;
+            if (f.type === 'checkbox' || f.type === 'slider') continue; // boolean / always-valued
+            if (f.type === 'checkboxes') {
+              if (!Array.isArray(answers[f.key]) || !answers[f.key].length)
+                return toast(`"${f.label}" is required.`, 'err');
+              continue;
+            }
+            if (!answers[f.key]) return toast(`"${f.label}" is required.`, 'err');
+          }
           const { error } = await db.from('procedure_submissions').insert({
             procedure_id: p.id, user_id: state.profile.id, answers });
           if (error) return toast(error.message, 'err');

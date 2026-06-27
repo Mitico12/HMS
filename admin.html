@@ -906,6 +906,7 @@
   const FIELD_TYPES = [
     ['short', 'selectTypeShort'], ['long', 'selectTypeLong'], ['number', 'selectTypeNumber'],
     ['dropdown', 'selectTypeDropdown'], ['checkbox', 'selectTypeCheckbox'],
+    ['checkboxes', 'selectTypeCheckboxes'], ['slider', 'selectTypeSlider'],
   ];
   function proceduresGroupView(g) {
     return {
@@ -954,11 +955,30 @@
               ]),
               labeled(t('label'), labelInp), labeled(t('type'), typeSel), reqBox,
             ]);
-            if (f.type === 'dropdown') {
+            if (f.type === 'dropdown' || f.type === 'checkboxes') {
               const optsInp = el('input', { type: 'text', value: (f.options || []).join(', '),
                 placeholder: 'Option A, Option B, Option C',
                 oninput: e => f.options = e.target.value.split(',').map(s => s.trim()).filter(Boolean) });
               card.append(labeled(t('optionsComma'), optsInp));
+            }
+            if (f.type === 'slider') {
+              if (f.min == null) f.min = 1;
+              if (f.max == null) f.max = 5;
+              if (f.step == null) f.step = 1;
+              const minInp = el('input', { type: 'number', value: f.min, oninput: e => f.min = Number(e.target.value) });
+              const maxInp = el('input', { type: 'number', value: f.max, oninput: e => f.max = Number(e.target.value) });
+              const leftInp = el('input', { type: 'text', value: f.leftLabel || '',
+                placeholder: 'e.g. Not at all', oninput: e => f.leftLabel = e.target.value });
+              const rightInp = el('input', { type: 'text', value: f.rightLabel || '',
+                placeholder: 'e.g. Very much', oninput: e => f.rightLabel = e.target.value });
+              card.append(
+                el('div', { style: 'display:flex;gap:10px' }, [
+                  el('div', { style: 'flex:1' }, labeled(t('sliderMin'), minInp)),
+                  el('div', { style: 'flex:1' }, labeled(t('sliderMax'), maxInp)),
+                ]),
+                labeled(t('sliderLeft'), leftInp),
+                labeled(t('sliderRight'), rightInp),
+              );
             }
             list.append(card);
           });
@@ -1009,7 +1029,8 @@
             const v = s.answers[f.key];
             card.append(el('div', { style: 'margin-bottom:6px' }, [
               el('span', { class: 'muted', style: 'font-size:.82rem' }, f.label + ': '),
-              el('span', {}, v === true ? 'Yes' : v === false ? 'No' : (v ?? '—')),
+              el('span', {}, v === true ? 'Yes' : v === false ? 'No'
+                : Array.isArray(v) ? (v.length ? v.join(', ') : '—') : (v ?? '—')),
             ]));
           }
           app.append(card);
