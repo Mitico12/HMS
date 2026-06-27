@@ -347,6 +347,71 @@ input[type="checkbox"], input[type="radio"] {
   overflow-wrap: anywhere;
 }
 
+.expected-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.checklist-issue-host {
+  display: grid;
+  gap: 8px;
+}
+
+.checklist-issue-host:empty {
+  display: none;
+}
+
+.inspection-alert,
+.inspection-action {
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: color-mix(in srgb, #d43c32 12%, var(--paper));
+  border: 1px solid color-mix(in srgb, #d43c32 34%, var(--line));
+}
+
+.inspection-row {
+  border-left-width: 6px;
+}
+
+.inspection-row.inspection-ok {
+  border-left-color: #2f9e5b;
+}
+
+.inspection-row.inspection-missing {
+  border-left-color: #f2c94c;
+}
+
+.inspection-row.inspection-bad {
+  border-left-color: #d43c32;
+}
+
+.inspection-ok .inspection-status-pill {
+  background: #2f9e5b;
+  border-color: #2f9e5b;
+  color: #fff;
+}
+
+.inspection-missing .inspection-status-pill {
+  background: #f2c94c;
+  border-color: #f2c94c;
+  color: #17212b;
+}
+
+.inspection-bad .inspection-status-pill {
+  background: #d43c32;
+  border-color: #d43c32;
+  color: #fff;
+}
+
+.print-fixed-boxes {
+  display: none;
+  align-items: center;
+  gap: 12px;
+  justify-content: flex-end;
+  font-weight: 700;
+}
+
 .btn-primary {
   border-color: var(--primary);
   background: var(--primary);
@@ -702,5 +767,65 @@ input[type="checkbox"], input[type="radio"] {
   .row {
     align-items: flex-start;
     flex-wrap: wrap;
+  }
+}
+
+@media print {
+  body {
+    padding: 0;
+    background: #fff;
+    color: #111;
+  }
+
+  .topbar,
+  .toast,
+  .print-hide,
+  .btn,
+  .iconbtn {
+    display: none !important;
+  }
+
+  .wrap {
+    width: 100%;
+    max-width: none;
+    margin: 0;
+    padding: 0;
+  }
+
+  .card,
+  .row {
+    box-shadow: none !important;
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  .checklist-answer-card {
+    position: relative;
+    padding-right: 190px;
+    border-color: #bbb;
+  }
+
+  .inspection-row.inspection-ok {
+    border-left-color: #2f9e5b !important;
+  }
+
+  .inspection-row.inspection-missing {
+    border-left-color: #f2c94c !important;
+  }
+
+  .inspection-row.inspection-bad {
+    border-left-color: #d43c32 !important;
+  }
+
+  .print-fixed-boxes {
+    display: flex;
+    position: absolute;
+    right: 14px;
+    top: 16px;
+  }
+
+  .print-fixed-boxes input {
+    width: 16px;
+    height: 16px;
   }
 }

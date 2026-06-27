@@ -247,10 +247,12 @@
       countRows(db.from('incidents').select('id', { count: 'exact', head: true })
         .eq('reporter_id', state.profile.id).gte('created_at', start).lt('created_at', end)),
     ]);
-    renderSortableKpiGrid(app, 'userKpiOrder', [
+    const cards = [
       { id: 'completed', label: t('checklistsCompletedInPeriod'), value: completed },
       { id: 'reports', label: t('reportsInPeriod'), value: reports },
-    ], { periodText, onCardClick: () => changeKpiPeriod(periodKey) });
+    ];
+    renderKpiToolbar(app, 'userKpiVisible', periodKey, cards, () => go(homeView(), { reset: true }));
+    renderSortableKpiGrid(app, 'userKpiOrder', visibleKpiCards(cards, 'userKpiVisible'), { periodText });
   }
 
   async function countRows(query) {
@@ -291,6 +293,58 @@
 
   function periodLabel(period) {
     return period.from === period.until ? period.from : `${period.from} - ${period.until}`;
+  }
+
+  function visibleKpiCards(cards, storageKey) {
+    const selected = localStorage.getItem(storageKey) || 'all';
+    return selected === 'all' ? cards : cards.filter(card => card.id === selected);
+  }
+
+  function renderKpiToolbar(host, filterKey, periodKey, cards, refreshHome) {
+    const period = kpiPeriod(periodKey);
+    const filter = el('select', { class: 'kpi-filter', onchange: e => {
+      localStorage.setItem(filterKey, e.target.value);
+      refreshHome();
+    } }, [
+      opt('all', t('showAllKpis')),
+      ...cards.map(card => opt(card.id, card.label)),
+    ]);
+    const selected = localStorage.getItem(filterKey) || 'all';
+    filter.value = cards.some(card => card.id === selected) ? selected : 'all';
+    const from = el('input', { type: 'date', value: period.from });
+    const until = el('input', { type: 'date', value: period.until });
+    const panel = el('div', { class: 'kpi-date-panel hidden' }, [
+      labeled(t('dateFrom'), from),
+      labeled(t('dateUntil'), until),
+      el('div', { class: 'kpi-date-actions' }, [
+        el('button', { class: 'btn btn-ghost', onclick: () => {
+          localStorage.removeItem(periodKey);
+          refreshHome();
+        } }, t('today')),
+        el('button', { class: 'btn btn-primary', onclick: () => saveKpiPeriod(periodKey, from.value, until.value, refreshHome) }, t('apply')),
+      ]),
+    ]);
+    const calendar = el('button', { class: 'iconbtn kpi-calendar-btn', title: t('dashboardPeriod'), onclick: () => {
+      panel.classList.toggle('hidden');
+    } }, '📅');
+    host.append(el('div', { class: 'kpi-control-wrap' }, [
+      el('div', { class: 'kpi-toolbar' }, [
+        el('div', { class: 'kpi-select-wrap' }, filter),
+        el('div', { class: 'kpi-period-chip' }, periodLabel(period)),
+        calendar,
+      ]),
+      panel,
+    ]));
+  }
+
+  function saveKpiPeriod(storageKey, from, until, refreshHome) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(from || '') || !/^\d{4}-\d{2}-\d{2}$/.test(until || '')) {
+      toast(t('invalidPeriod'), 'err');
+      return;
+    }
+    const ordered = from <= until ? { from, until } : { from: until, until: from };
+    localStorage.setItem(storageKey, JSON.stringify(ordered));
+    refreshHome();
   }
 
   function changeKpiPeriod(storageKey) {
@@ -407,6 +461,7 @@
           const type = it.type || 'check';
           const current = checked[it.id]?.value ?? '';
           const card = el('div', { class: 'card checklist-run-card' });
+          const issueHost = el('div', { class: 'checklist-issue-host' });
           if (it.image) card.append(el('img', { src: it.image, alt: it.label, class: 'checklist-item-image' }));
           if (type === 'check') {
             const box = el('input', { type: 'checkbox' });
@@ -417,23 +472,27 @@
               const current = checked[it.id] || {};
               checked = { ...checked,
                 [it.id]: { ...current, done: box.checked, value: box.checked, at: box.checked ? new Date().toISOString() : null } };
+              markChecklistIssue(it);
               item.classList.toggle('done', box.checked);
               drawProgress();
+              drawCorrectiveAction(it, issueHost);
             });
             card.append(item);
           } else if (type === 'choice') {
-            const select = el('select', { onchange: e => setChecklistAnswer(it, e.target.value) },
+            const select = el('select', { onchange: e => { setChecklistAnswer(it, e.target.value); drawCorrectiveAction(it, issueHost); } },
               [opt('', `- ${t('choose')} -`), ...(it.options || []).map(o => opt(o, o))]);
             select.value = current;
             card.append(labeled(it.label, select));
           } else if (type === 'number') {
-            const input = el('input', { type: 'number', value: current, oninput: e => setChecklistAnswer(it, e.target.value) });
+            const input = el('input', { type: 'number', value: current, oninput: e => { setChecklistAnswer(it, e.target.value); drawCorrectiveAction(it, issueHost); } });
             card.append(labeled(it.label, input));
           } else {
-            const input = el('textarea', { oninput: e => setChecklistAnswer(it, e.target.value) });
+            const input = el('textarea', { oninput: e => { setChecklistAnswer(it, e.target.value); drawCorrectiveAction(it, issueHost); } });
             input.value = current;
             card.append(labeled(it.label, input));
           }
+          drawCorrectiveAction(it, issueHost);
+          card.append(issueHost);
           const photoHost = el('div', { class: 'checklist-answer-photo' });
           drawChecklistAnswerPhoto(it, photoHost);
           const photoInput = el('input', { type: 'file', accept: 'image/*', onchange: async e => {
@@ -451,6 +510,9 @@
         );
 
         async function submitChecklist() {
+          for (const item of items) markChecklistIssue(item);
+          const missingActions = items.filter(i => checked[i.id]?.needs_fix && !(checked[i.id]?.corrective_action || '').trim());
+          if (missingActions.length) return toast(t('correctiveActionRequired'), 'err');
           const completed = items.every(i => checked[i.id]?.done);
           const payload = {
             checklist_id: c.id,
@@ -473,7 +535,66 @@
           const current = checked[item.id] || {};
           checked = { ...checked,
             [item.id]: { ...current, done, value, at: done ? new Date().toISOString() : null } };
+          markChecklistIssue(item);
           drawProgress();
+        }
+
+        function setCorrectiveAction(item, value) {
+          const current = checked[item.id] || { done: false, value: '' };
+          checked = { ...checked,
+            [item.id]: { ...current, corrective_action: value } };
+        }
+
+        function markChecklistIssue(item) {
+          const current = checked[item.id] || {};
+          const needsFix = answerNeedsFix(item, current);
+          const next = { ...current, needs_fix: needsFix };
+          if (!needsFix) {
+            delete next.corrective_action;
+            delete next.issue_reason;
+          } else {
+            next.issue_reason = t('outsideExpected');
+          }
+          checked = { ...checked, [item.id]: next };
+        }
+
+        function drawCorrectiveAction(item, host) {
+          host.innerHTML = '';
+          const answer = checked[item.id] || {};
+          if (!answerNeedsFix(item, answer)) return;
+          const action = el('textarea', {
+            placeholder: t('correctiveActionPlaceholder'),
+            oninput: e => setCorrectiveAction(item, e.target.value),
+          });
+          action.value = answer.corrective_action || '';
+          host.append(
+            el('div', { class: 'inspection-alert' }, t('outsideExpected')),
+            labeled(t('whatMustBeDone'), action, true),
+          );
+        }
+
+        function answerNeedsFix(item, answer) {
+          const value = answer.value;
+          if (value == null || value === '') return false;
+          if (item.type === 'choice' && item.fixOnNo && isNoAnswer(value)) return true;
+          const rule = item.expected || null;
+          if (!rule) return false;
+          if (item.type === 'number') {
+            const n = Number(value);
+            if (Number.isNaN(n)) return false;
+            if (rule.min != null && n < Number(rule.min)) return true;
+            if (rule.max != null && n > Number(rule.max)) return true;
+            return false;
+          }
+          if (Array.isArray(rule.values) && rule.values.length) {
+            const allowed = rule.values.map(v => String(v).trim().toLowerCase());
+            return !allowed.includes(String(value).trim().toLowerCase());
+          }
+          return false;
+        }
+
+        function isNoAnswer(value) {
+          return ['no', 'nei'].includes(String(value).trim().toLowerCase());
         }
 
         function setChecklistPhoto(item, photo) {
