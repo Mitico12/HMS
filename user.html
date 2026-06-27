@@ -204,11 +204,9 @@
     return {
       title: c.title, tab: 'groups',
       async render(app) {
-        let { data: run } = await db.from('checklist_runs').select('*')
-          .eq('checklist_id', c.id).eq('user_id', state.profile.id).maybeSingle();
-        let checked = run?.checked || {};
+        // Always start fresh — a checklist is a repeatable form, not a saved state.
+        let checked = {};
         const notes = el('textarea', { placeholder: t('checklistNotesPlaceholder') });
-        notes.value = run?.notes || '';
 
         const items = c.items || [];
         const progress = el('div', { class: 'muted', style: 'margin-bottom:14px' });
@@ -248,9 +246,9 @@
             submitted_at: new Date().toISOString(),
             updated_at: new Date().toISOString(),
           };
-          const { error } = await db.from('checklist_runs')
-            .upsert(payload, { onConflict: 'checklist_id,user_id' });
-          if (error) return toast(error.message + ' - run the checklist/photo SQL migration first.', 'err');
+          // Insert a new row per submission so each run is its own log entry.
+          const { error } = await db.from('checklist_runs').insert(payload);
+          if (error) return toast(error.message + ' - run the checklist SQL migrations first.', 'err');
           toast(t('checklistComplete'));
           back();
         }
