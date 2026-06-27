@@ -365,9 +365,22 @@ input:focus, select:focus, textarea:focus {
 }
 
 .pill.pending { background: color-mix(in srgb, #d7a63f 24%, transparent); }
-.pill.approved, .pill.resolved { background: color-mix(in srgb, var(--ok) 24%, transparent); }
-.pill.rejected, .pill.open { background: color-mix(in srgb, var(--danger) 18%, transparent); }
-.pill.in_progress { background: color-mix(in srgb, var(--primary) 20%, transparent); }
+.pill.approved, .pill.resolved {
+  background: color-mix(in srgb, #2f9e5b 24%, transparent);
+  color: var(--ink);
+}
+.pill.open {
+  background: color-mix(in srgb, #e2b93b 30%, transparent);
+  color: var(--ink);
+}
+.pill.in_progress {
+  background: color-mix(in srgb, #3f7fdb 26%, transparent);
+  color: var(--ink);
+}
+.pill.rejected, .pill.open-consequence {
+  background: color-mix(in srgb, #d43c32 24%, transparent);
+  color: var(--ink);
+}
 
 .chip {
   margin: 0 8px 8px 0;
