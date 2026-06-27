@@ -5,12 +5,40 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Ops Admin</title>
   <link rel="stylesheet" href="./styles.css">
+  <style>
+    /* Users page polish. Keeps the old global styles, but fixes the stretched controls shown in the screenshot. */
+    .user-stack { display: grid; gap: 12px; }
+    .user-card { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 14px; align-items: center; padding: 16px 18px; background: var(--paper, #fffaf0); border: 1px solid rgba(26, 47, 54, .12); border-radius: 18px; box-shadow: 0 1px 2px rgba(0,0,0,.04); cursor: pointer; }
+    .user-card:hover { transform: translateY(-1px); box-shadow: 0 5px 16px rgba(0,0,0,.07); }
+    .user-main { min-width: 0; }
+    .user-name { font-weight: 700; color: var(--ink, #102a32); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .user-meta { color: var(--steel, #6b7780); font-size: .86rem; margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .user-actions { display: flex; gap: 8px; align-items: center; justify-content: flex-end; flex-wrap: wrap; }
+    .user-actions select { width: auto; min-width: 140px; max-width: 190px; }
+    .user-actions .btn { white-space: nowrap; }
+    .users-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 22px 0 12px; }
+    .users-head:first-child { margin-top: 0; }
+    .detail-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    .kv { padding: 12px; border: 1px solid rgba(26, 47, 54, .10); border-radius: 14px; background: rgba(255,255,255,.45); }
+    .kv .k { color: var(--steel, #6b7780); font-size: .78rem; text-transform: uppercase; letter-spacing: .04em; }
+    .kv .v { font-weight: 650; margin-top: 3px; overflow-wrap: anywhere; }
+    .change-lines { display: grid; gap: 6px; margin-top: 8px; }
+    .change-line { font-size: .92rem; }
+    .change-line strong { display: inline-block; min-width: 88px; }
+    .email-log-item { border-left: 3px solid rgba(26,47,54,.18); padding: 8px 0 8px 12px; margin: 6px 0; }
+    @media (max-width: 720px) {
+      .user-card { grid-template-columns: 1fr; }
+      .user-actions { justify-content: flex-start; }
+      .user-actions select { width: 100%; max-width: none; }
+      .detail-grid { grid-template-columns: 1fr; }
+    }
+  </style>
 </head>
 <body>
   <div id="screen"></div>
 
   <script type="module">
-  import { db, requireSession, currentProfile, el, $, fmt, toast } from './config.js';
+  import { db, requireSession, currentProfile, el, $, fmt, toast, newAuthClient } from './config.js';
 
   const screen = $('#screen');
   const state = { profile: null, groups: [], profiles: [] };
@@ -28,11 +56,23 @@
   })();
 
   async function loadProfiles() {
-    const { data } = await db.from('profiles').select('id, full_name, email, role, is_verified').order('full_name');
-    state.profiles = data || [];
+    const withUsername = await db.from('profiles')
+      .select('id, full_name, username, email, role, is_verified')
+      .order('full_name');
+    if (withUsername.error) {
+      // Older databases may not have the username column yet. The SQL patch below adds it.
+      const fallback = await db.from('profiles')
+        .select('id, full_name, email, role, is_verified')
+        .order('full_name');
+      if (fallback.error) { toast(fallback.error.message, 'err'); state.profiles = []; return; }
+      state.profiles = (fallback.data || []).map(p => ({ ...p, username: '' }));
+      return;
+    }
+    state.profiles = withUsername.data || [];
   }
   const nameOf = (id) => state.profiles.find(p => p.id === id)?.full_name || '—';
   const emailOf = (id) => state.profiles.find(p => p.id === id)?.email || '';
+  const labelOf = (p) => p?.full_name || p?.username || p?.email || 'Unnamed user';
   // Reporter identity for the UI, hidden when the report is anonymous.
   const reporterOf = (inc) => inc.is_anonymous ? 'Anonymous' : (emailOf(inc.reporter_id) || nameOf(inc.reporter_id));
 
@@ -163,14 +203,16 @@
         const { data } = await db.from('groups').select('*').order('sort_order');
         state.groups = data || [];
         await loadProfiles();
-        const pending = state.profiles.filter(p => p.role === 'user' && !p.is_verified).length;
+        const pendingAccounts = state.profiles.filter(p => p.role === 'user' && !p.is_verified).length;
+        const pendingChanges = await pendingProfileChangeCount();
+        const pending = pendingAccounts + pendingChanges;
         const grid = el('div', { class: 'tile-grid' });
 
-        // fixed admin-only tile: account verifications
-        grid.append(el('button', { class: 'tile', onclick: () => go(verificationsView()) }, [
-          el('span', { class: 'glyph' }, '🛡️'),
+        // fixed admin-only tile: users and access
+        grid.append(el('button', { class: 'tile', onclick: () => go(usersView()) }, [
+          el('span', { class: 'glyph' }, '👥'),
           el('div', {}, [
-            el('div', { class: 't-name' }, 'Verifications'),
+            el('div', { class: 't-name' }, 'Users'),
             el('div', { class: 't-meta' }, pending ? `${pending} waiting for approval` : 'Accounts & access'),
           ]),
         ]));
@@ -642,9 +684,63 @@
     return {
       title: 'Settings', tab: 'settings',
       async render(app) {
-        app.append(el('div', { class: 'row', onclick: () => go(verificationsView()), style: 'cursor:pointer' }, [
-          el('div', { class: 'grow' }, [el('div', {}, 'Verifications'),
-            el('div', { class: 'sub' }, 'Approve accounts and grant admin access')]),
+        await loadProfiles();
+        const fresh = await db.from('profiles').select('*').eq('id', state.profile.id).single();
+        if (!fresh.error && fresh.data) state.profile = { ...state.profile, ...fresh.data };
+        const p = state.profile;
+        const requests = await loadProfileChangeRequests(p.id, false);
+        const hasPending = requests.some(r => r.status === 'pending');
+        const fullName = el('input', { type: 'text', autocomplete: 'name' }); fullName.value = p.full_name || '';
+        const username = el('input', { type: 'text', autocomplete: 'username' }); username.value = p.username || '';
+        const email = el('input', { type: 'email', autocomplete: 'email' }); email.value = p.email || '';
+
+        app.append(el('div', { class: 'card' }, [
+          el('h3', {}, 'Your details'),
+          el('div', { class: 'detail-grid' }, [
+            kv('Name', p.full_name || '—'),
+            kv('Username', p.username ? `@${p.username}` : '—'),
+            kv('Email', p.email || '—'),
+            kv('Access', roleName(p.role)),
+          ]),
+          el('hr', { class: 'soft' }),
+          labeled('Name', fullName),
+          labeled('Username', username),
+          labeled('Email', email),
+          hasPending ? el('p', { class: 'muted' }, 'You already have a pending profile change.') : null,
+          el('button', { class: 'btn btn-primary btn-block', disabled: hasPending ? 'disabled' : null, onclick: async () => {
+            const next = { full_name: fullName.value.trim(), username: username.value.trim(), email: email.value.trim() };
+            if (!next.username || !next.email) return toast('Username and email are required.', 'err');
+            const unchanged = (p.full_name || '') === next.full_name && (p.username || '') === next.username && (p.email || '') === next.email;
+            if (unchanged) return toast('Nothing changed.', 'err');
+            if ((p.username || '') !== next.username) {
+              const { data: free, error: freeErr } = await db.rpc('username_available', { p_username: next.username });
+              if (!freeErr && free === false) return toast('That username is taken.', 'err');
+            }
+            const rpc = await db.rpc('request_profile_change', { p_full_name: next.full_name || null, p_username: next.username, p_email: next.email });
+            if (rpc.error && !missingOptionalRpc(rpc.error)) return toast(rpc.error.message, 'err');
+            if (rpc.error) {
+              const { error } = await db.from('profile_change_requests').insert({
+                user_id: p.id,
+                current_full_name: p.full_name || null, requested_full_name: next.full_name || null,
+                current_username: p.username || null, requested_username: next.username,
+                current_email: p.email || null, requested_email: next.email,
+                status: 'pending',
+              });
+              if (error) return toast(error.message + ' — run the SQL patch first.', 'err');
+            }
+            toast('Change request sent.'); refresh();
+          } }, 'Request change'),
+          el('p', { class: 'muted', style: 'font-size:.82rem' }, 'Changes are sent to admins for approval, like account verification.'),
+        ]));
+
+        if (requests.length) app.append(el('div', { class: 'card' }, [
+          el('h3', {}, 'Your change requests'),
+          ...requests.map(r => changeRequestCard(r, { embedded: true, readOnly: r.status !== 'pending' })),
+        ]));
+
+        app.append(el('div', { class: 'row', onclick: () => go(usersView()), style: 'cursor:pointer' }, [
+          el('div', { class: 'grow' }, [el('div', {}, 'Users'),
+            el('div', { class: 'sub' }, 'Approve accounts, profile changes, and access')]),
           el('span', { class: 'muted' }, '›'),
         ]));
         app.append(el('div', { class: 'row', onclick: () => go(categoriesView()), style: 'cursor:pointer' }, [
@@ -657,78 +753,322 @@
   }
 
   // ════════════════════════════════════════════════════════
-  //  VERIFICATIONS — approve accounts, grant admin
+  //  USERS — approve accounts, profile changes, roles, and email history
   // ════════════════════════════════════════════════════════
-  function verificationsView() {
+  function missingOptionalTable(error) {
+    if (!error) return false;
+    return ['42P01', 'PGRST116'].includes(error.code) || /does not exist|schema cache|Could not find/i.test(error.message || '');
+  }
+  function missingOptionalRpc(error) {
+    if (!error) return false;
+    return ['42883', 'PGRST202'].includes(error.code) || /function|schema cache|not found/i.test(error.message || '');
+  }
+  async function pendingProfileChangeCount() {
+    const { count, error } = await db.from('profile_change_requests')
+      .select('id', { count: 'exact', head: true })
+      .eq('status', 'pending');
+    return error ? 0 : (count || 0);
+  }
+  async function loadProfileChangeRequests(userId = null, onlyPending = false) {
+    let q = db.from('profile_change_requests').select('*').order('requested_at', { ascending: false });
+    if (userId) q = q.eq('user_id', userId);
+    if (onlyPending) q = q.eq('status', 'pending');
+    const { data, error } = await q;
+    if (error) {
+      if (!missingOptionalTable(error)) toast(error.message, 'err');
+      return [];
+    }
+    return data || [];
+  }
+  async function loadEmailLog(userId) {
+    const { data, error } = await db.from('profile_email_log')
+      .select('*')
+      .eq('user_id', userId)
+      .order('changed_at', { ascending: false });
+    if (error) {
+      if (!missingOptionalTable(error)) toast(error.message, 'err');
+      return [];
+    }
+    return data || [];
+  }
+
+  function usersView() {
     return {
-      title: 'Verifications', tab: 'groups',
+      title: 'Users', tab: 'groups',
+      action: el('button', { class: 'iconbtn', title: 'Add user', onclick: addUserModal }, '+'),
       async render(app) {
         await loadProfiles();
-        const me = state.profile;
-        const iAmSuper = me.role === 'super_admin';
-        const pending = state.profiles.filter(p => p.role === 'user' && !p.is_verified);
+        const pendingAccounts = state.profiles.filter(p => p.role === 'user' && !p.is_verified);
+        const pendingChanges = await loadProfileChangeRequests(null, true);
         const settled = state.profiles.filter(p => !(p.role === 'user' && !p.is_verified));
 
-        const label = (p) => p.full_name || p.email;
-        const roleName = (r) => ({ user: 'User', admin: 'Admin', super_admin: 'Super admin' }[r] || r);
+        app.append(el('div', { class: 'users-head' }, [
+          el('h2', { class: 'display', style: 'font-size:1.15rem;margin:0' },
+            (pendingAccounts.length + pendingChanges.length)
+              ? `Waiting for approval (${pendingAccounts.length + pendingChanges.length})`
+              : 'Waiting for approval'),
+          el('button', { class: 'btn btn-ghost', onclick: addUserModal }, '+ Add user'),
+        ]));
 
-        const personRow = (p) => {
-          const controls = [];
+        if (!pendingAccounts.length && !pendingChanges.length) {
+          app.append(el('p', { class: 'muted', style: 'margin-bottom:8px' }, 'No accounts or profile changes waiting.'));
+        }
+        const pendingHost = el('div', { class: 'user-stack' });
+        for (const p of pendingAccounts) pendingHost.append(userCard(p));
+        for (const r of pendingChanges) pendingHost.append(changeRequestCard(r, { compact: true }));
+        app.append(pendingHost);
 
-          // role control
-          if (p.id === me.id) {
-            controls.push(el('span', { class: 'pill', style: 'background:#e6e3da' }, 'you'));
-          } else if (iAmSuper) {
-            const sel = el('select', { onchange: async e => {
-              const { error } = await db.rpc('set_role', { target: p.id, new_role: e.target.value });
-              if (error) return toast(error.message, 'err');
-              toast(`${label(p)} → ${roleName(e.target.value)}.`); refresh();
-            } }, [opt('user', 'User'), opt('admin', 'Admin'), opt('super_admin', 'Super admin')]);
-            sel.value = p.role;
-            controls.push(sel);
-          } else if (p.role === 'user') {
-            controls.push(el('button', { class: 'btn btn-ghost', onclick: async () => {
-              const { error } = await db.rpc('set_role', { target: p.id, new_role: 'admin' });
-              if (error) return toast(error.message, 'err');
-              toast(`${label(p)} is now an admin.`); refresh();
-            } }, 'Make admin'));
-          } else {
-            controls.push(el('span', { class: 'muted', style: 'font-size:.85rem' }, roleName(p.role)));
-          }
+        app.append(el('div', { class: 'users-head' }, [
+          el('h2', { class: 'display', style: 'font-size:1.15rem;margin:0' }, 'All users'),
+          el('span', { class: 'muted' }, `${state.profiles.length} total`),
+        ]));
+        const list = el('div', { class: 'user-stack' });
+        for (const p of settled) list.append(userCard(p));
+        app.append(list);
 
-          // approve / revoke — only for regular-user accounts
-          if (p.role === 'user') {
-            controls.push(el('button', {
-              class: 'btn ' + (p.is_verified ? 'btn-danger' : 'btn-primary'),
-              onclick: async () => {
-                const { error } = await db.rpc('set_verification', { target: p.id, verified: !p.is_verified });
-                if (error) return toast(error.message, 'err');
-                toast(p.is_verified ? 'Access revoked.' : 'Account approved.'); refresh();
-              } }, p.is_verified ? 'Revoke' : 'Approve'));
-          }
-
-          const tag = p.role !== 'user' ? ` · ${roleName(p.role).toLowerCase()}`
-                    : p.is_verified ? ' · approved' : ' · awaiting approval';
-          return el('div', { class: 'row' }, [
-            el('div', { class: 'grow' }, [el('div', {}, label(p)),
-              el('div', { class: 'sub' }, p.email + tag)]),
-            ...controls,
-          ]);
-        };
-
-        app.append(el('h2', { class: 'display', style: 'font-size:1.15rem;margin:0 0 12px' },
-          pending.length ? `Waiting for approval (${pending.length})` : 'Waiting for approval'));
-        if (!pending.length) app.append(el('p', { class: 'muted', style: 'margin-bottom:8px' }, 'No accounts waiting.'));
-        for (const p of pending) app.append(personRow(p));
-
-        app.append(el('h2', { class: 'display', style: 'font-size:1.15rem;margin:24px 0 12px' }, 'All accounts'));
-        for (const p of settled) app.append(personRow(p));
-
-        if (!iAmSuper) app.append(el('p', { class: 'muted', style: 'font-size:.8rem;margin-top:16px' },
-          'Only super admins can change or remove admin access.'));
+        if (!pendingChanges.length) app.append(el('p', { class: 'muted', style: 'font-size:.8rem;margin-top:16px' },
+          'Profile change approvals need the SQL patch included with this update.'));
       },
     };
   }
+
+  function userCard(p) {
+    const meta = [
+      p.email || 'No email',
+      p.username ? `@${p.username}` : null,
+      roleName(p.role).toLowerCase(),
+      p.role === 'user' ? (p.is_verified ? 'approved' : 'awaiting approval') : null,
+    ].filter(Boolean).join(' · ');
+    return el('div', { class: 'user-card', onclick: () => go(userDetailView(p.id)) }, [
+      el('div', { class: 'user-main' }, [
+        el('div', { class: 'user-name' }, labelOf(p)),
+        el('div', { class: 'user-meta' }, meta),
+      ]),
+      el('div', { class: 'user-actions' }, accessControls(p)),
+    ]);
+  }
+
+  function roleName(r) { return ({ user: 'User', admin: 'Admin', super_admin: 'Super admin' }[r] || r); }
+
+  function accessControls(p) {
+    const me = state.profile;
+    const iAmSuper = me.role === 'super_admin';
+    const controls = [];
+    if (p.id === me.id) {
+      controls.push(el('span', { class: 'pill', style: 'background:#e6e3da' }, 'you'));
+      return controls;
+    }
+
+    if (iAmSuper) {
+      const sel = el('select', { onclick: e => e.stopPropagation(), onchange: e => setProfileRole(p, e.target.value) },
+        [opt('user', 'User'), opt('admin', 'Admin'), opt('super_admin', 'Super admin')]);
+      sel.value = p.role;
+      controls.push(sel);
+    } else if (p.role === 'user') {
+      controls.push(el('button', { class: 'btn btn-ghost', onclick: e => { e.stopPropagation(); setProfileRole(p, 'admin'); } }, 'Make admin'));
+    } else {
+      controls.push(el('span', { class: 'muted', style: 'font-size:.85rem' }, roleName(p.role)));
+    }
+
+    if (p.role === 'user') {
+      controls.push(el('button', {
+        class: 'btn ' + (p.is_verified ? 'btn-danger' : 'btn-primary'),
+        onclick: e => { e.stopPropagation(); setProfileVerification(p, !p.is_verified); },
+      }, p.is_verified ? 'Revoke' : 'Approve'));
+    }
+    return controls;
+  }
+
+  async function setProfileRole(p, newRole) {
+    const { error } = await db.rpc('set_role', { target: p.id, new_role: newRole });
+    if (error) return toast(error.message, 'err');
+    toast(`${labelOf(p)} → ${roleName(newRole)}.`);
+    await loadProfiles(); refresh();
+  }
+  async function setProfileVerification(p, verified) {
+    const { error } = await db.rpc('set_verification', { target: p.id, verified });
+    if (error) return toast(error.message, 'err');
+    toast(verified ? 'Account approved.' : 'Access revoked.');
+    await loadProfiles(); refresh();
+  }
+
+  function userDetailView(id) {
+    return {
+      title: 'User', tab: 'groups',
+      async render(app) {
+        await loadProfiles();
+        const p = state.profiles.find(x => x.id === id);
+        if (!p) return app.append(emptyState('User not found', 'The account may have been removed.'));
+        const pending = await loadProfileChangeRequests(id, true);
+        const allRequests = await loadProfileChangeRequests(id, false);
+        const logs = await loadEmailLog(id);
+
+        app.append(el('div', { class: 'card' }, [
+          el('div', { class: 'section-head' }, [el('h3', {}, labelOf(p)), ...accessControls(p)]),
+          el('div', { class: 'detail-grid' }, [
+            kv('Name', p.full_name || '—'),
+            kv('Username', p.username ? `@${p.username}` : '—'),
+            kv('Email', p.email || '—'),
+            kv('Access', `${roleName(p.role)}${p.role === 'user' ? (p.is_verified ? ' · approved' : ' · awaiting approval') : ''}`),
+          ]),
+        ]));
+
+        app.append(el('div', { class: 'card' }, [
+          el('h3', {}, 'Pending profile changes'),
+          pending.length ? null : el('p', { class: 'muted' }, 'No pending changes.'),
+          ...pending.map(r => changeRequestCard(r, { embedded: true })),
+        ]));
+
+        app.append(el('div', { class: 'card' }, [
+          el('h3', {}, 'Previous emails'),
+          logs.length ? null : el('p', { class: 'muted' }, 'No previous email changes recorded.'),
+          ...logs.map(l => el('div', { class: 'email-log-item' }, [
+            el('div', {}, `${l.old_email || '—'} → ${l.new_email || '—'}`),
+            el('div', { class: 'sub' }, `${fmt(l.changed_at)}${l.source ? ` · ${l.source}` : ''}`),
+          ])),
+        ]));
+
+        const past = allRequests.filter(r => r.status !== 'pending').slice(0, 8);
+        if (past.length) app.append(el('div', { class: 'card' }, [
+          el('h3', {}, 'Change request history'),
+          ...past.map(r => changeRequestCard(r, { embedded: true, readOnly: true })),
+        ]));
+      },
+    };
+  }
+
+  function kv(k, v) {
+    return el('div', { class: 'kv' }, [el('div', { class: 'k' }, k), el('div', { class: 'v' }, v)]);
+  }
+
+  function changeRequestCard(r, { compact = false, embedded = false, readOnly = false } = {}) {
+    const user = state.profiles.find(p => p.id === r.user_id);
+    const lines = profileChangeLines(r);
+    const actions = [];
+    if (r.status === 'pending' && !readOnly) {
+      actions.push(el('button', { class: 'btn btn-primary', onclick: e => { e.stopPropagation(); approveProfileChange(r); } }, 'Approve'));
+      actions.push(el('button', { class: 'btn btn-danger', onclick: e => { e.stopPropagation(); rejectProfileChange(r); } }, 'Reject'));
+    } else {
+      actions.push(el('span', { class: `pill ${r.status || ''}` }, r.status || 'pending'));
+    }
+    const body = [
+      el('div', { class: 'user-main' }, [
+        el('div', { class: 'user-name' }, compact ? `Profile change · ${labelOf(user)}` : 'Profile change request'),
+        el('div', { class: 'user-meta' }, `${labelOf(user)} · ${fmt(r.requested_at)}`),
+        el('div', { class: 'change-lines' }, lines.length ? lines : [el('span', { class: 'muted' }, 'No visible changes')]),
+      ]),
+      el('div', { class: 'user-actions' }, actions),
+    ];
+    return el('div', {
+      class: embedded ? 'row' : 'user-card',
+      onclick: embedded ? null : () => go(userDetailView(r.user_id)),
+      style: embedded ? 'align-items:flex-start' : null,
+    }, body);
+  }
+
+  function profileChangeLines(r) {
+    const pairs = [
+      ['Name', r.current_full_name, r.requested_full_name],
+      ['Username', r.current_username, r.requested_username],
+      ['Email', r.current_email, r.requested_email],
+    ];
+    return pairs
+      .filter(([, a, b]) => (a || '') !== (b || ''))
+      .map(([label, a, b]) => el('div', { class: 'change-line' }, [
+        el('strong', {}, label),
+        document.createTextNode(`${a || '—'} → ${b || '—'}`),
+      ]));
+  }
+
+  async function approveProfileChange(r) {
+    const rpc = await db.rpc('approve_profile_change_request', { p_request: r.id });
+    if (rpc.error && !missingOptionalRpc(rpc.error)) return toast(rpc.error.message, 'err');
+    if (rpc.error) {
+      const patch = {};
+      if ((r.current_full_name || '') !== (r.requested_full_name || '')) patch.full_name = r.requested_full_name || null;
+      if ((r.current_username || '') !== (r.requested_username || '')) patch.username = r.requested_username || null;
+      if ((r.current_email || '') !== (r.requested_email || '')) patch.email = r.requested_email || null;
+      const { error: upErr } = await db.from('profiles').update(patch).eq('id', r.user_id);
+      if (upErr) return toast(upErr.message + ' — run the SQL patch if this table/function is missing.', 'err');
+      if (patch.email) await db.from('profile_email_log').insert({
+        user_id: r.user_id, old_email: r.current_email, new_email: r.requested_email,
+        changed_by: state.profile.id, source: 'admin approval', request_id: r.id,
+      });
+      await db.from('profile_change_requests').update({
+        status: 'approved', reviewed_by: state.profile.id, reviewed_at: new Date().toISOString(),
+      }).eq('id', r.id);
+    }
+    toast('Profile change approved.');
+    await loadProfiles(); refresh();
+  }
+  async function rejectProfileChange(r) {
+    const note = prompt('Reason for rejection (optional):') || '';
+    const rpc = await db.rpc('reject_profile_change_request', { p_request: r.id, p_note: note });
+    if (rpc.error && !missingOptionalRpc(rpc.error)) return toast(rpc.error.message, 'err');
+    if (rpc.error) {
+      const { error } = await db.from('profile_change_requests').update({
+        status: 'rejected', reviewed_by: state.profile.id, reviewed_at: new Date().toISOString(), admin_note: note || null,
+      }).eq('id', r.id);
+      if (error) return toast(error.message + ' — run the SQL patch if this table/function is missing.', 'err');
+    }
+    toast('Profile change rejected.'); refresh();
+  }
+
+  function addUserModal() {
+    openModal('Add user', (body, close) => {
+      const email = el('input', { type: 'email', autocomplete: 'off', placeholder: 'name@example.com' });
+      const username = el('input', { type: 'text', autocomplete: 'off', placeholder: 'username' });
+      const fullName = el('input', { type: 'text', autocomplete: 'off', placeholder: 'Full name' });
+      const password = el('input', { type: 'text', autocomplete: 'off' });
+      password.value = makeTempPassword();
+      const role = el('select', {}, state.profile.role === 'super_admin'
+        ? [opt('user', 'User'), opt('admin', 'Admin'), opt('super_admin', 'Super admin')]
+        : [opt('user', 'User')]);
+      const verified = el('input', { type: 'checkbox' });
+      verified.checked = true;
+      body.append(
+        labeled('Email', email, true),
+        labeled('Username', username, true),
+        labeled('Full name', fullName),
+        labeled('Temporary password', password, true),
+        labeled('Role', role),
+        el('label', { class: 'check-item' }, [verified, el('span', {}, 'Approve immediately')]),
+        el('p', { class: 'muted', style: 'font-size:.82rem' }, 'The account is created with a separate auth client, so your admin session stays intact.'),
+        el('button', { class: 'btn btn-primary btn-block', onclick: async () => {
+          const em = email.value.trim();
+          const un = username.value.trim();
+          const fn = fullName.value.trim();
+          const pw = password.value.trim();
+          if (!em || !un || !pw) return toast('Email, username and temporary password are required.', 'err');
+          if (pw.length < 6) return toast('Password must be at least 6 characters.', 'err');
+          const { data: free, error: freeErr } = await db.rpc('username_available', { p_username: un });
+          if (!freeErr && free === false) return toast('That username is taken.', 'err');
+
+          const auth = newAuthClient();
+          const { data, error } = await auth.auth.signUp({ email: em, password: pw,
+            options: { data: { full_name: fn, username: un }, emailRedirectTo: new URL('confirmed.html', location.href).href } });
+          await auth.auth.signOut();
+          if (error) return toast(error.message, 'err');
+          const id = data?.user?.id;
+          if (!id) return toast('User created, but Supabase did not return an id. Refresh and check Users.', 'err');
+          const payload = { id, email: em, username: un, full_name: fn || null, role: role.value, is_verified: verified.checked };
+          let { error: profileErr } = await db.from('profiles').upsert(payload, { onConflict: 'id' });
+          if (profileErr && /username/i.test(profileErr.message || '')) {
+            delete payload.username;
+            ({ error: profileErr } = await db.from('profiles').upsert(payload, { onConflict: 'id' }));
+          }
+          if (profileErr) return toast(profileErr.message, 'err');
+          toast('User added. Send them the temporary password.');
+          close(); await loadProfiles(); refresh();
+        } }, 'Create user'),
+      );
+    });
+  }
+  function makeTempPassword() {
+    const a = new Uint32Array(3); crypto.getRandomValues(a);
+    return 'Ops-' + [...a].map(n => n.toString(36)).join('-').slice(0, 16);
+  }
+
 
   // ── small ui helpers ───────────────────────────────────
   function emptyState(title, sub) {
