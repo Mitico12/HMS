@@ -282,58 +282,25 @@
         const pendingChanges = await pendingProfileChangeCount();
         const pending = pendingAccounts + pendingChanges;
         const grid = el('div', { class: 'tile-grid' });
-        let groupDragIdx = null;
-        let groupDidDrag = false;
-
-        grid.append(el('button', { class: 'tile', onclick: () => go(usersView()) }, [
-          el('span', { class: 'glyph' }, '👥'),
-          el('div', {}, [
-            el('div', { class: 't-name' }, t('users')),
-            el('div', { class: 't-meta' }, pending ? `${pending} ${t('waitingApproval').toLowerCase()}` : t('accountsAccess')),
-          ]),
-        ]));
-        grid.append(el('button', { class: 'tile', onclick: () => go(logsView()) }, [
-          el('span', { class: 'glyph' }, '☑'),
-          el('div', {}, [
-            el('div', { class: 't-name' }, t('logs')),
-            el('div', { class: 't-meta' }, t('checklistLogsMeta')),
-          ]),
-        ]));
-
-        for (const g of state.groups) {
-          const handle = el('span', { class: 'drag-handle tile-drag', draggable: 'true', title: t('dragReorder') }, '⠿');
-          const tile = el('button', { class: 'tile', onclick: () => {
-            if (groupDidDrag) { groupDidDrag = false; return; }
-            go(groupView(g));
-          } }, [
-            handle,
-            el('span', { class: 'glyph' }, g.icon || '📁'),
-            el('div', {}, [
-              el('div', { class: 't-name' }, groupName(g)),
-              el('div', { class: 't-meta' }, kindLabel(g.kind)),
-            ]),
-          ]);
-          const idx = state.groups.indexOf(g);
-          handle.addEventListener('click', e => e.stopPropagation());
-          handle.addEventListener('dragstart', e => {
-            groupDragIdx = idx;
-            groupDidDrag = true;
-            e.dataTransfer.effectAllowed = 'move';
-            tile.classList.add('dragging');
-          });
-          handle.addEventListener('dragend', () => { groupDragIdx = null; tile.classList.remove('dragging'); });
-          tile.addEventListener('dragover', e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; });
-          tile.addEventListener('drop', async e => {
-            e.preventDefault();
-            if (groupDragIdx === null || groupDragIdx === idx) return;
-            const [moved] = state.groups.splice(groupDragIdx, 1);
-            state.groups.splice(idx, 0, moved);
-            await saveSortOrder('groups', state.groups);
-            go(homeView(), { reset: true });
-          });
-          if (g.kind === 'reports') tile.append(el('span', { class: 'badge reports-badge' }));
-          grid.append(tile);
-        }
+        const cards = [
+          { id: 'fixed:users', glyph: '👥', name: t('users'), meta: pending ? `${pending} ${t('waitingApproval').toLowerCase()}` : t('accountsAccess'), open: () => go(usersView()) },
+          { id: 'fixed:logs', glyph: '☑', name: t('logs'), meta: t('checklistLogsMeta'), open: () => go(logsView()) },
+          ...state.groups.map(g => ({
+            id: `group:${g.id}`,
+            group: g,
+            glyph: g.icon || '📁',
+            name: groupName(g),
+            meta: kindLabel(g.kind),
+            badge: g.kind === 'reports',
+            open: () => go(groupView(g)),
+          })),
+        ];
+        renderSortableHomeTiles(grid, cards, 'adminHomeTileOrder', async ordered => {
+          const orderedGroups = ordered.filter(c => c.group).map(c => c.group);
+          state.groups = orderedGroups;
+          await saveSortOrder('groups', orderedGroups);
+          go(homeView(), { reset: true });
+        });
         grid.append(el('button', { class: 'tile add', onclick: addGroupModal },
           [el('span', { class: 'glyph' }, '+'), el('div', { class: 't-meta' }, t('addGroup'))]));
         app.append(grid);
@@ -393,6 +360,54 @@
       }
     }
     return true;
+  }
+
+  function renderSortableHomeTiles(host, cards, storageKey, onPersist = null) {
+    const saved = JSON.parse(localStorage.getItem(storageKey) || '[]');
+    const rank = new Map(saved.map((id, idx) => [id, idx]));
+    cards.sort((a, b) => (rank.get(a.id) ?? 999) - (rank.get(b.id) ?? 999));
+    let dragIdx = null;
+    let didDrag = false;
+    const draw = () => {
+      host.innerHTML = '';
+      cards.forEach((card, idx) => {
+        const handle = el('span', { class: 'drag-handle tile-drag', draggable: 'true', title: t('dragReorder') }, '⠿');
+        const tile = el('button', { class: 'tile', onclick: () => {
+          if (didDrag) { didDrag = false; return; }
+          card.open();
+        } }, [
+          handle,
+          el('span', { class: 'glyph' }, card.glyph),
+          el('div', {}, [
+            el('div', { class: 't-name' }, card.name),
+            el('div', { class: 't-meta' }, card.meta),
+          ]),
+        ]);
+        if (card.badge) tile.append(el('span', { class: 'badge reports-badge' }));
+        handle.addEventListener('click', e => e.stopPropagation());
+        handle.addEventListener('dragstart', e => {
+          dragIdx = idx;
+          didDrag = true;
+          e.dataTransfer.effectAllowed = 'move';
+          e.dataTransfer.setData('text/plain', card.id);
+          tile.classList.add('dragging');
+        });
+        handle.addEventListener('dragend', () => { dragIdx = null; tile.classList.remove('dragging'); });
+        tile.addEventListener('dragover', e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; });
+        tile.addEventListener('drop', async e => {
+          e.preventDefault();
+          if (dragIdx === null || dragIdx === idx) return;
+          const [moved] = cards.splice(dragIdx, 1);
+          cards.splice(idx, 0, moved);
+          localStorage.setItem(storageKey, JSON.stringify(cards.map(c => c.id)));
+          dragIdx = null;
+          draw();
+          if (onPersist) await onPersist(cards);
+        });
+        host.append(tile);
+      });
+    };
+    draw();
   }
 
   function todayBounds() {
@@ -655,6 +670,15 @@
   }
   const opt = (v, t) => el('option', { value: v }, t);
 
+  function fileToDataUrl(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(file);
+    });
+  }
+
   // ════════════════════════════════════════════════════════
   //  GROUP — routes by kind
   // ════════════════════════════════════════════════════════
@@ -666,6 +690,12 @@
   }
 
   // ─── CHECKLISTS ─────────────────────────────────────────
+  const CHECKLIST_ITEM_TYPES = [
+    ['check', 'checklistTypeCheck'],
+    ['choice', 'checklistTypeChoice'],
+    ['number', 'selectTypeNumber'],
+    ['text', 'checklistTypeText'],
+  ];
   function checklistGroupView(g) {
     return {
       title: groupName(g), tab: 'groups',
@@ -724,24 +754,53 @@
         const draw = () => {
           list.innerHTML = '';
           items.forEach((it, idx) => {
+            if (!it.type) it.type = 'check';
+            if (!it.options) it.options = [];
             const inp = el('input', { type: 'text', value: it.label, placeholder: `Item ${idx + 1}`,
               oninput: e => it.label = e.target.value });
+            const typeSel = el('select', { onchange: e => { it.type = e.target.value; draw(); } },
+              CHECKLIST_ITEM_TYPES.map(([v, key]) => opt(v, t(key))));
+            typeSel.value = it.type;
             const handle = el('span', { class: 'drag-handle', draggable: 'true', title: t('dragReorder') }, '⠿');
-            const row = el('div', { class: 'row' }, [
-              handle,
-              el('div', { class: 'grow' }, inp),
-              el('button', { class: 'btn btn-danger', onclick: () => { items.splice(idx, 1); draw(); } }, '✕'),
+            const imageInput = el('input', { type: 'file', accept: 'image/*', onchange: async e => {
+              const file = e.target.files?.[0];
+              if (!file) return;
+              it.image = await fileToDataUrl(file);
+              draw();
+            } });
+            const card = el('div', { class: 'card checklist-builder-card' }, [
+              el('div', { class: 'section-head' }, [
+                el('div', { style: 'display:flex;align-items:center;gap:8px;min-width:0' }, [
+                  handle, el('strong', {}, `${t('checklist')} ${idx + 1}`),
+                ]),
+                el('button', { class: 'btn btn-danger', onclick: () => { items.splice(idx, 1); draw(); } }, '×'),
+              ]),
+              labeled(t('label'), inp),
+              labeled(t('type'), typeSel),
+              labeled(t('itemImage'), imageInput),
             ]);
+            if (it.image) {
+              card.append(el('div', { class: 'checklist-image-preview' }, [
+                el('img', { src: it.image, alt: it.label || t('itemImage'), class: 'incident-photo' }),
+                el('button', { class: 'btn btn-danger', onclick: () => { delete it.image; draw(); } }, t('removeImage')),
+              ]));
+            }
+            if (it.type === 'choice') {
+              const optsInp = el('input', { type: 'text', value: (it.options || []).join(', '),
+                placeholder: 'Option A, Option B, Option C',
+                oninput: e => it.options = e.target.value.split(',').map(s => s.trim()).filter(Boolean) });
+              card.append(labeled(t('optionsComma'), optsInp));
+            }
             handle.addEventListener('dragstart', e => {
               dragIdx = idx;
               e.dataTransfer.effectAllowed = 'move';
               e.dataTransfer.setData('text/plain', String(idx));
-              try { e.dataTransfer.setDragImage(row, 20, 20); } catch (_) {}
-              row.classList.add('dragging');
+              try { e.dataTransfer.setDragImage(card, 20, 20); } catch (_) {}
+              card.classList.add('dragging');
             });
-            handle.addEventListener('dragend', () => { row.classList.remove('dragging'); dragIdx = null; });
-            row.addEventListener('dragover', e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; });
-            row.addEventListener('drop', e => {
+            handle.addEventListener('dragend', () => { card.classList.remove('dragging'); dragIdx = null; });
+            card.addEventListener('dragover', e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; });
+            card.addEventListener('drop', e => {
               e.preventDefault();
               if (dragIdx === null || dragIdx === idx) return;
               const [moved] = items.splice(dragIdx, 1);
@@ -749,7 +808,7 @@
               dragIdx = null;
               draw();
             });
-            list.append(row);
+            list.append(card);
           });
         };
         draw();
@@ -761,7 +820,13 @@
           existing ? el('button', { class: 'btn btn-danger btn-block', style: 'margin-top:10px', onclick: del }, t('deleteChecklist')) : null,
         );
         async function save() {
-          const clean = items.filter(i => i.label.trim());
+          const clean = items.filter(i => i.label.trim()).map(i => ({
+            id: i.id || crypto.randomUUID(),
+            label: i.label.trim(),
+            type: i.type || 'check',
+            options: i.type === 'choice' ? (i.options || []).filter(Boolean) : [],
+            image: i.image || null,
+          }));
           if (!title.value.trim() || !clean.length) return toast('Add a title and at least one item.', 'err');
           const payload = { group_id: g.id, title: title.value.trim(), items: clean };
           const q = existing ? db.from('checklists').update(payload).eq('id', existing.id)

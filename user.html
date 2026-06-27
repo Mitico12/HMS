@@ -161,12 +161,13 @@
         const { data } = await db.from('groups').select('*').order('sort_order');
         state.groups = visibleGroups(data || []);
         const grid = el('div', { class: 'tile-grid' });
-        for (const g of state.groups)
-          grid.append(el('button', { class: 'tile', onclick: () => go(groupView(g)) }, [
-            el('span', { class: 'glyph' }, g.icon || '📁'),
-            el('div', {}, [el('div', { class: 't-name' }, groupName(g)),
-              el('div', { class: 't-meta' }, kindLabel(g.kind))]),
-          ]));
+        renderSortableHomeTiles(grid, state.groups.map(g => ({
+          id: `group:${g.id}`,
+          glyph: g.icon || '📁',
+          name: groupName(g),
+          meta: kindLabel(g.kind),
+          open: () => go(groupView(g)),
+        })), 'userHomeTileOrder');
         app.append(grid);
       },
     };
@@ -187,6 +188,52 @@
       seenDefaultKinds.add(g.kind);
       return true;
     });
+  }
+
+  function renderSortableHomeTiles(host, cards, storageKey) {
+    const saved = JSON.parse(localStorage.getItem(storageKey) || '[]');
+    const rank = new Map(saved.map((id, idx) => [id, idx]));
+    cards.sort((a, b) => (rank.get(a.id) ?? 999) - (rank.get(b.id) ?? 999));
+    let dragIdx = null;
+    let didDrag = false;
+    const draw = () => {
+      host.innerHTML = '';
+      cards.forEach((card, idx) => {
+        const handle = el('span', { class: 'drag-handle tile-drag', draggable: 'true', title: t('dragReorder') }, '⠿');
+        const tile = el('button', { class: 'tile', onclick: () => {
+          if (didDrag) { didDrag = false; return; }
+          card.open();
+        } }, [
+          handle,
+          el('span', { class: 'glyph' }, card.glyph),
+          el('div', {}, [
+            el('div', { class: 't-name' }, card.name),
+            el('div', { class: 't-meta' }, card.meta),
+          ]),
+        ]);
+        handle.addEventListener('click', e => e.stopPropagation());
+        handle.addEventListener('dragstart', e => {
+          dragIdx = idx;
+          didDrag = true;
+          e.dataTransfer.effectAllowed = 'move';
+          e.dataTransfer.setData('text/plain', card.id);
+          tile.classList.add('dragging');
+        });
+        handle.addEventListener('dragend', () => { dragIdx = null; tile.classList.remove('dragging'); });
+        tile.addEventListener('dragover', e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; });
+        tile.addEventListener('drop', e => {
+          e.preventDefault();
+          if (dragIdx === null || dragIdx === idx) return;
+          const [moved] = cards.splice(dragIdx, 1);
+          cards.splice(idx, 0, moved);
+          localStorage.setItem(storageKey, JSON.stringify(cards.map(c => c.id)));
+          dragIdx = null;
+          draw();
+        });
+        host.append(tile);
+      });
+    };
+    draw();
   }
 
   async function renderUserKpiDashboard(app) {
@@ -303,17 +350,36 @@
         app.append(progress);
 
         for (const it of items) {
-          const box = el('input', { type: 'checkbox' });
-          box.checked = !!checked[it.id]?.done;
-          const item = el('label', { class: 'check-item' + (box.checked ? ' done' : '') },
-            [box, el('span', {}, it.label)]);
-          box.addEventListener('change', async () => {
-            checked = { ...checked,
-              [it.id]: box.checked ? { done: true, at: new Date().toISOString() } : { done: false } };
-            item.classList.toggle('done', box.checked);
-            drawProgress();
-          });
-          app.append(item);
+          const type = it.type || 'check';
+          const current = checked[it.id]?.value ?? '';
+          const card = el('div', { class: 'card checklist-run-card' });
+          if (it.image) card.append(el('img', { src: it.image, alt: it.label, class: 'checklist-item-image' }));
+          if (type === 'check') {
+            const box = el('input', { type: 'checkbox' });
+            box.checked = !!checked[it.id]?.done;
+            const item = el('label', { class: 'check-item' + (box.checked ? ' done' : '') },
+              [box, el('span', {}, it.label)]);
+            box.addEventListener('change', () => {
+              checked = { ...checked,
+                [it.id]: box.checked ? { done: true, value: true, at: new Date().toISOString() } : { done: false, value: false } };
+              item.classList.toggle('done', box.checked);
+              drawProgress();
+            });
+            card.append(item);
+          } else if (type === 'choice') {
+            const select = el('select', { onchange: e => setChecklistAnswer(it, e.target.value) },
+              [opt('', `- ${t('choose')} -`), ...(it.options || []).map(o => opt(o, o))]);
+            select.value = current;
+            card.append(labeled(it.label, select));
+          } else if (type === 'number') {
+            const input = el('input', { type: 'number', value: current, oninput: e => setChecklistAnswer(it, e.target.value) });
+            card.append(labeled(it.label, input));
+          } else {
+            const input = el('textarea', { oninput: e => setChecklistAnswer(it, e.target.value) });
+            input.value = current;
+            card.append(labeled(it.label, input));
+          }
+          app.append(card);
         }
         app.append(
           labeled(t('notes'), notes),
@@ -336,6 +402,13 @@
           if (error) return toast(error.message + ' - run the checklist SQL migrations first.', 'err');
           toast(t('checklistComplete'));
           back();
+        }
+
+        function setChecklistAnswer(item, value) {
+          const done = String(value ?? '').trim().length > 0;
+          checked = { ...checked,
+            [item.id]: { done, value, at: done ? new Date().toISOString() : null } };
+          drawProgress();
         }
       },
     };
