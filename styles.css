@@ -1,8 +1,8 @@
 :root {
   color-scheme: light;
-  --bg: #eeeae1;
-  --paper: #fffaf0;
-  --paper-2: #f7f1e7;
+  --bg: #fbe6d6;
+  --paper: #fff5ec;
+  --paper-2: #f8e3d2;
   --ink: #102a32;
   --steel: #667780;
   --line: rgba(26, 47, 54, .14);
@@ -422,9 +422,21 @@ input:focus, select:focus, textarea:focus {
   color: #fff;
 }
 
+.pill.you {
+  background: color-mix(in srgb, var(--ink) 12%, transparent);
+  color: var(--ink);
+}
+
 .chip {
   margin: 0 8px 8px 0;
   min-height: 36px;
+}
+
+.chip.on {
+  border-color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 24%, var(--paper));
+  color: var(--ink);
+  font-weight: 750;
 }
 
 .check-item {

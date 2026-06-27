@@ -408,19 +408,71 @@
       title: groupName(g), tab: 'groups',
       action: el('button', { class: 'iconbtn', title: t('incidentCategories'), onclick: () => go(categoriesView()) }, '☰'),
       async render(app) {
+        await loadProfiles();
         const { data } = await db.from('incidents').select('*').order('created_at', { ascending: false });
         if (!data?.length) return app.append(emptyState(t('noIncidents'), t('noIncidentsHint')));
-        const filterBar = el('div', { style: 'margin-bottom:12px' });
+
+        const filters = { status: 'all', assignee: 'all', reporter: 'all' };
+
+        // Status chips — now with a visible active state.
+        const statusChips = {};
+        const statusBar = el('div', { style: 'display:flex;flex-wrap:wrap' });
         ['all', 'open', 'in_progress', 'resolved'].forEach(s => {
-          filterBar.append(el('button', { class: 'chip', onclick: () => draw(s) },
-            s === 'all' ? t('all') : statusLabel(s)));
+          const chip = el('button', { class: 'chip', onclick: () => {
+            filters.status = s; markActive(statusChips, s); apply();
+          } }, s === 'all' ? t('all') : statusLabel(s));
+          statusChips[s] = chip;
+          statusBar.append(chip);
         });
+
+        // Assignee options: only ids that actually appear as an assignee, plus an "unassigned" bucket.
+        const assigneeIds = [...new Set(data.map(i => i.assigned_to).filter(Boolean))];
+        const assigneeSelect = el('select', { onchange: e => { filters.assignee = e.target.value; apply(); } }, [
+          opt('all', t('anyAssignee')),
+          opt('unassigned', t('unassigned')),
+          ...assigneeIds.map(id => opt(id, labelOf(state.profiles.find(p => p.id === id)))),
+        ]);
+
+        // Reporter options: named entries come ONLY from non-anonymous reports, so an
+        // anonymous filer is never listed by name. All anonymous reports collapse into
+        // one "Anonymous" bucket that can't be traced back to a person.
+        const namedReporterIds = [...new Set(data.filter(i => !i.is_anonymous).map(i => i.reporter_id).filter(Boolean))];
+        const hasAnon = data.some(i => i.is_anonymous);
+        const reporterSelect = el('select', { onchange: e => { filters.reporter = e.target.value; apply(); } }, [
+          opt('all', t('anyReporter')),
+          ...namedReporterIds.map(id => opt(id, labelOf(state.profiles.find(p => p.id === id)))),
+          ...(hasAnon ? [opt('anon', t('anonymous'))] : []),
+        ]);
+
+        app.append(el('div', { style: 'display:grid;gap:10px;margin-bottom:14px' }, [
+          statusBar,
+          el('div', { style: 'display:flex;gap:10px;flex-wrap:wrap' }, [
+            el('div', { style: 'flex:1;min-width:180px' }, labeled(t('filterByAssignee'), assigneeSelect)),
+            el('div', { style: 'flex:1;min-width:180px' }, labeled(t('filterByReporter'), reporterSelect)),
+          ]),
+        ]));
+
         const listHost = el('div', {});
-        app.append(filterBar, listHost);
-        const draw = (filter = 'all') => {
+        app.append(listHost);
+
+        const matchesStatus = (i) => filters.status === 'all' || i.status === filters.status;
+        const matchesAssignee = (i) =>
+          filters.assignee === 'all' ? true
+            : filters.assignee === 'unassigned' ? !i.assigned_to
+              : i.assigned_to === filters.assignee;
+        const matchesReporter = (i) =>
+          filters.reporter === 'all' ? true
+            : filters.reporter === 'anon' ? !!i.is_anonymous
+              : (!i.is_anonymous && i.reporter_id === filters.reporter);
+
+        function markActive(group, active) {
+          for (const [key, chip] of Object.entries(group)) chip.classList.toggle('on', key === active);
+        }
+
+        function apply() {
           listHost.innerHTML = '';
-          const rows = data.filter(i => filter === 'all' || i.status === filter);
-          if (!rows.length) { listHost.append(el('p', { class: 'muted' }, 'Nothing in this state.')); return; }
+          const rows = data.filter(i => matchesStatus(i) && matchesAssignee(i) && matchesReporter(i));
+          if (!rows.length) { listHost.append(el('p', { class: 'muted' }, 'Nothing matches these filters.')); return; }
           for (const i of rows) {
             listHost.append(el('div', { class: 'row', onclick: () => go(incidentView(i.id)), style: 'cursor:pointer' }, [
               el('div', { class: 'grow' }, [
@@ -430,8 +482,10 @@
               el('span', { class: `pill ${incidentStatusClass(i)}`, style: incidentStatusStyle(i) }, statusLabel(i.status)),
             ]));
           }
-        };
-        draw();
+        }
+
+        markActive(statusChips, 'all');
+        apply();
       },
     };
   }
@@ -954,7 +1008,7 @@
     const iAmSuper = me.role === 'super_admin';
     const controls = [];
     if (p.id === me.id) {
-      controls.push(el('span', { class: 'pill', style: 'background:#e6e3da' }, 'you'));
+      controls.push(el('span', { class: 'pill you' }, 'you'));
       return controls;
     }
 
