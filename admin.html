@@ -327,7 +327,10 @@
   }
 
   async function renderAdminKpiDashboard(app) {
-    const { start, end } = todayBounds();
+    const periodKey = 'adminKpiPeriod';
+    const period = kpiPeriod(periodKey);
+    const { start, end } = periodBounds(period);
+    const periodText = periodLabel(period);
     const [completed, reports, closed, assigned] = await Promise.all([
       countRows(db.from('checklist_runs').select('id', { count: 'exact', head: true })
         .eq('completed', true).gte('submitted_at', start).lt('submitted_at', end)),
@@ -339,11 +342,11 @@
         .eq('status', 'in_progress').eq('assigned_to', state.profile.id)),
     ]);
     renderSortableKpiGrid(app, 'adminKpiOrder', [
-      { id: 'completed', label: t('checklistsCompletedToday'), value: completed },
-      { id: 'reports', label: t('reportsToday'), value: reports },
-      { id: 'closed', label: t('reportsClosedToday'), value: closed },
+      { id: 'completed', label: t('checklistsCompletedInPeriod'), value: completed },
+      { id: 'reports', label: t('reportsInPeriod'), value: reports },
+      { id: 'closed', label: t('reportsClosedInPeriod'), value: closed },
       { id: 'assigned', label: t('inProgressAssignedToYou'), value: assigned },
-    ]);
+    ], { periodText, onCardClick: () => changeKpiPeriod(periodKey) });
   }
 
   async function countRows(query) {
@@ -418,19 +421,65 @@
     return { start: start.toISOString(), end: end.toISOString() };
   }
 
-  function renderSortableKpiGrid(host, storageKey, cards) {
+  function localDateString(date = new Date()) {
+    const yyyy = date.getFullYear();
+    const mm = String(date.getMonth() + 1).padStart(2, '0');
+    const dd = String(date.getDate()).padStart(2, '0');
+    return `${yyyy}-${mm}-${dd}`;
+  }
+
+  function kpiPeriod(storageKey) {
+    const today = localDateString();
+    try {
+      const saved = JSON.parse(localStorage.getItem(storageKey) || 'null');
+      if (saved?.from && saved?.until) return saved;
+    } catch (err) {}
+    return { from: today, until: today };
+  }
+
+  function periodBounds(period) {
+    const start = new Date(`${period.from}T00:00:00`);
+    const end = new Date(`${period.until}T00:00:00`);
+    end.setDate(end.getDate() + 1);
+    return { start: start.toISOString(), end: end.toISOString() };
+  }
+
+  function periodLabel(period) {
+    return period.from === period.until ? period.from : `${period.from} - ${period.until}`;
+  }
+
+  function changeKpiPeriod(storageKey) {
+    const current = kpiPeriod(storageKey);
+    const raw = prompt(`${t('dashboardPeriod')}\n${t('periodPrompt')}`, `${current.from}..${current.until}`);
+    if (!raw) return;
+    const normalized = raw.trim().replace(/\s+to\s+/i, '..').replace(/\s*,\s*/g, '..');
+    const parts = (normalized.includes('..') ? normalized.split('..') : normalized.split(/\s+/)).map(p => p.trim()).filter(Boolean);
+    const from = parts[0];
+    const until = parts[1] || parts[0];
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(from || '') || !/^\d{4}-\d{2}-\d{2}$/.test(until || '')) {
+      toast(t('invalidPeriod'), 'err');
+      return;
+    }
+    const ordered = from <= until ? { from, until } : { from: until, until: from };
+    localStorage.setItem(storageKey, JSON.stringify(ordered));
+    go(homeView(), { reset: true });
+  }
+
+  function renderSortableKpiGrid(host, storageKey, cards, options = {}) {
     const saved = JSON.parse(localStorage.getItem(storageKey) || '[]');
     const rank = new Map(saved.map((id, idx) => [id, idx]));
     cards.sort((a, b) => (rank.get(a.id) ?? 99) - (rank.get(b.id) ?? 99));
     const grid = el('div', { class: 'kpi-grid admin-kpi-grid' });
     let dragIdx = null;
+    let didDrag = false;
     const draw = () => {
       grid.innerHTML = '';
       cards.forEach((card, idx) => {
-        const node = kpiCard(card.label, card.value);
+        const node = kpiCard(card.label, card.value, options.periodText);
         node.setAttribute('draggable', 'true');
         node.addEventListener('dragstart', e => {
           dragIdx = idx;
+          didDrag = true;
           e.dataTransfer.effectAllowed = 'move';
           e.dataTransfer.setData('text/plain', card.id);
           node.classList.add('dragging');
@@ -446,6 +495,10 @@
           dragIdx = null;
           draw();
         });
+        node.addEventListener('click', () => {
+          if (didDrag) { didDrag = false; return; }
+          if (options.onCardClick) options.onCardClick(card);
+        });
         grid.append(node);
       });
     };
@@ -453,11 +506,12 @@
     host.append(grid);
   }
 
-  function kpiCard(label, value) {
-    return el('div', { class: 'kpi-card', title: t('dragReorder') }, [
+  function kpiCard(label, value, periodText = '') {
+    return el('div', { class: 'kpi-card', title: t('dashboardPeriod') }, [
       el('span', { class: 'drag-handle kpi-drag', title: t('dragReorder') }, '⠿'),
       el('div', { class: 'kpi-value' }, value == null ? '-' : String(value)),
       el('div', { class: 'kpi-label' }, label),
+      periodText ? el('div', { class: 'kpi-period' }, periodText) : null,
     ]);
   }
 
@@ -606,7 +660,11 @@
             const missing = items.filter(i => !run.checked?.[i.id]?.done);
             const hasNotes = !!(run.notes || '').trim();
             const needsReview = missing.length > 0 || hasNotes;
-            const card = el('div', { class: 'card log-card' + (needsReview ? ' log-warning' : '') }, [
+            const card = el('div', {
+              class: 'card log-card' + (needsReview ? ' log-warning' : ''),
+              style: 'cursor:pointer',
+              onclick: () => go(checklistLogDetailView(run, checklist)),
+            }, [
               el('div', { class: 'section-head' }, [
                 el('div', {}, [
                   el('h3', {}, checklist?.title || t('checklist')),
@@ -616,7 +674,7 @@
                   el('span', { class: 'pill', style: needsReview ? 'background:#f2c94c;color:#17212b;border-color:#f2c94c' : '' },
                     needsReview ? t('checklistLogNeedsAttention') : t('completed')),
                   isSuper ? el('button', { class: 'btn btn-danger', title: t('deleteLog'),
-                    onclick: () => deleteChecklistLog(run) }, '🗑') : null,
+                    onclick: e => { e.stopPropagation(); deleteChecklistLog(run); } }, '🗑') : null,
                 ]),
               ]),
               el('div', { class: 'sub' }, missing.length ? t('missingItems', { count: missing.length }) : t('completed')),
@@ -641,6 +699,66 @@
         }
       },
     };
+  }
+
+  function checklistLogDetailView(run, checklist) {
+    return {
+      title: checklist?.title || t('checklist'), tab: 'groups',
+      render(app) {
+        const items = checklist?.items || [];
+        const answers = run.checked || {};
+        app.append(el('div', { class: 'card' }, [
+          el('h3', {}, t('submittedAnswers')),
+          el('div', { class: 'sub' }, `${nameOf(run.user_id)} - ${fmt(run.submitted_at || run.updated_at)}`),
+          run.completed ? el('span', { class: 'pill', style: 'margin-top:10px' }, t('completed'))
+            : el('span', { class: 'pill', style: 'margin-top:10px;background:#f2c94c;color:#17212b;border-color:#f2c94c' }, t('checklistLogNeedsAttention')),
+        ]));
+        if (!items.length) {
+          app.append(emptyState(t('noChecklists'), t('noChecklistLogs')));
+          return;
+        }
+        for (const item of items) {
+          const answer = answers[item.id] || {};
+          const complete = !!answer.done;
+          const type = item.type || 'check';
+          const card = el('div', { class: 'card checklist-answer-card' + (complete ? '' : ' log-warning') }, [
+            el('div', { class: 'section-head' }, [
+              el('h3', {}, item.label || t('checklist')),
+              el('span', { class: 'pill', style: complete ? '' : 'background:#f2c94c;color:#17212b;border-color:#f2c94c' },
+                complete ? t('completed') : t('checklistLogNeedsAttention')),
+            ]),
+            el('div', { class: 'sub' }, `${t('type')}: ${checklistItemTypeLabel(type)}`),
+            el('p', { class: 'checklist-answer-value' }, answerValueText(type, answer)),
+          ]);
+          if (item.image) card.append(el('div', { class: 'sub' }, t('questionImage')),
+            el('img', { src: item.image, alt: item.label, class: 'checklist-item-image' }));
+          if (answer.photo) card.append(el('div', { class: 'sub' }, t('submittedPhoto')),
+            el('img', { src: answer.photo, alt: item.label, class: 'checklist-item-image' }));
+          app.append(card);
+        }
+        if ((run.notes || '').trim()) {
+          app.append(el('div', { class: 'card log-card log-warning' }, [
+            el('h3', {}, t('notes')),
+            el('p', {}, run.notes.trim()),
+          ]));
+        }
+      },
+    };
+  }
+
+  function checklistItemTypeLabel(type) {
+    return ({
+      check: t('checklistTypeCheck'),
+      choice: t('checklistTypeChoice'),
+      number: t('selectTypeNumber'),
+      text: t('checklistTypeText'),
+    })[type] || type || t('checklistTypeCheck');
+  }
+
+  function answerValueText(type, answer) {
+    if (type === 'check') return answer.value || answer.done ? t('completed') : '-';
+    const value = answer.value;
+    return value == null || value === '' ? '-' : String(value);
   }
 
   function addGroupModal() {

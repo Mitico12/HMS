@@ -327,6 +327,26 @@ input[type="checkbox"], input[type="radio"] {
   background: color-mix(in srgb, #f2c94c 18%, transparent);
 }
 
+.checklist-answer-card {
+  display: grid;
+  gap: 10px;
+}
+
+.checklist-answer-photo {
+  display: grid;
+  gap: 8px;
+}
+
+.checklist-answer-photo:empty {
+  display: none;
+}
+
+.checklist-answer-value {
+  margin: 0;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
 .btn-primary {
   border-color: var(--primary);
   background: var(--primary);
@@ -395,6 +415,10 @@ input[type="checkbox"], input[type="radio"] {
   cursor: grab;
 }
 
+.kpi-card:hover {
+  border-color: color-mix(in srgb, var(--primary) 48%, var(--line));
+}
+
 .kpi-drag {
   position: absolute;
   left: 14px;
@@ -411,6 +435,12 @@ input[type="checkbox"], input[type="radio"] {
 .kpi-label {
   color: var(--steel);
   font-size: .86rem;
+  font-weight: 650;
+}
+
+.kpi-period {
+  color: var(--muted);
+  font-size: .78rem;
   font-weight: 650;
 }
 
