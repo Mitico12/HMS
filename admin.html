@@ -369,7 +369,7 @@
                 el('div', {}, truncate(i.what_happened, 70)),
                 el('div', { class: 'sub' }, `${reporterOf(i)} · ${fmt(i.created_at)}`),
               ]),
-              el('span', { class: `pill ${incidentStatusClass(i)}` }, statusLabel(i.status)),
+              el('span', { class: `pill ${incidentStatusClass(i)}`, style: incidentStatusStyle(i) }, statusLabel(i.status)),
             ]));
           }
         };
@@ -381,6 +381,17 @@
   function incidentStatusClass(inc) {
     const hasConsequences = (inc.consequence_ids || []).length > 0 || !!inc.consequence_other;
     return inc.status === 'open' && hasConsequences ? 'open-consequence' : inc.status;
+  }
+  function incidentStatusStyle(inc) {
+    const colors = {
+      resolved: ['#2f9e5b', '#ffffff'],
+      in_progress: ['#2f80ed', '#ffffff'],
+      open: ['#f2c94c', '#17212b'],
+      open_consequence: ['#d43c32', '#ffffff'],
+    };
+    const key = incidentStatusClass(inc).replace('-', '_');
+    const [bg, fg] = colors[key] || ['#8a94a6', '#ffffff'];
+    return `background:${bg};color:${fg};border-color:${bg}`;
   }
 
   function incidentView(id) {
@@ -396,7 +407,7 @@
         app.append(el('div', { class: 'card' }, [
           el('div', { class: 'section-head' }, [
             el('h3', {}, 'What happened'),
-            el('span', { class: `pill ${incidentStatusClass(inc)}` }, statusLabel(inc.status)),
+            el('span', { class: `pill ${incidentStatusClass(inc)}`, style: incidentStatusStyle(inc) }, statusLabel(inc.status)),
           ]),
           el('p', {}, inc.what_happened),
           inc.what_wrong ? el('h3', { style: 'margin-top:14px' }, 'What needs fixing') : null,
