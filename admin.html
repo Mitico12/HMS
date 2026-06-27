@@ -282,6 +282,8 @@
         const pendingChanges = await pendingProfileChangeCount();
         const pending = pendingAccounts + pendingChanges;
         const grid = el('div', { class: 'tile-grid' });
+        let groupDragIdx = null;
+        let groupDidDrag = false;
 
         grid.append(el('button', { class: 'tile', onclick: () => go(usersView()) }, [
           el('span', { class: 'glyph' }, '👥'),
@@ -299,13 +301,36 @@
         ]));
 
         for (const g of state.groups) {
-          const tile = el('button', { class: 'tile', onclick: () => go(groupView(g)) }, [
+          const handle = el('span', { class: 'drag-handle tile-drag', draggable: 'true', title: t('dragReorder') }, '⠿');
+          const tile = el('button', { class: 'tile', onclick: () => {
+            if (groupDidDrag) { groupDidDrag = false; return; }
+            go(groupView(g));
+          } }, [
+            handle,
             el('span', { class: 'glyph' }, g.icon || '📁'),
             el('div', {}, [
               el('div', { class: 't-name' }, groupName(g)),
               el('div', { class: 't-meta' }, kindLabel(g.kind)),
             ]),
           ]);
+          const idx = state.groups.indexOf(g);
+          handle.addEventListener('click', e => e.stopPropagation());
+          handle.addEventListener('dragstart', e => {
+            groupDragIdx = idx;
+            groupDidDrag = true;
+            e.dataTransfer.effectAllowed = 'move';
+            tile.classList.add('dragging');
+          });
+          handle.addEventListener('dragend', () => { groupDragIdx = null; tile.classList.remove('dragging'); });
+          tile.addEventListener('dragover', e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; });
+          tile.addEventListener('drop', async e => {
+            e.preventDefault();
+            if (groupDragIdx === null || groupDragIdx === idx) return;
+            const [moved] = state.groups.splice(groupDragIdx, 1);
+            state.groups.splice(idx, 0, moved);
+            await saveSortOrder('groups', state.groups);
+            go(homeView(), { reset: true });
+          });
           if (g.kind === 'reports') tile.append(el('span', { class: 'badge reports-badge' }));
           grid.append(tile);
         }
@@ -346,17 +371,28 @@
       countRows(db.from('incidents').select('id', { count: 'exact', head: true })
         .eq('status', 'in_progress').eq('assigned_to', state.profile.id)),
     ]);
-    app.append(el('div', { class: 'kpi-grid admin-kpi-grid' }, [
-      kpiCard(t('checklistsCompletedToday'), completed),
-      kpiCard(t('reportsToday'), reports),
-      kpiCard(t('reportsClosedToday'), closed),
-      kpiCard(t('inProgressAssignedToYou'), assigned),
-    ]));
+    renderSortableKpiGrid(app, 'adminKpiOrder', [
+      { id: 'completed', label: t('checklistsCompletedToday'), value: completed },
+      { id: 'reports', label: t('reportsToday'), value: reports },
+      { id: 'closed', label: t('reportsClosedToday'), value: closed },
+      { id: 'assigned', label: t('inProgressAssignedToYou'), value: assigned },
+    ]);
   }
 
   async function countRows(query) {
     const { count, error } = await query;
     return error ? null : (count || 0);
+  }
+
+  async function saveSortOrder(table, rows) {
+    for (const [idx, row] of rows.entries()) {
+      const { error } = await db.from(table).update({ sort_order: (idx + 1) * 10 }).eq('id', row.id);
+      if (error) {
+        toast(error.message + ' - run migration_reorderable_content.sql if this list cannot save order.', 'err');
+        return false;
+      }
+    }
+    return true;
   }
 
   function todayBounds() {
@@ -367,8 +403,44 @@
     return { start: start.toISOString(), end: end.toISOString() };
   }
 
+  function renderSortableKpiGrid(host, storageKey, cards) {
+    const saved = JSON.parse(localStorage.getItem(storageKey) || '[]');
+    const rank = new Map(saved.map((id, idx) => [id, idx]));
+    cards.sort((a, b) => (rank.get(a.id) ?? 99) - (rank.get(b.id) ?? 99));
+    const grid = el('div', { class: 'kpi-grid admin-kpi-grid' });
+    let dragIdx = null;
+    const draw = () => {
+      grid.innerHTML = '';
+      cards.forEach((card, idx) => {
+        const node = kpiCard(card.label, card.value);
+        node.setAttribute('draggable', 'true');
+        node.addEventListener('dragstart', e => {
+          dragIdx = idx;
+          e.dataTransfer.effectAllowed = 'move';
+          e.dataTransfer.setData('text/plain', card.id);
+          node.classList.add('dragging');
+        });
+        node.addEventListener('dragend', () => { dragIdx = null; node.classList.remove('dragging'); });
+        node.addEventListener('dragover', e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; });
+        node.addEventListener('drop', e => {
+          e.preventDefault();
+          if (dragIdx === null || dragIdx === idx) return;
+          const [moved] = cards.splice(dragIdx, 1);
+          cards.splice(idx, 0, moved);
+          localStorage.setItem(storageKey, JSON.stringify(cards.map(c => c.id)));
+          dragIdx = null;
+          draw();
+        });
+        grid.append(node);
+      });
+    };
+    draw();
+    host.append(grid);
+  }
+
   function kpiCard(label, value) {
-    return el('div', { class: 'kpi-card' }, [
+    return el('div', { class: 'kpi-card', title: t('dragReorder') }, [
+      el('span', { class: 'drag-handle kpi-drag', title: t('dragReorder') }, '⠿'),
       el('div', { class: 'kpi-value' }, value == null ? '-' : String(value)),
       el('div', { class: 'kpi-label' }, label),
     ]);
@@ -599,15 +671,44 @@
       title: groupName(g), tab: 'groups',
       action: el('button', { class: 'iconbtn', title: t('newChecklist'), onclick: () => go(checklistEdit(g, null)) }, '+'),
       async render(app) {
-        const { data } = await db.from('checklists').select('*').eq('group_id', g.id).order('created_at');
+        let q = await db.from('checklists').select('*').eq('group_id', g.id).order('sort_order').order('created_at');
+        if (q.error) q = await db.from('checklists').select('*').eq('group_id', g.id).order('created_at');
+        const data = q.data || [];
         if (!data?.length) return app.append(emptyState('No checklists yet', 'Tap + to build one.'));
-        for (const c of data) {
-          app.append(el('div', { class: 'row' }, [
-            el('div', { class: 'grow' }, [el('div', {}, c.title),
-              el('div', { class: 'sub' }, `${(c.items || []).length} items`)]),
-            el('button', { class: 'btn btn-ghost', onclick: () => go(checklistEdit(g, c)) }, 'Edit'),
-          ]));
-        }
+        let rows = data.slice();
+        let dragIdx = null;
+        const list = el('div', {});
+        const draw = () => {
+          list.innerHTML = '';
+          rows.forEach((c, idx) => {
+            const handle = el('span', { class: 'drag-handle', draggable: 'true', title: t('dragReorder') }, '⠿');
+            const row = el('div', { class: 'row' }, [
+              handle,
+              el('div', { class: 'grow' }, [el('div', {}, c.title),
+                el('div', { class: 'sub' }, `${(c.items || []).length} items`)]),
+              el('button', { class: 'btn btn-ghost', onclick: () => go(checklistEdit(g, c)) }, 'Edit'),
+            ]);
+            handle.addEventListener('dragstart', e => {
+              dragIdx = idx;
+              e.dataTransfer.effectAllowed = 'move';
+              row.classList.add('dragging');
+            });
+            handle.addEventListener('dragend', () => { dragIdx = null; row.classList.remove('dragging'); });
+            row.addEventListener('dragover', e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; });
+            row.addEventListener('drop', async e => {
+              e.preventDefault();
+              if (dragIdx === null || dragIdx === idx) return;
+              const [moved] = rows.splice(dragIdx, 1);
+              rows.splice(idx, 0, moved);
+              dragIdx = null;
+              draw();
+              await saveSortOrder('checklists', rows);
+            });
+            list.append(row);
+          });
+        };
+        draw();
+        app.append(list);
       },
     };
   }
@@ -1003,15 +1104,42 @@
             el('button', { class: 'btn btn-ghost', onclick: () => add(kind) }, '+ ' + t('add')),
           ]);
           app.append(head);
-          for (const c of (data || []).filter(x => x.kind === kind)) {
-            app.append(el('div', { class: 'row' }, [
-              el('div', { class: 'grow' }, c.name),
-              el('button', { class: 'btn btn-danger', onclick: async () => {
-                if (!confirm(`Delete "${c.name}"?`)) return;
-                await db.from('incident_categories').delete().eq('id', c.id); refresh();
-              } }, '✕'),
-            ]));
-          }
+          const rows = (data || []).filter(x => x.kind === kind);
+          let dragIdx = null;
+          const list = el('div', {});
+          const draw = () => {
+            list.innerHTML = '';
+            rows.forEach((c, idx) => {
+              const handle = el('span', { class: 'drag-handle', draggable: 'true', title: t('dragReorder') }, '⠿');
+              const row = el('div', { class: 'row' }, [
+                handle,
+                el('div', { class: 'grow' }, c.name),
+                el('button', { class: 'btn btn-danger', onclick: async () => {
+                  if (!confirm(`Delete "${c.name}"?`)) return;
+                  await db.from('incident_categories').delete().eq('id', c.id); refresh();
+                } }, '×'),
+              ]);
+              handle.addEventListener('dragstart', e => {
+                dragIdx = idx;
+                e.dataTransfer.effectAllowed = 'move';
+                row.classList.add('dragging');
+              });
+              handle.addEventListener('dragend', () => { dragIdx = null; row.classList.remove('dragging'); });
+              row.addEventListener('dragover', e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; });
+              row.addEventListener('drop', async e => {
+                e.preventDefault();
+                if (dragIdx === null || dragIdx === idx) return;
+                const [moved] = rows.splice(dragIdx, 1);
+                rows.splice(idx, 0, moved);
+                dragIdx = null;
+                draw();
+                await saveSortOrder('incident_categories', rows);
+              });
+              list.append(row);
+            });
+          };
+          draw();
+          app.append(list);
         }
         async function add(kind) {
           const name = prompt(`New ${kind === 'root_cause' ? 'root cause' : 'consequence'} category:`);
@@ -1039,16 +1167,42 @@
 
         async function loadDocs() {
           listHost.innerHTML = '';
-          const { data } = await db.from('documents').select('*').eq('group_id', g.id).order('created_at', { ascending: false });
-          if (!data?.length) { listHost.append(emptyState(t('noDocuments'), t('noDocumentsHint'))); return; }
-          for (const d of data) {
-            listHost.append(el('div', { class: 'row' }, [
-              el('div', { class: 'grow' }, [el('div', {}, d.name),
-                el('div', { class: 'sub' }, `${(d.size_bytes / 1024 | 0)} KB · ${fmt(d.created_at)}`)]),
-              el('button', { class: 'btn btn-ghost', onclick: () => openDoc(d) }, t('open')),
-              el('button', { class: 'btn btn-danger', onclick: () => removeDoc(d) }, '✕'),
-            ]));
-          }
+          let q = await db.from('documents').select('*').eq('group_id', g.id).order('sort_order').order('created_at', { ascending: false });
+          if (q.error) q = await db.from('documents').select('*').eq('group_id', g.id).order('created_at', { ascending: false });
+          let rows = q.data || [];
+          if (!rows.length) { listHost.append(emptyState(t('noDocuments'), t('noDocumentsHint'))); return; }
+          let dragIdx = null;
+          const draw = () => {
+            listHost.innerHTML = '';
+            rows.forEach((d, idx) => {
+              const handle = el('span', { class: 'drag-handle', draggable: 'true', title: t('dragReorder') }, '⠿');
+              const row = el('div', { class: 'row' }, [
+                handle,
+                el('div', { class: 'grow' }, [el('div', {}, d.name),
+                  el('div', { class: 'sub' }, `${(d.size_bytes / 1024 | 0)} KB - ${fmt(d.created_at)}`)]),
+                el('button', { class: 'btn btn-ghost', onclick: () => openDoc(d) }, t('open')),
+                el('button', { class: 'btn btn-danger', onclick: () => removeDoc(d) }, '×'),
+              ]);
+              handle.addEventListener('dragstart', e => {
+                dragIdx = idx;
+                e.dataTransfer.effectAllowed = 'move';
+                row.classList.add('dragging');
+              });
+              handle.addEventListener('dragend', () => { dragIdx = null; row.classList.remove('dragging'); });
+              row.addEventListener('dragover', e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; });
+              row.addEventListener('drop', async e => {
+                e.preventDefault();
+                if (dragIdx === null || dragIdx === idx) return;
+                const [moved] = rows.splice(dragIdx, 1);
+                rows.splice(idx, 0, moved);
+                dragIdx = null;
+                draw();
+                await saveSortOrder('documents', rows);
+              });
+              listHost.append(row);
+            });
+          };
+          draw();
         }
         async function upload() {
           const f = file.files[0];
@@ -1088,16 +1242,45 @@
       title: groupName(g), tab: 'groups',
       action: el('button', { class: 'iconbtn', title: t('newProcedure'), onclick: () => go(procedureBuild(g, null)) }, '+'),
       async render(app) {
-        const { data } = await db.from('procedures').select('*').eq('group_id', g.id).order('created_at');
+        let q = await db.from('procedures').select('*').eq('group_id', g.id).order('sort_order').order('created_at');
+        if (q.error) q = await db.from('procedures').select('*').eq('group_id', g.id).order('created_at');
+        const data = q.data || [];
         if (!data?.length) return app.append(emptyState(t('noProcedures'), t('noProceduresHint')));
-        for (const p of data) {
-          app.append(el('div', { class: 'row' }, [
-            el('div', { class: 'grow' }, [el('div', {}, p.title),
-              el('div', { class: 'sub' }, `${(p.fields || []).length} ${t('fields')} - ${p.is_draft ? t('draft') : t('published')}`)]),
-            el('button', { class: 'btn btn-ghost', onclick: () => go(submissionsView(p)) }, t('entries')),
-            el('button', { class: 'btn btn-ghost', onclick: () => go(procedureBuild(g, p)) }, t('edit')),
-          ]));
-        }
+        let rows = data.slice();
+        let dragIdx = null;
+        const list = el('div', {});
+        const draw = () => {
+          list.innerHTML = '';
+          rows.forEach((p, idx) => {
+            const handle = el('span', { class: 'drag-handle', draggable: 'true', title: t('dragReorder') }, '⠿');
+            const row = el('div', { class: 'row' }, [
+              handle,
+              el('div', { class: 'grow' }, [el('div', {}, p.title),
+                el('div', { class: 'sub' }, `${(p.fields || []).length} ${t('fields')} - ${p.is_draft ? t('draft') : t('published')}`)]),
+              el('button', { class: 'btn btn-ghost', onclick: () => go(submissionsView(p)) }, t('entries')),
+              el('button', { class: 'btn btn-ghost', onclick: () => go(procedureBuild(g, p)) }, t('edit')),
+            ]);
+            handle.addEventListener('dragstart', e => {
+              dragIdx = idx;
+              e.dataTransfer.effectAllowed = 'move';
+              row.classList.add('dragging');
+            });
+            handle.addEventListener('dragend', () => { dragIdx = null; row.classList.remove('dragging'); });
+            row.addEventListener('dragover', e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; });
+            row.addEventListener('drop', async e => {
+              e.preventDefault();
+              if (dragIdx === null || dragIdx === idx) return;
+              const [moved] = rows.splice(dragIdx, 1);
+              rows.splice(idx, 0, moved);
+              dragIdx = null;
+              draw();
+              await saveSortOrder('procedures', rows);
+            });
+            list.append(row);
+          });
+        };
+        draw();
+        app.append(list);
       },
     };
   }

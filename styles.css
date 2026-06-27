@@ -364,8 +364,9 @@ input[type="checkbox"], input[type="radio"] {
 }
 
 .kpi-card {
+  position: relative;
   min-height: 96px;
-  padding: 16px;
+  padding: 16px 16px 16px 42px;
   border-radius: 8px;
   border: 1px solid var(--line);
   background: var(--paper);
@@ -373,6 +374,16 @@ input[type="checkbox"], input[type="radio"] {
   display: grid;
   align-content: center;
   gap: 6px;
+}
+
+.kpi-card[draggable="true"] {
+  cursor: grab;
+}
+
+.kpi-drag {
+  position: absolute;
+  left: 14px;
+  top: 16px;
 }
 
 .kpi-value {
@@ -389,6 +400,7 @@ input[type="checkbox"], input[type="radio"] {
 }
 
 .tile {
+  position: relative;
   min-height: 118px;
   width: 100%;
   display: flex;
@@ -398,6 +410,11 @@ input[type="checkbox"], input[type="radio"] {
   border-radius: 8px;
   text-align: left;
   color: inherit;
+}
+
+.tile-drag {
+  align-self: flex-start;
+  margin-top: 2px;
 }
 
 .tile.add {

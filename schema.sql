@@ -138,6 +138,7 @@ create table if not exists procedures (
   description text,
   fields      jsonb not null default '[]'::jsonb,
   is_draft    boolean not null default true,
+  sort_order  int not null default 0,
   created_by  uuid references profiles (id),
   created_at  timestamptz not null default now()
 );
@@ -159,6 +160,7 @@ create table if not exists checklists (
   group_id    uuid not null references groups (id) on delete cascade,
   title       text not null,
   items       jsonb not null default '[]'::jsonb,
+  sort_order  int not null default 0,
   created_at  timestamptz not null default now()
 );
 
@@ -228,6 +230,7 @@ create table if not exists documents (
   storage_path  text not null,
   mime_type     text,
   size_bytes    bigint,
+  sort_order    int not null default 0,
   uploaded_by   uuid references profiles (id),
   created_at    timestamptz not null default now()
 );

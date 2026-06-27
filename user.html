@@ -197,10 +197,10 @@
       countRows(db.from('incidents').select('id', { count: 'exact', head: true })
         .eq('reporter_id', state.profile.id).gte('created_at', start).lt('created_at', end)),
     ]);
-    app.append(el('div', { class: 'kpi-grid' }, [
-      kpiCard(t('checklistsCompletedToday'), completed),
-      kpiCard(t('reportsToday'), reports),
-    ]));
+    renderSortableKpiGrid(app, 'userKpiOrder', [
+      { id: 'completed', label: t('checklistsCompletedToday'), value: completed },
+      { id: 'reports', label: t('reportsToday'), value: reports },
+    ]);
   }
 
   async function countRows(query) {
@@ -216,8 +216,44 @@
     return { start: start.toISOString(), end: end.toISOString() };
   }
 
+  function renderSortableKpiGrid(host, storageKey, cards) {
+    const saved = JSON.parse(localStorage.getItem(storageKey) || '[]');
+    const rank = new Map(saved.map((id, idx) => [id, idx]));
+    cards.sort((a, b) => (rank.get(a.id) ?? 99) - (rank.get(b.id) ?? 99));
+    const grid = el('div', { class: 'kpi-grid' });
+    let dragIdx = null;
+    const draw = () => {
+      grid.innerHTML = '';
+      cards.forEach((card, idx) => {
+        const node = kpiCard(card.label, card.value);
+        node.setAttribute('draggable', 'true');
+        node.addEventListener('dragstart', e => {
+          dragIdx = idx;
+          e.dataTransfer.effectAllowed = 'move';
+          e.dataTransfer.setData('text/plain', card.id);
+          node.classList.add('dragging');
+        });
+        node.addEventListener('dragend', () => { dragIdx = null; node.classList.remove('dragging'); });
+        node.addEventListener('dragover', e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; });
+        node.addEventListener('drop', e => {
+          e.preventDefault();
+          if (dragIdx === null || dragIdx === idx) return;
+          const [moved] = cards.splice(dragIdx, 1);
+          cards.splice(idx, 0, moved);
+          localStorage.setItem(storageKey, JSON.stringify(cards.map(c => c.id)));
+          dragIdx = null;
+          draw();
+        });
+        grid.append(node);
+      });
+    };
+    draw();
+    host.append(grid);
+  }
+
   function kpiCard(label, value) {
-    return el('div', { class: 'kpi-card' }, [
+    return el('div', { class: 'kpi-card', title: t('dragReorder') }, [
+      el('span', { class: 'drag-handle kpi-drag', title: t('dragReorder') }, '⠿'),
       el('div', { class: 'kpi-value' }, value == null ? '-' : String(value)),
       el('div', { class: 'kpi-label' }, label),
     ]);
@@ -235,7 +271,9 @@
     return {
       title: groupName(g), tab: 'groups',
       async render(app) {
-        const { data } = await db.from('checklists').select('*').eq('group_id', g.id).order('created_at');
+        let q = await db.from('checklists').select('*').eq('group_id', g.id).order('sort_order').order('created_at');
+        if (q.error) q = await db.from('checklists').select('*').eq('group_id', g.id).order('created_at');
+        const data = q.data || [];
         if (!data?.length) return app.append(emptyState(t('noChecklists'), t('noChecklistsHint')));
         for (const c of data)
           app.append(el('div', { class: 'row', onclick: () => go(checklistRun(c)), style: 'cursor:pointer' }, [
@@ -588,7 +626,9 @@
     return {
       title: groupName(g), tab: 'groups',
       async render(app) {
-        const { data } = await db.from('documents').select('*').eq('group_id', g.id).order('created_at', { ascending: false });
+        let q = await db.from('documents').select('*').eq('group_id', g.id).order('sort_order').order('created_at', { ascending: false });
+        if (q.error) q = await db.from('documents').select('*').eq('group_id', g.id).order('created_at', { ascending: false });
+        const data = q.data || [];
         if (!data?.length) return app.append(emptyState(t('noDocuments'), t('noDocumentsHint')));
         for (const d of data)
           app.append(el('div', { class: 'row' }, [
@@ -609,7 +649,9 @@
     return {
       title: groupName(g), tab: 'groups',
       async render(app) {
-        const { data } = await db.from('procedures').select('*').eq('group_id', g.id).eq('is_draft', false).order('created_at');
+        let q = await db.from('procedures').select('*').eq('group_id', g.id).eq('is_draft', false).order('sort_order').order('created_at');
+        if (q.error) q = await db.from('procedures').select('*').eq('group_id', g.id).eq('is_draft', false).order('created_at');
+        const data = q.data || [];
         if (!data?.length) return app.append(emptyState(t('noProcedures'), t('noProceduresHint')));
         for (const p of data)
           app.append(el('div', { class: 'row', onclick: () => go(procedureFill(p)), style: 'cursor:pointer' }, [
