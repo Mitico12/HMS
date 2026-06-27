@@ -11,32 +11,75 @@
     .launch-card { width: 100%; max-width: 420px; text-align: center; }
     .launch-brand { font-family: 'Space Grotesk'; font-weight: 700; font-size: 1.8rem; margin-bottom: 4px; }
     .launch-tag { color: var(--steel); margin-bottom: 26px; }
-    .launch-grid { display: grid; gap: 14px; }
-    .launch .tile { min-height: 110px; text-align: left; }
+    .login-form { display: grid; gap: 12px; text-align: left; }
+    .login-form .btn { margin-top: 8px; }
+    .launch-foot { margin-top: 16px; font-size: .9rem; }
   </style>
 </head>
 <body>
-  <div class="launch">
-    <div class="launch-card">
-      <div class="launch-brand">Nicosoft HMS manager</div>
-      <div class="launch-tag">Choose where you're heading.</div>
-      <div class="launch-grid">
-        <a class="tile" href="./user.html" style="text-decoration:none;color:inherit">
-          <span class="glyph">▦</span>
-          <div>
-            <div class="t-name">Worker app</div>
-            <div class="t-meta">Checklists, report incidents, documents</div>
-          </div>
-        </a>
-        <a class="tile" href="./admin.html" style="text-decoration:none;color:inherit">
-          <span class="glyph">⚙</span>
-          <div>
-            <div class="t-name">Admin console</div>
-            <div class="t-meta">Manage groups, process incidents, roles</div>
-          </div>
-        </a>
-      </div>
-    </div>
-  </div>
+  <div id="screen"></div>
+
+  <script type="module">
+    import { db, currentProfile, el, $, toast } from './config.js';
+
+    const screen = $('#screen');
+    const isAdmin = (profile) => ['admin', 'super_admin'].includes(profile?.role);
+    const routeFor = (profile) => isAdmin(profile) ? './admin.html' : './user.html';
+    const routeTo = (profile) => location.replace(new URL(routeFor(profile), location.href).href);
+
+    (async function boot() {
+      const profile = await currentProfile();
+      if (profile) return routeTo(profile);
+      showLogin();
+    })();
+
+    function showLogin() {
+      screen.innerHTML = '';
+      const ident = el('input', { type: 'text', id: 'ident', autocomplete: 'username', placeholder: 'Username or email' });
+      const password = el('input', { type: 'password', id: 'pw', autocomplete: 'current-password', placeholder: 'Password' });
+      const form = el('form', { class: 'login-form', onsubmit: submit }, [
+        labeled('Username or email', ident),
+        labeled('Password', password),
+        el('button', { class: 'btn btn-primary btn-block', type: 'submit' }, 'Sign in'),
+      ]);
+
+      screen.append(el('div', { class: 'launch' },
+        el('div', { class: 'launch-card auth-card' }, [
+          el('div', { class: 'launch-brand' }, 'Nicosoft HMS manager'),
+          el('div', { class: 'launch-tag' }, 'Sign in to continue.'),
+          form,
+          el('div', { class: 'launch-foot muted' }, [
+            document.createTextNode('Need an account? '),
+            el('a', { href: './user.html' }, 'Create one'),
+          ]),
+        ])
+      ));
+    }
+
+    async function submit(event) {
+      event.preventDefault();
+      const rawIdent = $('#ident').value.trim();
+      const password = $('#pw').value;
+      if (!rawIdent || !password) return toast('Enter your username or email and password.', 'err');
+
+      let email = rawIdent;
+      if (!rawIdent.includes('@')) {
+        const { data: resolved, error } = await db.rpc('get_email_for_username', { p_username: rawIdent });
+        if (error) return toast(error.message, 'err');
+        if (!resolved) return toast('No account found for that username.', 'err');
+        email = resolved;
+      }
+
+      const { error } = await db.auth.signInWithPassword({ email, password });
+      if (error) return toast(error.message, 'err');
+      const profile = await currentProfile();
+      if (!profile) return toast('Signed in, but no profile was found for this account.', 'err');
+      routeTo(profile);
+    }
+
+    function labeled(text, inputEl) {
+      return el('label', { class: 'field' }, [el('span', {}, text), inputEl]);
+    }
+  </script>
 </body>
 </html>
