@@ -13,6 +13,8 @@
     .launch-tag { color: var(--steel); margin-bottom: 26px; }
     .login-form { display: grid; gap: 12px; text-align: left; }
     .login-form .btn { margin-top: 8px; }
+    .launch-grid { display: grid; gap: 14px; }
+    .launch .tile { min-height: 110px; text-align: left; }
     .launch-foot { margin-top: 16px; font-size: .9rem; }
   </style>
 </head>
@@ -24,12 +26,12 @@
 
     const screen = $('#screen');
     const isAdmin = (profile) => ['admin', 'super_admin'].includes(profile?.role);
-    const routeFor = (profile) => isAdmin(profile) ? './admin.html' : './user.html';
-    const routeTo = (profile) => location.replace(new URL(routeFor(profile), location.href).href);
+    const openPage = (page) => location.replace(new URL(page, location.href).href);
+    const continueFor = (profile) => isAdmin(profile) ? showAdminChoice(profile) : openPage('./user.html');
 
     (async function boot() {
       const profile = await currentProfile();
-      if (profile) return routeTo(profile);
+      if (profile) return continueFor(profile);
       showLogin();
     })();
 
@@ -56,6 +58,33 @@
       ));
     }
 
+    function showAdminChoice(profile) {
+      screen.innerHTML = '';
+      screen.append(el('div', { class: 'launch' },
+        el('div', { class: 'launch-card auth-card' }, [
+          el('div', { class: 'launch-brand' }, 'Nicosoft HMS manager'),
+          el('div', { class: 'launch-tag' }, `Signed in as ${profile.email || profile.username || 'admin'}.`),
+          el('div', { class: 'launch-grid' }, [
+            el('button', { class: 'tile', onclick: () => openPage('./user.html') }, [
+              el('span', { class: 'glyph' }, '▦'),
+              el('div', {}, [
+                el('div', { class: 't-name' }, 'Worker app'),
+                el('div', { class: 't-meta' }, 'Checklists, reports, and documents'),
+              ]),
+            ]),
+            el('button', { class: 'tile', onclick: () => openPage('./admin.html') }, [
+              el('span', { class: 'glyph' }, '⚙'),
+              el('div', {}, [
+                el('div', { class: 't-name' }, 'Admin console'),
+                el('div', { class: 't-meta' }, 'Manage groups, incidents, and access'),
+              ]),
+            ]),
+          ]),
+          el('button', { class: 'btn btn-ghost btn-block', style: 'margin-top:14px', onclick: signOut }, 'Sign out'),
+        ])
+      ));
+    }
+
     async function submit(event) {
       event.preventDefault();
       const rawIdent = $('#ident').value.trim();
@@ -74,7 +103,12 @@
       if (error) return toast(error.message, 'err');
       const profile = await currentProfile();
       if (!profile) return toast('Signed in, but no profile was found for this account.', 'err');
-      routeTo(profile);
+      continueFor(profile);
+    }
+
+    async function signOut() {
+      await db.auth.signOut();
+      showLogin();
     }
 
     function labeled(text, inputEl) {
