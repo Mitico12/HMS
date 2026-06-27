@@ -224,6 +224,48 @@ input:focus, select:focus, textarea:focus {
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 22%, transparent);
 }
 
+input[type="range"] {
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  accent-color: var(--primary);
+}
+
+input[type="range"]:focus {
+  box-shadow: none;
+}
+
+input[type="checkbox"], input[type="radio"] {
+  width: auto;
+  min-height: 0;
+  margin: 0;
+}
+
+.req-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: .85rem;
+  color: var(--steel);
+}
+
+.drag-handle {
+  cursor: grab;
+  user-select: none;
+  color: var(--steel);
+  font-size: 1.1rem;
+  line-height: 1;
+  padding: 2px 4px;
+}
+
+.drag-handle:active { cursor: grabbing; }
+
+.card.dragging, .row.dragging {
+  opacity: .45;
+  border-color: var(--primary);
+}
+
 .btn, .iconbtn, .chip {
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -425,6 +467,33 @@ input:focus, select:focus, textarea:focus {
 .pill.you {
   background: color-mix(in srgb, var(--ink) 12%, transparent);
   color: var(--ink);
+}
+
+.pill.archived {
+  background: #8a94a6;
+  border-color: #8a94a6;
+  color: #fff;
+}
+
+.tile { position: relative; }
+
+.badge {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: var(--danger);
+  color: #fff;
+  font-size: .78rem;
+  font-weight: 750;
+  line-height: 1;
 }
 
 .chip {

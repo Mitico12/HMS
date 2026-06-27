@@ -59,7 +59,70 @@
     await loadProfiles();
     showApp();
     go(homeView(), { reset: true });
+    startReportMonitor();
   })();
+
+  // ── report monitor: polls open reports, drives the tile badge + notifications ──
+  const monitor = { seen: null, count: 0, emergency: false, timer: null };
+  const notifyPref = () => localStorage.getItem('notify_reports') || 'all';
+  const isRedReport = (i) => (i.consequence_ids?.length > 0) || !!i.consequence_other;
+
+  function updateReportsBadge() {
+    const text = monitor.count ? (monitor.emergency ? '🚩 ' : '') + monitor.count : '';
+    document.querySelectorAll('.reports-badge').forEach(b => {
+      b.textContent = text;
+      b.style.display = monitor.count ? 'inline-flex' : 'none';
+      b.style.background = monitor.emergency ? 'var(--danger)' : 'var(--steel)';
+    });
+  }
+
+  function fireReportNotification(red, i) {
+    const title = red ? '🚩 Emergency report' : 'New report';
+    const body = truncate(i.what_happened || 'A new report was submitted.', 80);
+    toast(`${title}: ${body}`, red ? 'err' : 'ok');
+    try {
+      if ('Notification' in window && Notification.permission === 'granted') new Notification(title, { body });
+    } catch (e) { /* notifications unsupported */ }
+  }
+
+  async function pollReports() {
+    let q = await db.from('incidents')
+      .select('id, status, consequence_ids, consequence_other, report_type, what_happened')
+      .eq('archived', false).eq('status', 'open');
+    if (q.error) {
+      // archive column not present yet — fall back to status only
+      q = await db.from('incidents')
+        .select('id, status, consequence_ids, consequence_other, report_type, what_happened')
+        .eq('status', 'open');
+      if (q.error) return;
+    }
+    const open = q.data || [];
+    monitor.count = open.length;
+    monitor.emergency = open.some(isRedReport);
+    updateReportsBadge();
+
+    const ids = new Set(open.map(i => i.id));
+    if (monitor.seen === null) { monitor.seen = ids; return; } // seed on first run, no notifications
+    const fresh = open.filter(i => !monitor.seen.has(i.id));
+    monitor.seen = ids;
+
+    const pref = notifyPref();
+    if (pref === 'off') return;
+    for (const i of fresh) {
+      const red = isRedReport(i);
+      if (pref === 'red' && !red) continue;
+      fireReportNotification(red, i);
+    }
+  }
+
+  function startReportMonitor() {
+    if (notifyPref() !== 'off' && 'Notification' in window && Notification.permission === 'default') {
+      Notification.requestPermission().catch(() => {});
+    }
+    pollReports();
+    if (monitor.timer) clearInterval(monitor.timer);
+    monitor.timer = setInterval(pollReports, 30000);
+  }
 
   async function loadProfiles() {
     const withUsername = await db.from('profiles')
@@ -235,17 +298,20 @@
         ]));
 
         for (const g of state.groups) {
-          grid.append(el('button', { class: 'tile', onclick: () => go(groupView(g)) }, [
+          const tile = el('button', { class: 'tile', onclick: () => go(groupView(g)) }, [
             el('span', { class: 'glyph' }, g.icon || '📁'),
             el('div', {}, [
               el('div', { class: 't-name' }, groupName(g)),
               el('div', { class: 't-meta' }, kindLabel(g.kind)),
             ]),
-          ]));
+          ]);
+          if (g.kind === 'reports') tile.append(el('span', { class: 'badge reports-badge' }));
+          grid.append(tile);
         }
         grid.append(el('button', { class: 'tile add', onclick: addGroupModal },
           [el('span', { class: 'glyph' }, '+'), el('div', { class: 't-meta' }, t('addGroup'))]));
         app.append(grid);
+        updateReportsBadge();
       },
     };
   }
@@ -255,48 +321,155 @@
     return ({ checklists: t('checklists'), reports: t('reports'), documents: t('documents'), procedures: t('procedures') }[key] || g.name);
   };
 
+  // Inclusive date-range test against an ISO timestamp; bounds are YYYY-MM-DD strings.
+  function inDateRange(iso, fromStr, untilStr) {
+    if (!fromStr && !untilStr) return true;
+    if (!iso) return false;
+    const ms = new Date(iso).getTime();
+    if (fromStr && ms < new Date(fromStr + 'T00:00:00').getTime()) return false;
+    if (untilStr && ms > new Date(untilStr + 'T23:59:59.999').getTime()) return false;
+    return true;
+  }
+
   function logsView() {
     return {
       title: t('logs'), tab: 'groups',
       async render(app) {
         await loadProfiles();
+        const archived = await fetchArchivedReports();
         const runsQ = await db.from('checklist_runs').select('*').not('submitted_at', 'is', null).order('submitted_at', { ascending: false });
+        const runs = runsQ.error ? [] : (runsQ.data || []);
+        const { data: checklists } = await db.from('checklists').select('*');
+        const byChecklist = new Map((checklists || []).map(c => [c.id, c]));
+
+        // ════════ REPORTS ════════
+        app.append(el('div', { class: 'section-head', style: 'margin-bottom:10px' }, [
+          el('h2', { class: 'display', style: 'font-size:1.15rem;margin:0' }, t('archivedReports')),
+          archived.length ? el('button', { class: 'btn btn-ghost', onclick: () =>
+            exportReportsExcel(rFiltered(), 'archived-reports.xlsx') }, `⬇  ${t('exportExcel')}`) : null,
+        ]));
+
+        const rFilters = { from: '', until: '', admin: 'all', user: 'all' };
+        const rFrom = el('input', { type: 'date', onchange: e => { rFilters.from = e.target.value; drawReports(); } });
+        const rUntil = el('input', { type: 'date', onchange: e => { rFilters.until = e.target.value; drawReports(); } });
+
+        const adminIds = [...new Set(archived.map(r => r.assigned_to).filter(Boolean))];
+        const rAdmin = el('select', { onchange: e => { rFilters.admin = e.target.value; drawReports(); } }, [
+          opt('all', t('anyAssignee')),
+          opt('unassigned', t('unassigned')),
+          ...adminIds.map(id => opt(id, labelOf(state.profiles.find(p => p.id === id)))),
+        ]);
+        // Privacy-safe: anonymous reporters are never listed by name, only as one bucket.
+        const namedReporterIds = [...new Set(archived.filter(r => !r.is_anonymous).map(r => r.reporter_id).filter(Boolean))];
+        const hasAnon = archived.some(r => r.is_anonymous);
+        const rUser = el('select', { onchange: e => { rFilters.user = e.target.value; drawReports(); } }, [
+          opt('all', t('anyReporter')),
+          ...namedReporterIds.map(id => opt(id, labelOf(state.profiles.find(p => p.id === id)))),
+          ...(hasAnon ? [opt('anon', t('anonymous'))] : []),
+        ]);
+
+        app.append(el('div', { style: 'display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px' }, [
+          el('div', { style: 'flex:1;min-width:130px' }, labeled(t('dateFrom'), rFrom)),
+          el('div', { style: 'flex:1;min-width:130px' }, labeled(t('dateUntil'), rUntil)),
+          el('div', { style: 'flex:1;min-width:150px' }, labeled(t('filterByAssignee'), rAdmin)),
+          el('div', { style: 'flex:1;min-width:150px' }, labeled(t('filterByReporter'), rUser)),
+        ]));
+        const reportsHost = el('div', {});
+        app.append(reportsHost);
+
+        const rFiltered = () => archived.filter(r =>
+          inDateRange(r.created_at, rFilters.from, rFilters.until) &&
+          (rFilters.admin === 'all' ? true : rFilters.admin === 'unassigned' ? !r.assigned_to : r.assigned_to === rFilters.admin) &&
+          (rFilters.user === 'all' ? true : rFilters.user === 'anon' ? !!r.is_anonymous : (!r.is_anonymous && r.reporter_id === rFilters.user)));
+
+        function drawReports() {
+          reportsHost.innerHTML = '';
+          const rows = rFiltered();
+          if (!rows.length) { reportsHost.append(el('p', { class: 'muted', style: 'margin-bottom:18px' }, archived.length ? 'No reports match these filters.' : 'No archived reports yet.')); return; }
+          const byType = new Map();
+          for (const r of rows) {
+            const k = r.report_type || 'incident';
+            if (!byType.has(k)) byType.set(k, []);
+            byType.get(k).push(r);
+          }
+          for (const [k, group] of byType) {
+            reportsHost.append(el('h3', { style: 'margin:14px 0 8px' }, `${typeLabel(k)} (${group.length})`));
+            for (const i of group) {
+              reportsHost.append(el('div', { class: 'row', onclick: () => go(incidentView(i.id)), style: 'cursor:pointer' }, [
+                el('div', { class: 'grow' }, [
+                  el('div', {}, truncate(i.what_happened, 70)),
+                  el('div', { class: 'sub' }, `${reporterOf(i)} · ${fmt(i.created_at)}`),
+                ]),
+                el('span', { class: `pill ${incidentStatusClass(i)}`, style: incidentStatusStyle(i) }, statusLabel(i.status)),
+              ]));
+            }
+          }
+        }
+        drawReports();
+
+        // ════════ CHECKLISTS ════════
+        app.append(el('h2', { class: 'display', style: 'font-size:1.15rem;margin:24px 0 10px' }, t('checklistLogs')));
         if (runsQ.error) {
           app.append(emptyState(t('noChecklistLogs'), 'Run migration_incident_photos_checklist_logs.sql first.'));
           return;
         }
-        const { data: checklists } = await db.from('checklists').select('*');
-        const byChecklist = new Map((checklists || []).map(c => [c.id, c]));
-        const runs = runsQ.data || [];
-        if (!runs.length) return app.append(emptyState(t('noChecklistLogs'), t('checklistLogsMeta')));
-        for (const run of runs) {
-          const checklist = byChecklist.get(run.checklist_id);
-          const items = checklist?.items || [];
-          const missing = items.filter(i => !run.checked?.[i.id]?.done);
-          const hasNotes = !!(run.notes || '').trim();
-          const needsReview = missing.length > 0 || hasNotes;
-          const card = el('div', { class: 'card log-card' + (needsReview ? ' log-warning' : '') }, [
-            el('div', { class: 'section-head' }, [
-              el('div', {}, [
-                el('h3', {}, checklist?.title || t('checklist')),
-                el('div', { class: 'sub' }, `${nameOf(run.user_id)} - ${fmt(run.submitted_at || run.updated_at)}`),
+
+        const cFilters = { from: '', until: '', user: 'all', checklist: 'all' };
+        const cFrom = el('input', { type: 'date', onchange: e => { cFilters.from = e.target.value; drawChecklists(); } });
+        const cUntil = el('input', { type: 'date', onchange: e => { cFilters.until = e.target.value; drawChecklists(); } });
+        const runUserIds = [...new Set(runs.map(r => r.user_id).filter(Boolean))];
+        const cUser = el('select', { onchange: e => { cFilters.user = e.target.value; drawChecklists(); } }, [
+          opt('all', t('anyReporter')),
+          ...runUserIds.map(id => opt(id, labelOf(state.profiles.find(p => p.id === id)))),
+        ]);
+        // Checklist-type options pulled from the checklists that actually appear in the runs.
+        const runChecklistIds = [...new Set(runs.map(r => r.checklist_id).filter(Boolean))];
+        const cType = el('select', { onchange: e => { cFilters.checklist = e.target.value; drawChecklists(); } }, [
+          opt('all', t('allChecklists')),
+          ...runChecklistIds.map(id => opt(id, byChecklist.get(id)?.title || t('checklist'))),
+        ]);
+        app.append(el('div', { style: 'display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px' }, [
+          el('div', { style: 'flex:1;min-width:130px' }, labeled(t('dateFrom'), cFrom)),
+          el('div', { style: 'flex:1;min-width:130px' }, labeled(t('dateUntil'), cUntil)),
+          el('div', { style: 'flex:1;min-width:150px' }, labeled(t('checklist'), cType)),
+          el('div', { style: 'flex:1;min-width:150px' }, labeled(t('filterByUser'), cUser)),
+        ]));
+        const checklistHost = el('div', {});
+        app.append(checklistHost);
+
+        function drawChecklists() {
+          checklistHost.innerHTML = '';
+          const rows = runs.filter(r =>
+            inDateRange(r.submitted_at || r.updated_at, cFilters.from, cFilters.until) &&
+            (cFilters.user === 'all' || r.user_id === cFilters.user) &&
+            (cFilters.checklist === 'all' || r.checklist_id === cFilters.checklist));
+          if (!rows.length) { checklistHost.append(el('p', { class: 'muted' }, runs.length ? 'No checklists match these filters.' : t('noChecklistLogs'))); return; }
+          for (const run of rows) {
+            const checklist = byChecklist.get(run.checklist_id);
+            const items = checklist?.items || [];
+            const missing = items.filter(i => !run.checked?.[i.id]?.done);
+            const hasNotes = !!(run.notes || '').trim();
+            const needsReview = missing.length > 0 || hasNotes;
+            const card = el('div', { class: 'card log-card' + (needsReview ? ' log-warning' : '') }, [
+              el('div', { class: 'section-head' }, [
+                el('div', {}, [
+                  el('h3', {}, checklist?.title || t('checklist')),
+                  el('div', { class: 'sub' }, `${nameOf(run.user_id)} - ${fmt(run.submitted_at || run.updated_at)}`),
+                ]),
+                el('span', { class: 'pill', style: needsReview ? 'background:#f2c94c;color:#17212b;border-color:#f2c94c' : '' },
+                  needsReview ? t('checklistLogNeedsAttention') : t('completed')),
               ]),
-              el('span', { class: 'pill', style: needsReview ? 'background:#f2c94c;color:#17212b;border-color:#f2c94c' : '' },
-                needsReview ? t('checklistLogNeedsAttention') : t('completed')),
-            ]),
-            el('div', { class: 'sub' }, missing.length ? t('missingItems', { count: missing.length }) : t('completed')),
-          ]);
-          if (missing.length) {
-            card.append(el('ul', { class: 'log-missing' }, missing.map(i => el('li', {}, i.label))));
-          }
-          if (hasNotes) {
-            card.append(el('div', { class: 'log-notes' }, [
+              el('div', { class: 'sub' }, missing.length ? t('missingItems', { count: missing.length }) : t('completed')),
+            ]);
+            if (missing.length) card.append(el('ul', { class: 'log-missing' }, missing.map(i => el('li', {}, i.label))));
+            if (hasNotes) card.append(el('div', { class: 'log-notes' }, [
               el('strong', {}, `${t('notes')}: `),
               document.createTextNode(run.notes.trim()),
             ]));
+            checklistHost.append(card);
           }
-          app.append(card);
         }
+        drawChecklists();
       },
     };
   }
@@ -363,16 +536,37 @@
       render(app) {
         const title = el('input', { type: 'text', value: existing?.title || '', placeholder: 'Checklist title' });
         let items = (existing?.items || []).map(i => ({ ...i }));
+        let dragIdx = null;
         const list = el('div', {});
         const draw = () => {
           list.innerHTML = '';
           items.forEach((it, idx) => {
             const inp = el('input', { type: 'text', value: it.label, placeholder: `Item ${idx + 1}`,
               oninput: e => it.label = e.target.value });
-            list.append(el('div', { class: 'row' }, [
+            const handle = el('span', { class: 'drag-handle', draggable: 'true', title: t('dragReorder') }, '⠿');
+            const row = el('div', { class: 'row' }, [
+              handle,
               el('div', { class: 'grow' }, inp),
               el('button', { class: 'btn btn-danger', onclick: () => { items.splice(idx, 1); draw(); } }, '✕'),
-            ]));
+            ]);
+            handle.addEventListener('dragstart', e => {
+              dragIdx = idx;
+              e.dataTransfer.effectAllowed = 'move';
+              e.dataTransfer.setData('text/plain', String(idx));
+              try { e.dataTransfer.setDragImage(row, 20, 20); } catch (_) {}
+              row.classList.add('dragging');
+            });
+            handle.addEventListener('dragend', () => { row.classList.remove('dragging'); dragIdx = null; });
+            row.addEventListener('dragover', e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; });
+            row.addEventListener('drop', e => {
+              e.preventDefault();
+              if (dragIdx === null || dragIdx === idx) return;
+              const [moved] = items.splice(dragIdx, 1);
+              items.splice(idx, 0, moved);
+              dragIdx = null;
+              draw();
+            });
+            list.append(row);
           });
         };
         draw();
@@ -409,10 +603,11 @@
       action: el('button', { class: 'iconbtn', title: t('incidentCategories'), onclick: () => go(categoriesView()) }, '☰'),
       async render(app) {
         await loadProfiles();
-        const { data } = await db.from('incidents').select('*').order('created_at', { ascending: false });
-        if (!data?.length) return app.append(emptyState(t('noIncidents'), t('noIncidentsHint')));
+        const data = await fetchActiveReports();
+        if (!data.length) return app.append(emptyState(t('noIncidents'), t('noIncidentsHint')));
 
-        const filters = { status: 'all', assignee: 'all', reporter: 'all' };
+        const filters = { status: 'all', type: 'all', assignee: 'all', reporter: 'all' };
+        let currentRows = data.slice();
 
         // Status chips — now with a visible active state.
         const statusChips = {};
@@ -424,6 +619,13 @@
           statusChips[s] = chip;
           statusBar.append(chip);
         });
+
+        // Report-type options, derived from what is actually present.
+        const typeIds = [...new Set(data.map(i => i.report_type || 'incident'))];
+        const typeSelect = el('select', { onchange: e => { filters.type = e.target.value; apply(); } }, [
+          opt('all', t('allTypes')),
+          ...typeIds.map(k => opt(k, typeLabel(k))),
+        ]);
 
         // Assignee options: only ids that actually appear as an assignee, plus an "unassigned" bucket.
         const assigneeIds = [...new Set(data.map(i => i.assigned_to).filter(Boolean))];
@@ -447,15 +649,19 @@
         app.append(el('div', { style: 'display:grid;gap:10px;margin-bottom:14px' }, [
           statusBar,
           el('div', { style: 'display:flex;gap:10px;flex-wrap:wrap' }, [
-            el('div', { style: 'flex:1;min-width:180px' }, labeled(t('filterByAssignee'), assigneeSelect)),
-            el('div', { style: 'flex:1;min-width:180px' }, labeled(t('filterByReporter'), reporterSelect)),
+            el('div', { style: 'flex:1;min-width:150px' }, labeled(t('filterByType'), typeSelect)),
+            el('div', { style: 'flex:1;min-width:150px' }, labeled(t('filterByAssignee'), assigneeSelect)),
+            el('div', { style: 'flex:1;min-width:150px' }, labeled(t('filterByReporter'), reporterSelect)),
           ]),
+          el('button', { class: 'btn btn-ghost', style: 'justify-self:start', onclick: () =>
+            exportReportsExcel(currentRows, 'reports.xlsx') }, `⬇  ${t('exportExcel')}`),
         ]));
 
         const listHost = el('div', {});
         app.append(listHost);
 
         const matchesStatus = (i) => filters.status === 'all' || i.status === filters.status;
+        const matchesType = (i) => filters.type === 'all' || (i.report_type || 'incident') === filters.type;
         const matchesAssignee = (i) =>
           filters.assignee === 'all' ? true
             : filters.assignee === 'unassigned' ? !i.assigned_to
@@ -470,14 +676,15 @@
         }
 
         function apply() {
+          currentRows = data.filter(i =>
+            matchesStatus(i) && matchesType(i) && matchesAssignee(i) && matchesReporter(i));
           listHost.innerHTML = '';
-          const rows = data.filter(i => matchesStatus(i) && matchesAssignee(i) && matchesReporter(i));
-          if (!rows.length) { listHost.append(el('p', { class: 'muted' }, 'Nothing matches these filters.')); return; }
-          for (const i of rows) {
+          if (!currentRows.length) { listHost.append(el('p', { class: 'muted' }, 'Nothing matches these filters.')); return; }
+          for (const i of currentRows) {
             listHost.append(el('div', { class: 'row', onclick: () => go(incidentView(i.id)), style: 'cursor:pointer' }, [
               el('div', { class: 'grow' }, [
                 el('div', {}, truncate(i.what_happened, 70)),
-                el('div', { class: 'sub' }, `${reporterOf(i)} · ${fmt(i.created_at)}`),
+                el('div', { class: 'sub' }, `${typeLabel(i.report_type)} · ${reporterOf(i)} · ${fmt(i.created_at)}`),
               ]),
               el('span', { class: `pill ${incidentStatusClass(i)}`, style: incidentStatusStyle(i) }, statusLabel(i.status)),
             ]));
@@ -488,6 +695,54 @@
         apply();
       },
     };
+  }
+  const typeLabel = (k) => ({ incident: t('incident'), hazard: t('hazard') }[k] || k || t('incident'));
+
+  // Active (non-archived) reports, with a graceful fallback if the archive column
+  // is not present yet (i.e. the migration has not been run).
+  async function fetchActiveReports() {
+    let q = await db.from('incidents').select('*').eq('archived', false).order('created_at', { ascending: false });
+    if (q.error) q = await db.from('incidents').select('*').order('created_at', { ascending: false });
+    return q.data || [];
+  }
+  async function fetchArchivedReports() {
+    const q = await db.from('incidents').select('*').eq('archived', true).order('archived_at', { ascending: false });
+    return q.error ? [] : (q.data || []);
+  }
+
+  // Export a set of reports to a real .xlsx, loading SheetJS on demand.
+  // Reporter identity respects anonymity exactly as the UI does.
+  async function exportReportsExcel(rows, filename) {
+    if (!rows.length) return toast('Nothing to export.', 'err');
+    let XLSX;
+    try { XLSX = await import('https://cdn.sheetjs.com/xlsx-0.20.3/package/xlsx.mjs'); }
+    catch (e) { return toast('Could not load the Excel library (check the network).', 'err'); }
+    const { data: cats } = await db.from('incident_categories').select('*');
+    const catName = (id) => (cats || []).find(c => c.id === id)?.name || id;
+    const joinCats = (ids, other) => {
+      const names = (ids || []).map(catName);
+      if (other) names.push(`${other} (other)`);
+      return names.join(', ');
+    };
+    const sheet = rows.map(i => ({
+      Type: typeLabel(i.report_type),
+      Status: statusLabel(i.status),
+      'What happened': i.what_happened || '',
+      'Needs fixing': i.what_wrong || '',
+      'Root causes': joinCats(i.root_cause_ids, i.root_cause_other),
+      Consequences: joinCats(i.consequence_ids, i.consequence_other),
+      Reporter: reporterOf(i),
+      'Assigned to': i.assigned_to ? nameOf(i.assigned_to) : '',
+      Location: i.location || '',
+      Occurred: i.occurred_at ? fmt(i.occurred_at) : '',
+      Submitted: fmt(i.created_at),
+      Resolved: i.resolved_at ? fmt(i.resolved_at) : '',
+      Archived: i.archived_at ? fmt(i.archived_at) : '',
+    }));
+    const ws = XLSX.utils.json_to_sheet(sheet);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Reports');
+    XLSX.writeFile(wb, filename);
   }
   const statusLabel = (s) => ({ open: t('open'), in_progress: t('inProgress'), resolved: t('resolved') }[s] || s);
   function incidentStatusClass(inc) {
@@ -615,6 +870,34 @@
             toast('Final report saved.');
           } }, t('saveFinalReport')),
         ]));
+
+        // archive — super admins only; archiving needs a resolved report.
+        if (state.profile.role === 'super_admin') {
+          if (inc.archived) {
+            app.append(el('div', { class: 'card' }, [
+              el('div', { class: 'section-head' }, [
+                el('span', { class: 'pill archived' }, t('archived')),
+                el('button', { class: 'btn btn-ghost', onclick: async () => {
+                  const { error } = await db.rpc('unarchive_report', { p_id: id });
+                  if (error) return toast(error.message, 'err');
+                  toast(t('unarchive') + '.'); back();
+                } }, t('unarchive')),
+              ]),
+              inc.archived_at ? el('p', { class: 'muted', style: 'font-size:.82rem' }, `${t('archived')} ${fmt(inc.archived_at)}`) : null,
+            ]));
+          } else if (inc.status === 'resolved') {
+            app.append(el('div', { class: 'card' }, [
+              el('h3', {}, t('archive')),
+              el('p', { class: 'muted', style: 'font-size:.82rem' }, 'Moves this report into Logs, grouped by type. Super admins only.'),
+              el('button', { class: 'btn btn-ghost', onclick: async () => {
+                if (!confirm('Archive this report? It moves to Logs.')) return;
+                const { error } = await db.rpc('archive_report', { p_id: id });
+                if (error) return toast(error.message, 'err');
+                toast(t('archived') + '.'); back();
+              } }, t('archive')),
+            ]));
+          }
+        }
       },
     };
   }
@@ -716,6 +999,7 @@
   const FIELD_TYPES = [
     ['short', 'selectTypeShort'], ['long', 'selectTypeLong'], ['number', 'selectTypeNumber'],
     ['dropdown', 'selectTypeDropdown'], ['checkbox', 'selectTypeCheckbox'],
+    ['checkboxes', 'selectTypeCheckboxes'], ['slider', 'selectTypeSlider'],
   ];
   function proceduresGroupView(g) {
     return {
@@ -743,6 +1027,7 @@
         const title = el('input', { type: 'text', value: existing?.title || '', placeholder: 'Procedure title' });
         const desc = el('textarea', { placeholder: 'Short description (optional)' }); desc.value = existing?.description || '';
         let fields = (existing?.fields || []).map(f => ({ ...f }));
+        let dragIdx = null;
         const list = el('div', {});
         const draw = () => {
           list.innerHTML = '';
@@ -752,23 +1037,70 @@
             const typeSel = el('select', { onchange: e => { f.type = e.target.value; draw(); } },
               FIELD_TYPES.map(([v, key]) => opt(v, t(key))));
             typeSel.value = f.type;
-            const reqBox = el('label', { style: 'display:flex;align-items:center;gap:6px;font-size:.85rem' }, [
+            const reqBox = el('label', { class: 'req-toggle' }, [
               el('input', { type: 'checkbox', onchange: e => f.required = e.target.checked }),
               document.createTextNode(t('required')),
             ]);
             reqBox.querySelector('input').checked = !!f.required;
+            const handle = el('span', { class: 'drag-handle', draggable: 'true', title: t('dragReorder') }, '⠿');
             const card = el('div', { class: 'card' }, [
               el('div', { class: 'section-head' }, [
-                el('strong', {}, t('field', { n: idx + 1 })),
+                el('div', { style: 'display:flex;align-items:center;gap:8px;min-width:0' }, [
+                  handle, el('strong', {}, t('field', { n: idx + 1 })),
+                ]),
                 el('button', { class: 'btn btn-danger', onclick: () => { fields.splice(idx, 1); draw(); } }, '✕'),
               ]),
               labeled(t('label'), labelInp), labeled(t('type'), typeSel), reqBox,
             ]);
-            if (f.type === 'dropdown') {
+
+            // Drag to reorder: only the handle starts a drag, so the inputs stay editable.
+            handle.addEventListener('dragstart', e => {
+              dragIdx = idx;
+              e.dataTransfer.effectAllowed = 'move';
+              e.dataTransfer.setData('text/plain', String(idx));
+              try { e.dataTransfer.setDragImage(card, 20, 20); } catch (_) {}
+              card.classList.add('dragging');
+            });
+            handle.addEventListener('dragend', () => { card.classList.remove('dragging'); dragIdx = null; });
+            card.addEventListener('dragover', e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; });
+            card.addEventListener('drop', e => {
+              e.preventDefault();
+              if (dragIdx === null || dragIdx === idx) return;
+              const [moved] = fields.splice(dragIdx, 1);
+              fields.splice(idx, 0, moved);
+              dragIdx = null;
+              draw();
+            });
+
+            if (f.type === 'dropdown' || f.type === 'checkboxes') {
               const optsInp = el('input', { type: 'text', value: (f.options || []).join(', '),
                 placeholder: 'Option A, Option B, Option C',
                 oninput: e => f.options = e.target.value.split(',').map(s => s.trim()).filter(Boolean) });
               card.append(labeled(t('optionsComma'), optsInp));
+            }
+            if (f.type === 'slider') {
+              if (f.min == null) f.min = 1;
+              if (f.max == null) f.max = 5;
+              if (f.round == null) f.round = 'nearest';
+              const minInp = el('input', { type: 'number', value: f.min, oninput: e => f.min = Number(e.target.value) });
+              const maxInp = el('input', { type: 'number', value: f.max, oninput: e => f.max = Number(e.target.value) });
+              const leftInp = el('input', { type: 'text', value: f.leftLabel || '',
+                placeholder: 'e.g. Not at all', oninput: e => f.leftLabel = e.target.value });
+              const rightInp = el('input', { type: 'text', value: f.rightLabel || '',
+                placeholder: 'e.g. Very much', oninput: e => f.rightLabel = e.target.value });
+              const roundSel = el('select', { onchange: e => f.round = e.target.value }, [
+                opt('nearest', t('roundNearest')), opt('up', t('roundUp')),
+              ]);
+              roundSel.value = f.round;
+              card.append(
+                el('div', { style: 'display:flex;gap:10px' }, [
+                  el('div', { style: 'flex:1' }, labeled(t('sliderMin'), minInp)),
+                  el('div', { style: 'flex:1' }, labeled(t('sliderMax'), maxInp)),
+                ]),
+                labeled(t('sliderLeft'), leftInp),
+                labeled(t('sliderRight'), rightInp),
+                labeled(t('sliderRound'), roundSel),
+              );
             }
             list.append(card);
           });
@@ -819,7 +1151,8 @@
             const v = s.answers[f.key];
             card.append(el('div', { style: 'margin-bottom:6px' }, [
               el('span', { class: 'muted', style: 'font-size:.82rem' }, f.label + ': '),
-              el('span', {}, v === true ? 'Yes' : v === false ? 'No' : (v ?? '—')),
+              el('span', {}, v === true ? 'Yes' : v === false ? 'No'
+                : Array.isArray(v) ? (v.length ? v.join(', ') : '—') : (v ?? '—')),
             ]));
           }
           app.append(card);
@@ -891,6 +1224,8 @@
           ...requests.map(r => changeRequestCard(r, { embedded: true, readOnly: r.status !== 'pending' })),
         ]));
 
+        app.append(notificationCard());
+
         app.append(el('div', { class: 'row', onclick: () => go(usersView()), style: 'cursor:pointer' }, [
           el('div', { class: 'grow' }, [el('div', {}, 'Users'),
             el('div', { class: 'sub' }, 'Approve accounts, profile changes, and access')]),
@@ -905,9 +1240,29 @@
     };
   }
 
-  // ════════════════════════════════════════════════════════
-  //  USERS — approve accounts, profile changes, roles, and email history
-  // ════════════════════════════════════════════════════════
+  function notificationCard() {
+    const sel = el('select', {}, [
+      opt('all', t('notifyAll')),
+      opt('red', t('notifyRed')),
+      opt('off', t('notifyOff')),
+    ]);
+    sel.value = notifyPref();
+    sel.addEventListener('change', () => {
+      localStorage.setItem('notify_reports', sel.value);
+      if (sel.value !== 'off' && 'Notification' in window && Notification.permission === 'default') {
+        Notification.requestPermission().catch(() => {});
+      }
+      toast('Notification preference saved.');
+    });
+    return el('div', { class: 'card' }, [
+      el('h3', {}, t('notifications')),
+      el('p', { class: 'muted', style: 'font-size:.82rem' },
+        'Alerts show while the console is open in your browser. This setting is per device.'),
+      labeled(t('notifications'), sel),
+    ]);
+  }
+
+
   function missingOptionalTable(error) {
     if (!error) return false;
     return ['42P01', 'PGRST116'].includes(error.code) || /does not exist|schema cache|Could not find/i.test(error.message || '');
