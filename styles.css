@@ -427,6 +427,33 @@ input:focus, select:focus, textarea:focus {
   color: var(--ink);
 }
 
+.pill.archived {
+  background: #8a94a6;
+  border-color: #8a94a6;
+  color: #fff;
+}
+
+.tile { position: relative; }
+
+.badge {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: var(--danger);
+  color: #fff;
+  font-size: .78rem;
+  font-weight: 750;
+  line-height: 1;
+}
+
 .chip {
   margin: 0 8px 8px 0;
   min-height: 36px;

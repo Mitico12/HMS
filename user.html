@@ -263,8 +263,12 @@
     return {
       title: groupName(g), tab: 'groups',
       async render(app) {
-        app.append(el('button', { class: 'btn btn-primary btn-lg btn-block', style: 'margin-bottom:18px',
-          onclick: () => go(reportForm()) }, `!  ${t('reportIncident')}`));
+        app.append(el('div', { style: 'display:grid;gap:10px;margin-bottom:18px' }, [
+          el('button', { class: 'btn btn-primary btn-lg btn-block',
+            onclick: () => go(reportForm()) }, `!  ${t('reportIncident')}`),
+          el('button', { class: 'btn btn-lg btn-block',
+            onclick: () => go(hazardForm()) }, `⚠  ${t('reportHazard')}`),
+        ]));
         app.append(el('h2', { class: 'display', style: 'font-size:1.1rem' }, t('yourRecentReports')));
         const { data } = await db.from('incidents').select('*')
           .eq('reporter_id', state.profile.id).order('created_at', { ascending: false }).limit(5);
@@ -277,10 +281,11 @@
   function incidentRow(i) {
     return el('div', { class: 'row', onclick: () => go(myIncidentView(i.id)), style: 'cursor:pointer' }, [
       el('div', { class: 'grow' }, [el('div', {}, truncate(i.what_happened, 64)),
-        el('div', { class: 'sub' }, fmt(i.created_at))]),
+        el('div', { class: 'sub' }, `${typeLabel(i.report_type)} · ${fmt(i.created_at)}`)]),
       el('span', { class: `pill ${incidentStatusClass(i)}`, style: incidentStatusStyle(i) }, statusLabel(i.status)),
     ]);
   }
+  const typeLabel = (k) => ({ incident: t('incident'), hazard: t('hazard') }[k] || k || t('incident'));
   const statusLabel = (s) => ({ open: t('open'), in_progress: t('inProgress'), resolved: t('resolved') }[s] || s);
   function incidentStatusClass(inc) {
     const hasConsequences = (inc.consequence_ids || []).length > 0 || !!inc.consequence_other;
@@ -345,11 +350,72 @@
           const { error } = await db.from('incidents').insert({
             id: incidentId,
             reporter_id: state.profile.id,
+            report_type: 'incident',
             what_happened: what.value.trim(),
             what_wrong: wrong.value.trim() || null,
             root_cause_ids: [...rootBlock.picked],
             consequence_ids: [...consBlock.picked],
             root_cause_other: rootBlock.getOther() || null,
+            consequence_other: consBlock.getOther() || null,
+            occurred_at: when.value ? new Date(when.value).toISOString() : null,
+            location: where.value.trim() || null,
+            is_anonymous: anonBox.checked,
+            photo_paths: photoPaths,
+          });
+          if (error) return toast(error.message, 'err');
+          toast(t('submitted')); back();
+        }
+      },
+    };
+  }
+
+  function hazardForm() {
+    return {
+      title: t('reportHazard'), tab: 'groups',
+      async render(app) {
+        const { data: cats } = await db.from('incident_categories').select('*').order('sort_order');
+        const cons = (cats || []).filter(c => c.kind === 'consequence');
+
+        const what = el('textarea', { placeholder: t('whatHazard') });
+        const fix = el('textarea', { placeholder: t('whatNeedsFixing') });
+        const when = el('input', { type: 'datetime-local', value: localNow() });
+        const where = el('input', { type: 'text', placeholder: t('locationOptional') });
+        const photos = el('input', { type: 'file', accept: 'image/*', multiple: 'multiple' });
+        const consBlock = categoryBlock(t('hazardConsequences'), cons);
+
+        const anonBox = el('input', { type: 'checkbox' });
+        anonBox.addEventListener('change', () => {
+          if (anonBox.checked && !confirm('Are you sure you want to stay anonymous? Admins will not see who filed this report.'))
+            anonBox.checked = false;
+        });
+        const anonRow = el('label', { class: 'check-item' }, [anonBox, el('span', {}, t('reportAnonymously'))]);
+
+        app.append(
+          labeled(t('whatHazard'), what, true),
+          labeled(t('whatNeedsFixing'), fix),
+          el('div', { style: 'display:flex;gap:12px;flex-wrap:wrap' }, [
+            el('div', { style: 'flex:1;min-width:160px' }, labeled(t('whenSpotted'), when)),
+            el('div', { style: 'flex:1;min-width:160px' }, labeled(t('locationOptional'), where)),
+          ]),
+          consBlock.field,
+          labeled(t('photosOptional'), photos),
+          anonRow,
+          el('button', { class: 'btn btn-primary btn-block btn-lg', style: 'margin-top:8px', onclick: submit }, t('submitReport')),
+        );
+
+        async function submit() {
+          if (!what.value.trim()) return toast(t('whatHazard'), 'err');
+          const incidentId = crypto.randomUUID();
+          const photoPaths = await uploadIncidentPhotos(incidentId, photos.files);
+          if (photoPaths === null) return;
+          const { error } = await db.from('incidents').insert({
+            id: incidentId,
+            reporter_id: state.profile.id,
+            report_type: 'hazard',
+            what_happened: what.value.trim(),
+            what_wrong: fix.value.trim() || null,
+            root_cause_ids: [],
+            consequence_ids: [...consBlock.picked],
             consequence_other: consBlock.getOther() || null,
             occurred_at: when.value ? new Date(when.value).toISOString() : null,
             location: where.value.trim() || null,
