@@ -42,9 +42,10 @@
   <div id="screen"></div>
 
   <script type="module">
-  import { db, requireSession, currentProfile, el, $, fmt, toast, newAuthClient, initTheme, themeToggleButton } from './config.js';
+  import { db, requireSession, currentProfile, el, $, fmt, toast, newAuthClient, initTheme, themeToggleButton, initLanguage, languageSelect, t } from './config.js';
 
   initTheme();
+  initLanguage();
   const screen = $('#screen');
   const state = { profile: null, groups: [], profiles: [] };
   const viewStack = [];                 // each entry: { title, render }
@@ -91,19 +92,20 @@
       card.append(
         el('div', { class: 'card-actions' }, themeToggleButton()),
         el('div', { class: 'brand' }, 'Nicosoft HMS manager'),
-        el('div', { class: 'tag' }, mode === 'login' ? 'Sign in to manage groups and incidents.' : 'Create an account, then ask an admin to grant access.'),
+        languageSelect(render),
+        el('div', { class: 'tag' }, mode === 'login' ? t('signInTools') : t('createAccount')),
         ...(mode === 'login'
-          ? [labeled('Username or email', el('input', { type: 'text', id: 'lid', autocomplete: 'username' })),
-             labeled('Password', el('input', { type: 'password', id: 'pw', autocomplete: 'current-password' }))]
-          : [labeled('Email', el('input', { type: 'email', id: 'em', autocomplete: 'email' })),
+          ? [labeled(t('usernameOrEmail'), el('input', { type: 'text', id: 'lid', autocomplete: 'username' })),
+             labeled(t('password'), el('input', { type: 'password', id: 'pw', autocomplete: 'current-password' }))]
+          : [labeled(t('email'), el('input', { type: 'email', id: 'em', autocomplete: 'email' })),
              labeled('Username', el('input', { type: 'text', id: 'un', autocomplete: 'username' })),
              labeled('Full name', el('input', { type: 'text', id: 'fn' })),
-             labeled('Password', el('input', { type: 'password', id: 'pw', autocomplete: 'new-password' }))]),
+             labeled(t('password'), el('input', { type: 'password', id: 'pw', autocomplete: 'new-password' }))]),
         el('button', { class: 'btn btn-primary btn-block', style: 'margin-top:8px', onclick: submit },
-          mode === 'login' ? 'Sign in' : 'Create account'),
+          mode === 'login' ? t('signIn') : t('createAccount')),
         el('button', { class: 'btn btn-ghost btn-block', style: 'margin-top:10px',
           onclick: () => { mode = mode === 'login' ? 'signup' : 'login'; render(); } },
-          mode === 'login' ? 'Create an account' : 'Have an account? Sign in')
+          mode === 'login' ? t('createAccount') : t('haveAccount'))
       );
     };
     async function submit() {
@@ -120,11 +122,11 @@
         mode = 'login'; render();
       } else {
         const ident = $('#lid').value.trim();
-        if (!ident || !password) return toast('Enter your username or email and password.', 'err');
+        if (!ident || !password) return toast(t('enterLogin'), 'err');
         let email = ident;
         if (!ident.includes('@')) {
           const { data: resolved } = await db.rpc('get_email_for_username', { p_username: ident });
-          if (!resolved) return toast('No account found for that username.', 'err');
+          if (!resolved) return toast(t('userEmailNotFound'), 'err');
           email = resolved;
         }
         const { error } = await db.auth.signInWithPassword({ email, password });
@@ -162,8 +164,8 @@
   function renderBotnav(active) {
     const nav = $('#botnav'); nav.innerHTML = '';
     const tabs = [
-      { id: 'groups',   ic: '▦', label: 'Groups',   onclick: () => go(homeView(), { reset: true }) },
-      { id: 'settings', ic: '⚙', label: 'Settings', onclick: () => go(settingsView(), { reset: true }) },
+      { id: 'groups',   ic: '▦', label: t('groups'),   onclick: () => go(homeView(), { reset: true }) },
+      { id: 'settings', ic: '⚙', label: t('settings'), onclick: () => go(settingsView(), { reset: true }) },
     ];
     for (const t of tabs) {
       nav.append(el('button', { class: active === t.id ? 'active' : '', onclick: t.onclick },
@@ -182,12 +184,12 @@
   function paint() {
     const view = viewStack[viewStack.length - 1];
     const bar = $('#topbar'); bar.innerHTML = '';
-    bar.append(el('button', { class: 'iconbtn', title: 'Return to start', onclick: goIndex }, '⌂'));
+    bar.append(el('button', { class: 'iconbtn', title: t('returnStart'), onclick: goIndex }, '⌂'));
     bar.append(themeToggleButton());
     if (viewStack.length > 1) bar.append(el('button', { class: 'iconbtn', onclick: back }, '‹'));
     bar.append(el('h1', {}, view.title));
     bar.append(el('span', { class: 'role-pill' }, state.profile.role === 'super_admin' ? 'super admin' : 'admin'));
-    bar.append(el('button', { class: 'iconbtn', title: 'Sign out', onclick: signOut }, '⏻'));
+    bar.append(el('button', { class: 'iconbtn', title: t('signOut'), onclick: signOut }, '⏻'));
     if (view.action) bar.append(view.action);
     const app = $('#app'); app.innerHTML = '';
     renderBotnav(view.tab || 'groups');
@@ -206,8 +208,8 @@
   // ════════════════════════════════════════════════════════
   function homeView() {
     return {
-      title: 'Groups', tab: 'groups',
-      action: el('button', { class: 'iconbtn', title: 'Add group', onclick: addGroupModal }, '+'),
+      title: t('groups'), tab: 'groups',
+      action: el('button', { class: 'iconbtn', title: t('addGroup'), onclick: addGroupModal }, '+'),
       async render(app) {
         const { data } = await db.from('groups').select('*').order('sort_order');
         state.groups = data || [];
@@ -217,12 +219,18 @@
         const pending = pendingAccounts + pendingChanges;
         const grid = el('div', { class: 'tile-grid' });
 
-        // fixed admin-only tile: users and access
         grid.append(el('button', { class: 'tile', onclick: () => go(usersView()) }, [
           el('span', { class: 'glyph' }, '👥'),
           el('div', {}, [
-            el('div', { class: 't-name' }, 'Users'),
-            el('div', { class: 't-meta' }, pending ? `${pending} waiting for approval` : 'Accounts & access'),
+            el('div', { class: 't-name' }, t('users')),
+            el('div', { class: 't-meta' }, pending ? `${pending} ${t('waitingApproval').toLowerCase()}` : t('accountsAccess')),
+          ]),
+        ]));
+        grid.append(el('button', { class: 'tile', onclick: () => go(logsView()) }, [
+          el('span', { class: 'glyph' }, '☑'),
+          el('div', {}, [
+            el('div', { class: 't-name' }, t('logs')),
+            el('div', { class: 't-meta' }, t('checklistLogsMeta')),
           ]),
         ]));
 
@@ -230,33 +238,83 @@
           grid.append(el('button', { class: 'tile', onclick: () => go(groupView(g)) }, [
             el('span', { class: 'glyph' }, g.icon || '📁'),
             el('div', {}, [
-              el('div', { class: 't-name' }, g.name),
+              el('div', { class: 't-name' }, groupName(g)),
               el('div', { class: 't-meta' }, kindLabel(g.kind)),
             ]),
           ]));
         }
         grid.append(el('button', { class: 'tile add', onclick: addGroupModal },
-          [el('span', { class: 'glyph' }, '+'), el('div', { class: 't-meta' }, 'Add group')]));
+          [el('span', { class: 'glyph' }, '+'), el('div', { class: 't-meta' }, t('addGroup'))]));
         app.append(grid);
       },
     };
   }
-  const kindLabel = (k) => ({ checklist: 'Checklists', reports: 'Incident reports', documents: 'Documents', procedures: 'Procedures' }[k] || k);
+  const kindLabel = (k) => ({ checklist: t('checklists'), reports: t('incidentReports'), documents: t('documents'), procedures: t('procedures') }[k] || k);
+  const groupName = (g) => {
+    const key = (g.name || '').trim().toLowerCase();
+    return ({ checklists: t('checklists'), reports: t('reports'), documents: t('documents'), procedures: t('procedures') }[key] || g.name);
+  };
+
+  function logsView() {
+    return {
+      title: t('logs'), tab: 'groups',
+      async render(app) {
+        await loadProfiles();
+        const runsQ = await db.from('checklist_runs').select('*').not('submitted_at', 'is', null).order('submitted_at', { ascending: false });
+        if (runsQ.error) {
+          app.append(emptyState(t('noChecklistLogs'), 'Run migration_incident_photos_checklist_logs.sql first.'));
+          return;
+        }
+        const { data: checklists } = await db.from('checklists').select('*');
+        const byChecklist = new Map((checklists || []).map(c => [c.id, c]));
+        const runs = runsQ.data || [];
+        if (!runs.length) return app.append(emptyState(t('noChecklistLogs'), t('checklistLogsMeta')));
+        for (const run of runs) {
+          const checklist = byChecklist.get(run.checklist_id);
+          const items = checklist?.items || [];
+          const missing = items.filter(i => !run.checked?.[i.id]?.done);
+          const hasNotes = !!(run.notes || '').trim();
+          const needsReview = missing.length > 0 || hasNotes;
+          const card = el('div', { class: 'card log-card' + (needsReview ? ' log-warning' : '') }, [
+            el('div', { class: 'section-head' }, [
+              el('div', {}, [
+                el('h3', {}, checklist?.title || t('checklist')),
+                el('div', { class: 'sub' }, `${nameOf(run.user_id)} - ${fmt(run.submitted_at || run.updated_at)}`),
+              ]),
+              el('span', { class: 'pill', style: needsReview ? 'background:#f2c94c;color:#17212b;border-color:#f2c94c' : '' },
+                needsReview ? t('checklistLogNeedsAttention') : t('completed')),
+            ]),
+            el('div', { class: 'sub' }, missing.length ? t('missingItems', { count: missing.length }) : t('completed')),
+          ]);
+          if (missing.length) {
+            card.append(el('ul', { class: 'log-missing' }, missing.map(i => el('li', {}, i.label))));
+          }
+          if (hasNotes) {
+            card.append(el('div', { class: 'log-notes' }, [
+              el('strong', {}, `${t('notes')}: `),
+              document.createTextNode(run.notes.trim()),
+            ]));
+          }
+          app.append(card);
+        }
+      },
+    };
+  }
 
   function addGroupModal() {
-    openModal('New group', (body, close) => {
+    openModal(t('newGroup'), (body, close) => {
       const name = el('input', { type: 'text', placeholder: 'e.g. Kitchen' });
       const icon = el('input', { type: 'text', placeholder: '📁', maxlength: 2, style: 'width:80px' });
       const kind = el('select', {}, [
-        opt('procedures', 'Procedures (custom forms)'),
-        opt('checklist', 'Checklists'),
-        opt('reports', 'Incident reports'),
-        opt('documents', 'Documents'),
+        opt('procedures', t('procedures')),
+        opt('checklist', t('checklists')),
+        opt('reports', t('incidentReports')),
+        opt('documents', t('documents')),
       ]);
       body.append(
-        labeled('Name', name, true),
-        labeled('Icon (one emoji)', icon),
-        labeled('Type', kind),
+        labeled(t('name'), name, true),
+        labeled('Icon', icon),
+        labeled(t('type'), kind),
         el('button', { class: 'btn btn-primary btn-block', onclick: async () => {
           if (!name.value.trim()) return toast('Name is required.', 'err');
           const sort_order = (state.groups.at(-1)?.sort_order || 0) + 1;
@@ -264,7 +322,7 @@
             name: name.value.trim(), icon: icon.value.trim() || '📁', kind: kind.value, sort_order });
           if (error) return toast(error.message, 'err');
           close(); toast('Group added.'); go(homeView(), { reset: true });
-        } }, 'Add group'),
+        } }, t('addGroup')),
       );
     });
   }
@@ -283,8 +341,8 @@
   // ─── CHECKLISTS ─────────────────────────────────────────
   function checklistGroupView(g) {
     return {
-      title: g.name, tab: 'groups',
-      action: el('button', { class: 'iconbtn', title: 'New checklist', onclick: () => go(checklistEdit(g, null)) }, '+'),
+      title: groupName(g), tab: 'groups',
+      action: el('button', { class: 'iconbtn', title: t('newChecklist'), onclick: () => go(checklistEdit(g, null)) }, '+'),
       async render(app) {
         const { data } = await db.from('checklists').select('*').eq('group_id', g.id).order('created_at');
         if (!data?.length) return app.append(emptyState('No checklists yet', 'Tap + to build one.'));
@@ -301,7 +359,7 @@
 
   function checklistEdit(g, existing) {
     return {
-      title: existing ? 'Edit checklist' : 'New checklist', tab: 'groups',
+      title: existing ? t('editChecklist') : t('newChecklist'), tab: 'groups',
       render(app) {
         const title = el('input', { type: 'text', value: existing?.title || '', placeholder: 'Checklist title' });
         let items = (existing?.items || []).map(i => ({ ...i }));
@@ -319,11 +377,11 @@
         };
         draw();
         app.append(
-          labeled('Title', title, true), list,
+          labeled(t('title'), title, true), list,
           el('button', { class: 'btn btn-ghost btn-block', style: 'margin-bottom:16px',
-            onclick: () => { items.push({ id: crypto.randomUUID(), label: '' }); draw(); } }, '+ Add item'),
-          el('button', { class: 'btn btn-primary btn-block', onclick: save }, 'Save checklist'),
-          existing ? el('button', { class: 'btn btn-danger btn-block', style: 'margin-top:10px', onclick: del }, 'Delete checklist') : null,
+            onclick: () => { items.push({ id: crypto.randomUUID(), label: '' }); draw(); } }, t('addItem')),
+          el('button', { class: 'btn btn-primary btn-block', onclick: save }, t('saveChecklist')),
+          existing ? el('button', { class: 'btn btn-danger btn-block', style: 'margin-top:10px', onclick: del }, t('deleteChecklist')) : null,
         );
         async function save() {
           const clean = items.filter(i => i.label.trim());
@@ -347,22 +405,74 @@
   // ─── REPORTS / INCIDENTS ────────────────────────────────
   function reportsGroupView(g) {
     return {
-      title: g.name, tab: 'groups',
-      action: el('button', { class: 'iconbtn', title: 'Categories', onclick: () => go(categoriesView()) }, '☰'),
+      title: groupName(g), tab: 'groups',
+      action: el('button', { class: 'iconbtn', title: t('incidentCategories'), onclick: () => go(categoriesView()) }, '☰'),
       async render(app) {
+        await loadProfiles();
         const { data } = await db.from('incidents').select('*').order('created_at', { ascending: false });
-        if (!data?.length) return app.append(emptyState('No incidents reported', 'Reports submitted by users land here.'));
-        const filterBar = el('div', { style: 'margin-bottom:12px' });
+        if (!data?.length) return app.append(emptyState(t('noIncidents'), t('noIncidentsHint')));
+
+        const filters = { status: 'all', assignee: 'all', reporter: 'all' };
+
+        // Status chips — now with a visible active state.
+        const statusChips = {};
+        const statusBar = el('div', { style: 'display:flex;flex-wrap:wrap' });
         ['all', 'open', 'in_progress', 'resolved'].forEach(s => {
-          filterBar.append(el('button', { class: 'chip', onclick: () => draw(s) },
-            s === 'all' ? 'All' : statusLabel(s)));
+          const chip = el('button', { class: 'chip', onclick: () => {
+            filters.status = s; markActive(statusChips, s); apply();
+          } }, s === 'all' ? t('all') : statusLabel(s));
+          statusChips[s] = chip;
+          statusBar.append(chip);
         });
+
+        // Assignee options: only ids that actually appear as an assignee, plus an "unassigned" bucket.
+        const assigneeIds = [...new Set(data.map(i => i.assigned_to).filter(Boolean))];
+        const assigneeSelect = el('select', { onchange: e => { filters.assignee = e.target.value; apply(); } }, [
+          opt('all', t('anyAssignee')),
+          opt('unassigned', t('unassigned')),
+          ...assigneeIds.map(id => opt(id, labelOf(state.profiles.find(p => p.id === id)))),
+        ]);
+
+        // Reporter options: named entries come ONLY from non-anonymous reports, so an
+        // anonymous filer is never listed by name. All anonymous reports collapse into
+        // one "Anonymous" bucket that can't be traced back to a person.
+        const namedReporterIds = [...new Set(data.filter(i => !i.is_anonymous).map(i => i.reporter_id).filter(Boolean))];
+        const hasAnon = data.some(i => i.is_anonymous);
+        const reporterSelect = el('select', { onchange: e => { filters.reporter = e.target.value; apply(); } }, [
+          opt('all', t('anyReporter')),
+          ...namedReporterIds.map(id => opt(id, labelOf(state.profiles.find(p => p.id === id)))),
+          ...(hasAnon ? [opt('anon', t('anonymous'))] : []),
+        ]);
+
+        app.append(el('div', { style: 'display:grid;gap:10px;margin-bottom:14px' }, [
+          statusBar,
+          el('div', { style: 'display:flex;gap:10px;flex-wrap:wrap' }, [
+            el('div', { style: 'flex:1;min-width:180px' }, labeled(t('filterByAssignee'), assigneeSelect)),
+            el('div', { style: 'flex:1;min-width:180px' }, labeled(t('filterByReporter'), reporterSelect)),
+          ]),
+        ]));
+
         const listHost = el('div', {});
-        app.append(filterBar, listHost);
-        const draw = (filter = 'all') => {
+        app.append(listHost);
+
+        const matchesStatus = (i) => filters.status === 'all' || i.status === filters.status;
+        const matchesAssignee = (i) =>
+          filters.assignee === 'all' ? true
+            : filters.assignee === 'unassigned' ? !i.assigned_to
+              : i.assigned_to === filters.assignee;
+        const matchesReporter = (i) =>
+          filters.reporter === 'all' ? true
+            : filters.reporter === 'anon' ? !!i.is_anonymous
+              : (!i.is_anonymous && i.reporter_id === filters.reporter);
+
+        function markActive(group, active) {
+          for (const [key, chip] of Object.entries(group)) chip.classList.toggle('on', key === active);
+        }
+
+        function apply() {
           listHost.innerHTML = '';
-          const rows = data.filter(i => filter === 'all' || i.status === filter);
-          if (!rows.length) { listHost.append(el('p', { class: 'muted' }, 'Nothing in this state.')); return; }
+          const rows = data.filter(i => matchesStatus(i) && matchesAssignee(i) && matchesReporter(i));
+          if (!rows.length) { listHost.append(el('p', { class: 'muted' }, 'Nothing matches these filters.')); return; }
           for (const i of rows) {
             listHost.append(el('div', { class: 'row', onclick: () => go(incidentView(i.id)), style: 'cursor:pointer' }, [
               el('div', { class: 'grow' }, [
@@ -372,12 +482,14 @@
               el('span', { class: `pill ${incidentStatusClass(i)}`, style: incidentStatusStyle(i) }, statusLabel(i.status)),
             ]));
           }
-        };
-        draw();
+        }
+
+        markActive(statusChips, 'all');
+        apply();
       },
     };
   }
-  const statusLabel = (s) => ({ open: 'Open', in_progress: 'In progress', resolved: 'Resolved' }[s] || s);
+  const statusLabel = (s) => ({ open: t('open'), in_progress: t('inProgress'), resolved: t('resolved') }[s] || s);
   function incidentStatusClass(inc) {
     const hasConsequences = (inc.consequence_ids || []).length > 0 || !!inc.consequence_other;
     return inc.status === 'open' && hasConsequences ? 'open-consequence' : inc.status;
@@ -394,9 +506,23 @@
     return `background:${bg};color:${fg};border-color:${bg}`;
   }
 
+  async function renderIncidentPhotos(host, inc) {
+    const paths = inc.photo_paths || [];
+    if (!paths.length) return;
+    const grid = el('div', { class: 'photo-grid' });
+    host.append(el('div', { class: 'card' }, [
+      el('h3', {}, t('attachments')),
+      grid,
+    ]));
+    for (const path of paths) {
+      const { data, error } = await db.storage.from('incident-photos').createSignedUrl(path, 300);
+      if (!error && data?.signedUrl) grid.append(el('img', { src: data.signedUrl, alt: t('attachments'), class: 'incident-photo' }));
+    }
+  }
+
   function incidentView(id) {
     return {
-      title: 'Incident', tab: 'groups',
+      title: t('incident'), tab: 'groups',
       async render(app) {
         const { data: inc } = await db.from('incidents').select('*').eq('id', id).single();
         const { data: cats } = await db.from('incident_categories').select('*');
@@ -406,14 +532,14 @@
         // summary card
         app.append(el('div', { class: 'card' }, [
           el('div', { class: 'section-head' }, [
-            el('h3', {}, 'What happened'),
+            el('h3', {}, t('whatHappenedTitle')),
             el('span', { class: `pill ${incidentStatusClass(inc)}`, style: incidentStatusStyle(inc) }, statusLabel(inc.status)),
           ]),
           el('p', {}, inc.what_happened),
-          inc.what_wrong ? el('h3', { style: 'margin-top:14px' }, 'What needs fixing') : null,
+          inc.what_wrong ? el('h3', { style: 'margin-top:14px' }, t('whatNeedsFixing')) : null,
           inc.what_wrong ? el('p', {}, inc.what_wrong) : null,
-          tagLine('Root cause', (inc.root_cause_ids || []).map(catName), inc.root_cause_other),
-          tagLine('Consequence', (inc.consequence_ids || []).map(catName), inc.consequence_other),
+          tagLine(t('rootCause'), (inc.root_cause_ids || []).map(catName), inc.root_cause_other),
+          tagLine(t('consequence'), (inc.consequence_ids || []).map(catName), inc.consequence_other),
           el('hr', { class: 'soft' }),
           el('div', { class: 'muted', style: 'font-size:.82rem;line-height:1.7' }, [
             el('div', {}, `Reported by: ${reporterOf(inc)}`),
@@ -422,6 +548,7 @@
             el('div', {}, `Submitted: ${fmt(inc.created_at)}`),
           ]),
         ]));
+        await renderIncidentPhotos(app, inc);
 
         // processing controls — status as open/close buttons
         const setStatus = async (next) => {
@@ -429,7 +556,7 @@
             resolved_at: next === 'resolved' ? new Date().toISOString() : null };
           const { error } = await db.from('incidents').update(patch).eq('id', id);
           if (error) return toast(error.message, 'err');
-          toast(next === 'resolved' ? 'Case closed.' : 'Case reopened.'); refresh();
+          toast(next === 'resolved' ? t('resolved') : t('open')); refresh();
         };
         const statusBtn = (next, label) => el('button', {
           class: 'btn ' + (inc.status === next ? 'btn-primary' : 'btn-ghost'),
@@ -441,16 +568,16 @@
         app.append(el('div', { class: 'card' }, [
           el('h3', {}, 'Processing'),
           el('div', { style: 'display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px' }, [
-            statusBtn('open', 'Open'),
-            statusBtn('in_progress', 'In progress'),
-            statusBtn('resolved', 'Close case'),
+            statusBtn('open', t('open')),
+            statusBtn('in_progress', t('inProgress')),
+            statusBtn('resolved', t('closeCase')),
           ]),
-          labeled('Assigned to', assign),
+          labeled(t('assignedTo'), assign),
           el('button', { class: 'btn btn-ghost', onclick: async () => {
             const { error } = await db.from('incidents').update({ assigned_to: assign.value || null }).eq('id', id);
             if (error) return toast(error.message, 'err');
             toast('Assignment saved.');
-          } }, 'Save assignment'),
+          } }, t('saveAssignment')),
         ]));
 
         // action log
@@ -464,29 +591,29 @@
         }
         if (!actions?.length) log.append(el('p', { class: 'muted' }, 'No actions logged yet.'));
         app.append(el('div', { class: 'card' }, [
-          el('h3', {}, 'Action log'), log, el('hr', { class: 'soft' }),
-          labeled('Add action / note', note),
+          el('h3', {}, t('actionLog')), log, el('hr', { class: 'soft' }),
+          labeled(t('addActionNote'), note),
           el('button', { class: 'btn btn-ghost', onclick: async () => {
             if (!note.value.trim()) return;
             const { error } = await db.from('incident_actions').insert({
               incident_id: id, author_id: state.profile.id, note: note.value.trim() });
             if (error) return toast(error.message, 'err');
             refresh();
-          } }, 'Add to log'),
+          } }, t('addToLog')),
         ]));
 
         // final report
         const fr = el('textarea', { placeholder: 'Outcome and corrective actions taken…', style: 'min-height:140px' });
         fr.value = inc.final_report || '';
         app.append(el('div', { class: 'card' }, [
-          el('h3', {}, 'Final report'),
+          el('h3', {}, t('finalReport')),
           el('p', { class: 'muted', style: 'font-size:.82rem' }, 'Visible to the reporter once saved. Use "Close case" above when it is resolved.'),
           fr,
           el('button', { class: 'btn btn-primary', style: 'margin-top:10px', onclick: async () => {
             const { error } = await db.from('incidents').update({ final_report: fr.value.trim() || null }).eq('id', id);
             if (error) return toast(error.message, 'err');
             toast('Final report saved.');
-          } }, 'Save final report'),
+          } }, t('saveFinalReport')),
         ]));
       },
     };
@@ -502,13 +629,13 @@
 
   function categoriesView() {
     return {
-      title: 'Incident categories', tab: 'groups',
+      title: t('incidentCategories'), tab: 'groups',
       async render(app) {
         const { data } = await db.from('incident_categories').select('*').order('sort_order');
         for (const kind of ['root_cause', 'consequence']) {
           const head = el('div', { class: 'section-head' }, [
-            el('h2', {}, kind === 'root_cause' ? 'Root cause' : 'Consequence'),
-            el('button', { class: 'btn btn-ghost', onclick: () => add(kind) }, '+ Add'),
+            el('h2', {}, kind === 'root_cause' ? t('rootCause') : t('consequence')),
+            el('button', { class: 'btn btn-ghost', onclick: () => add(kind) }, '+ ' + t('add')),
           ]);
           app.append(head);
           for (const c of (data || []).filter(x => x.kind === kind)) {
@@ -534,26 +661,26 @@
   // ─── DOCUMENTS ──────────────────────────────────────────
   function documentsGroupView(g) {
     return {
-      title: g.name, tab: 'groups',
+      title: groupName(g), tab: 'groups',
       render(app) {
         const file = el('input', { type: 'file' });
         const listHost = el('div', {});
         app.append(el('div', { class: 'card' }, [
-          el('h3', {}, 'Upload a document'),
+          el('h3', {}, t('uploadDocument')),
           file,
-          el('button', { class: 'btn btn-primary', style: 'margin-top:12px', onclick: upload }, 'Upload'),
+          el('button', { class: 'btn btn-primary', style: 'margin-top:12px', onclick: upload }, t('upload')),
         ]), listHost);
         loadDocs();
 
         async function loadDocs() {
           listHost.innerHTML = '';
           const { data } = await db.from('documents').select('*').eq('group_id', g.id).order('created_at', { ascending: false });
-          if (!data?.length) { listHost.append(emptyState('No documents', 'Upload a manual or file to share.')); return; }
+          if (!data?.length) { listHost.append(emptyState(t('noDocuments'), t('noDocumentsHint'))); return; }
           for (const d of data) {
             listHost.append(el('div', { class: 'row' }, [
               el('div', { class: 'grow' }, [el('div', {}, d.name),
                 el('div', { class: 'sub' }, `${(d.size_bytes / 1024 | 0)} KB · ${fmt(d.created_at)}`)]),
-              el('button', { class: 'btn btn-ghost', onclick: () => openDoc(d) }, 'Open'),
+              el('button', { class: 'btn btn-ghost', onclick: () => openDoc(d) }, t('open')),
               el('button', { class: 'btn btn-danger', onclick: () => removeDoc(d) }, '✕'),
             ]));
           }
@@ -587,22 +714,22 @@
 
   // ─── PROCEDURES (generic form builder) ──────────────────
   const FIELD_TYPES = [
-    ['short', 'Short text'], ['long', 'Long text'], ['number', 'Number'],
-    ['dropdown', 'Dropdown'], ['checkbox', 'Checkbox'],
+    ['short', 'selectTypeShort'], ['long', 'selectTypeLong'], ['number', 'selectTypeNumber'],
+    ['dropdown', 'selectTypeDropdown'], ['checkbox', 'selectTypeCheckbox'],
   ];
   function proceduresGroupView(g) {
     return {
-      title: g.name, tab: 'groups',
-      action: el('button', { class: 'iconbtn', title: 'New procedure', onclick: () => go(procedureBuild(g, null)) }, '+'),
+      title: groupName(g), tab: 'groups',
+      action: el('button', { class: 'iconbtn', title: t('newProcedure'), onclick: () => go(procedureBuild(g, null)) }, '+'),
       async render(app) {
         const { data } = await db.from('procedures').select('*').eq('group_id', g.id).order('created_at');
-        if (!data?.length) return app.append(emptyState('No procedures yet', 'Build a form users can fill in.'));
+        if (!data?.length) return app.append(emptyState(t('noProcedures'), t('noProceduresHint')));
         for (const p of data) {
           app.append(el('div', { class: 'row' }, [
             el('div', { class: 'grow' }, [el('div', {}, p.title),
-              el('div', { class: 'sub' }, `${(p.fields || []).length} fields · ${p.is_draft ? 'draft' : 'published'}`)]),
-            el('button', { class: 'btn btn-ghost', onclick: () => go(submissionsView(p)) }, 'Entries'),
-            el('button', { class: 'btn btn-ghost', onclick: () => go(procedureBuild(g, p)) }, 'Edit'),
+              el('div', { class: 'sub' }, `${(p.fields || []).length} ${t('fields')} - ${p.is_draft ? t('draft') : t('published')}`)]),
+            el('button', { class: 'btn btn-ghost', onclick: () => go(submissionsView(p)) }, t('entries')),
+            el('button', { class: 'btn btn-ghost', onclick: () => go(procedureBuild(g, p)) }, t('edit')),
           ]));
         }
       },
@@ -611,7 +738,7 @@
 
   function procedureBuild(g, existing) {
     return {
-      title: existing ? 'Edit procedure' : 'New procedure', tab: 'groups',
+      title: existing ? t('editProcedure') : t('newProcedure'), tab: 'groups',
       render(app) {
         const title = el('input', { type: 'text', value: existing?.title || '', placeholder: 'Procedure title' });
         const desc = el('textarea', { placeholder: 'Short description (optional)' }); desc.value = existing?.description || '';
@@ -620,43 +747,43 @@
         const draw = () => {
           list.innerHTML = '';
           fields.forEach((f, idx) => {
-            const labelInp = el('input', { type: 'text', value: f.label, placeholder: 'Question / label',
+            const labelInp = el('input', { type: 'text', value: f.label, placeholder: t('label'),
               oninput: e => f.label = e.target.value });
             const typeSel = el('select', { onchange: e => { f.type = e.target.value; draw(); } },
-              FIELD_TYPES.map(([v, t]) => opt(v, t)));
+              FIELD_TYPES.map(([v, key]) => opt(v, t(key))));
             typeSel.value = f.type;
             const reqBox = el('label', { style: 'display:flex;align-items:center;gap:6px;font-size:.85rem' }, [
               el('input', { type: 'checkbox', onchange: e => f.required = e.target.checked }),
-              document.createTextNode('Required'),
+              document.createTextNode(t('required')),
             ]);
             reqBox.querySelector('input').checked = !!f.required;
             const card = el('div', { class: 'card' }, [
               el('div', { class: 'section-head' }, [
-                el('strong', {}, `Field ${idx + 1}`),
+                el('strong', {}, t('field', { n: idx + 1 })),
                 el('button', { class: 'btn btn-danger', onclick: () => { fields.splice(idx, 1); draw(); } }, '✕'),
               ]),
-              labeled('Label', labelInp), labeled('Type', typeSel), reqBox,
+              labeled(t('label'), labelInp), labeled(t('type'), typeSel), reqBox,
             ]);
             if (f.type === 'dropdown') {
               const optsInp = el('input', { type: 'text', value: (f.options || []).join(', '),
                 placeholder: 'Option A, Option B, Option C',
                 oninput: e => f.options = e.target.value.split(',').map(s => s.trim()).filter(Boolean) });
-              card.append(labeled('Options (comma-separated)', optsInp));
+              card.append(labeled(t('optionsComma'), optsInp));
             }
             list.append(card);
           });
         };
         draw();
         app.append(
-          labeled('Title', title, true), labeled('Description', desc), list,
+          labeled(t('title'), title, true), labeled(t('description'), desc), list,
           el('button', { class: 'btn btn-ghost btn-block', style: 'margin-bottom:16px', onclick: () => {
             fields.push({ key: crypto.randomUUID(), type: 'short', label: '', required: false, options: [] }); draw();
-          } }, '+ Add field'),
+          } }, t('addField')),
           el('div', { style: 'display:flex;gap:10px' }, [
-            el('button', { class: 'btn btn-ghost btn-block', onclick: () => saveProc(true) }, 'Save draft'),
-            el('button', { class: 'btn btn-primary btn-block', onclick: () => saveProc(false) }, 'Publish'),
+            el('button', { class: 'btn btn-ghost btn-block', onclick: () => saveProc(true) }, t('saveDraft')),
+            el('button', { class: 'btn btn-primary btn-block', onclick: () => saveProc(false) }, t('publish')),
           ]),
-          existing ? el('button', { class: 'btn btn-danger btn-block', style: 'margin-top:10px', onclick: del }, 'Delete procedure') : null,
+          existing ? el('button', { class: 'btn btn-danger btn-block', style: 'margin-top:10px', onclick: del }, t('deleteProcedure')) : null,
         );
         async function saveProc(is_draft) {
           const clean = fields.filter(f => f.label.trim());
@@ -667,7 +794,7 @@
                              : db.from('procedures').insert(payload);
           const { error } = await q;
           if (error) return toast(error.message, 'err');
-          toast(is_draft ? 'Draft saved.' : 'Published.'); back();
+          toast(is_draft ? t('draftSaved') : t('published')); back();
         }
         async function del() {
           if (!confirm('Delete this procedure?')) return;
@@ -706,7 +833,7 @@
   // ════════════════════════════════════════════════════════
   function settingsView() {
     return {
-      title: 'Settings', tab: 'settings',
+      title: t('settings'), tab: 'settings',
       async render(app) {
         await loadProfiles();
         const fresh = await db.from('profiles').select('*').eq('id', state.profile.id).single();
@@ -719,7 +846,8 @@
         const email = el('input', { type: 'email', autocomplete: 'email' }); email.value = p.email || '';
 
         app.append(el('div', { class: 'card settings-card' }, [
-          el('h3', {}, 'Your details'),
+          el('h3', {}, t('yourDetails')),
+          languageSelect(() => go(settingsView(), { reset: true })),
           el('div', { class: 'settings-current' }, [
             kv('Name', p.full_name || '—'),
             kv('Username', p.username ? `@${p.username}` : '—'),
@@ -880,7 +1008,7 @@
     const iAmSuper = me.role === 'super_admin';
     const controls = [];
     if (p.id === me.id) {
-      controls.push(el('span', { class: 'pill', style: 'background:#e6e3da' }, 'you'));
+      controls.push(el('span', { class: 'pill you' }, 'you'));
       return controls;
     }
 

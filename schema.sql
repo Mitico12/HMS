@@ -169,6 +169,8 @@ create table if not exists checklist_runs (
   user_id       uuid not null references profiles (id),
   checked       jsonb not null default '{}'::jsonb,   -- { item_id: { done: true, at: iso } }
   completed     boolean not null default false,
+  notes         text,
+  submitted_at  timestamptz,
   updated_at    timestamptz not null default now(),
   unique (checklist_id, user_id)
 );
@@ -196,6 +198,7 @@ create table if not exists incidents (
   consequence_ids  jsonb not null default '[]'::jsonb,    -- [category_id]
   root_cause_other  text,                                 -- free-text "Other" root cause
   consequence_other text,                                 -- free-text "Other" consequence
+  photo_paths      text[] not null default '{}',
   status           text not null default 'open',          -- open | in_progress | resolved
   assigned_to      uuid references profiles (id),
   final_report     text,
@@ -231,10 +234,11 @@ create table if not exists documents (
 
 -- ============================================================
 --  STORAGE
---  Create a bucket named 'documents' (private) in the Storage UI,
+--  Create buckets named 'documents' and 'incident-photos' (private) in the Storage UI,
 --  or uncomment the line below.
 -- ============================================================
 -- insert into storage.buckets (id, name, public) values ('documents','documents', false) on conflict do nothing;
+-- insert into storage.buckets (id, name, public) values ('incident-photos','incident-photos', false) on conflict do nothing;
 
 -- Storage RLS: admins manage the bucket, signed-in users can read (for signed URLs).
 drop policy if exists "documents admin all" on storage.objects;
@@ -247,6 +251,21 @@ drop policy if exists "documents read" on storage.objects;
 create policy "documents read" on storage.objects
   for select
   using (bucket_id = 'documents' and auth.role() = 'authenticated');
+
+drop policy if exists "incident photos own upload" on storage.objects;
+create policy "incident photos own upload" on storage.objects
+  for insert
+  with check (bucket_id = 'incident-photos' and auth.role() = 'authenticated');
+
+drop policy if exists "incident photos read" on storage.objects;
+create policy "incident photos read" on storage.objects
+  for select
+  using (bucket_id = 'incident-photos' and auth.role() = 'authenticated');
+
+drop policy if exists "incident photos admin delete" on storage.objects;
+create policy "incident photos admin delete" on storage.objects
+  for delete
+  using (bucket_id = 'incident-photos' and public.is_admin());
 
 -- ============================================================
 --  ROW LEVEL SECURITY

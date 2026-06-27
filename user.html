@@ -22,9 +22,10 @@
   <div id="screen"></div>
 
   <script type="module">
-  import { db, requireSession, el, $, fmt, toast, initTheme, themeToggleButton } from './config.js';
+  import { db, requireSession, el, $, fmt, toast, initTheme, themeToggleButton, initLanguage, languageSelect, t } from './config.js';
 
   initTheme();
+  initLanguage();
   const screen = $('#screen');
   const state = { profile: null, groups: [] };
   const viewStack = [];
@@ -59,22 +60,23 @@
     const render = () => {
       card.innerHTML = '';
       const fields = mode === 'login'
-        ? [labeled('Username or email', el('input', { type: 'text', id: 'lid', autocomplete: 'username' })),
-           labeled('Password', el('input', { type: 'password', id: 'pw', autocomplete: 'current-password' }))]
-        : [labeled('Email', el('input', { type: 'email', id: 'em', autocomplete: 'email' })),
+        ? [labeled(t('usernameOrEmail'), el('input', { type: 'text', id: 'lid', autocomplete: 'username' })),
+           labeled(t('password'), el('input', { type: 'password', id: 'pw', autocomplete: 'current-password' }))]
+        : [labeled(t('email'), el('input', { type: 'email', id: 'em', autocomplete: 'email' })),
            labeled('Username', el('input', { type: 'text', id: 'un', autocomplete: 'username' })),
            labeled('Full name', el('input', { type: 'text', id: 'fn' })),
-           labeled('Password', el('input', { type: 'password', id: 'pw', autocomplete: 'new-password' }))];
+           labeled(t('password'), el('input', { type: 'password', id: 'pw', autocomplete: 'new-password' }))];
       card.append(
         el('div', { class: 'card-actions' }, themeToggleButton()),
         el('div', { class: 'brand' }, 'Nicosoft HMS manager'),
-        el('div', { class: 'tag' }, mode === 'login' ? 'Sign in to your workplace tools.' : 'Create your account.'),
+        languageSelect(render),
+        el('div', { class: 'tag' }, mode === 'login' ? t('signInTools') : t('createAccount')),
         ...fields,
         el('button', { class: 'btn btn-primary btn-block', style: 'margin-top:8px', onclick: submit },
-          mode === 'login' ? 'Sign in' : 'Create account'),
+          mode === 'login' ? t('signIn') : t('createAccount')),
         el('button', { class: 'btn btn-ghost btn-block', style: 'margin-top:10px',
           onclick: () => { mode = mode === 'login' ? 'signup' : 'login'; render(); } },
-          mode === 'login' ? 'Create an account' : 'Have an account? Sign in'),
+          mode === 'login' ? t('createAccount') : t('haveAccount')),
       );
     };
     async function submit() {
@@ -90,11 +92,11 @@
         toast('Account created. Confirm your email, then wait for admin approval.'); mode = 'login'; render();
       } else {
         const ident = $('#lid').value.trim();
-        if (!ident || !password) return toast('Enter your username or email and password.', 'err');
+        if (!ident || !password) return toast(t('enterLogin'), 'err');
         let email = ident;
         if (!ident.includes('@')) {
           const { data: resolved } = await db.rpc('get_email_for_username', { p_username: ident });
-          if (!resolved) return toast('No account found for that username.', 'err');
+          if (!resolved) return toast(t('userEmailNotFound'), 'err');
           email = resolved;
         }
         const { error } = await db.auth.signInWithPassword({ email, password });
@@ -120,9 +122,9 @@
   function renderBotnav(active) {
     const nav = $('#botnav'); nav.innerHTML = '';
     const tabs = [
-      { id: 'groups',  ic: '▦', label: 'Groups',     onclick: () => go(homeView(), { reset: true }) },
-      { id: 'reports', ic: '⚠', label: 'My reports', onclick: () => go(myReportsView(), { reset: true }) },
-      { id: 'settings', ic: '⚙', label: 'Settings', onclick: () => go(settingsView(), { reset: true }) },
+      { id: 'groups',  ic: '▦', label: t('groups'),     onclick: () => go(homeView(), { reset: true }) },
+      { id: 'reports', ic: '⚠', label: t('myReports'), onclick: () => go(myReportsView(), { reset: true }) },
+      { id: 'settings', ic: '⚙', label: t('settings'), onclick: () => go(settingsView(), { reset: true }) },
     ];
     for (const t of tabs)
       nav.append(el('button', { class: active === t.id ? 'active' : '', onclick: t.onclick },
@@ -133,11 +135,11 @@
   function paint() {
     const view = viewStack[viewStack.length - 1];
     const bar = $('#topbar'); bar.innerHTML = '';
-    bar.append(el('button', { class: 'iconbtn', title: 'Return to start', onclick: goIndex }, '⌂'));
+    bar.append(el('button', { class: 'iconbtn', title: t('returnStart'), onclick: goIndex }, '⌂'));
     bar.append(themeToggleButton());
     if (viewStack.length > 1) bar.append(el('button', { class: 'iconbtn', onclick: back }, '‹'));
     bar.append(el('h1', {}, view.title));
-    bar.append(el('button', { class: 'iconbtn', title: 'Sign out', onclick: signOut }, '⏻'));
+    bar.append(el('button', { class: 'iconbtn', title: t('signOut'), onclick: signOut }, '⏻'));
     if (view.action) bar.append(view.action);
     const app = $('#app'); app.innerHTML = '';
     renderBotnav(view.tab || 'groups');
@@ -153,7 +155,7 @@
   // ── home ───────────────────────────────────────────────
   function homeView() {
     return {
-      title: 'Groups', tab: 'groups',
+      title: t('groups'), tab: 'groups',
       async render(app) {
         const { data } = await db.from('groups').select('*').order('sort_order');
         state.groups = data || [];
@@ -161,14 +163,18 @@
         for (const g of state.groups)
           grid.append(el('button', { class: 'tile', onclick: () => go(groupView(g)) }, [
             el('span', { class: 'glyph' }, g.icon || '📁'),
-            el('div', {}, [el('div', { class: 't-name' }, g.name),
+            el('div', {}, [el('div', { class: 't-name' }, groupName(g)),
               el('div', { class: 't-meta' }, kindLabel(g.kind))]),
           ]));
         app.append(grid);
       },
     };
   }
-  const kindLabel = (k) => ({ checklist: 'Checklists', reports: 'Report an incident', documents: 'Documents', procedures: 'Procedures' }[k] || k);
+  const kindLabel = (k) => ({ checklist: t('checklists'), reports: t('incidentReports'), documents: t('documents'), procedures: t('procedures') }[k] || k);
+  const groupName = (g) => {
+    const key = (g.name || '').trim().toLowerCase();
+    return ({ checklists: t('checklists'), reports: t('reports'), documents: t('documents'), procedures: t('procedures') }[key] || g.name);
+  };
 
   function groupView(g) {
     if (g.kind === 'checklist') return checklistGroupView(g);
@@ -180,10 +186,10 @@
   // ── checklists (tick, auto-save) ───────────────────────
   function checklistGroupView(g) {
     return {
-      title: g.name, tab: 'groups',
+      title: groupName(g), tab: 'groups',
       async render(app) {
         const { data } = await db.from('checklists').select('*').eq('group_id', g.id).order('created_at');
-        if (!data?.length) return app.append(emptyState('No checklists', 'Nothing to do here yet.'));
+        if (!data?.length) return app.append(emptyState(t('noChecklists'), t('noChecklistsHint')));
         for (const c of data)
           app.append(el('div', { class: 'row', onclick: () => go(checklistRun(c)), style: 'cursor:pointer' }, [
             el('div', { class: 'grow' }, [el('div', {}, c.title),
@@ -198,16 +204,17 @@
     return {
       title: c.title, tab: 'groups',
       async render(app) {
-        // load or start this user's run
         let { data: run } = await db.from('checklist_runs').select('*')
           .eq('checklist_id', c.id).eq('user_id', state.profile.id).maybeSingle();
         let checked = run?.checked || {};
+        const notes = el('textarea', { placeholder: t('checklistNotesPlaceholder') });
+        notes.value = run?.notes || '';
 
         const items = c.items || [];
         const progress = el('div', { class: 'muted', style: 'margin-bottom:14px' });
         const drawProgress = () => {
           const done = items.filter(i => checked[i.id]?.done).length;
-          progress.textContent = `${done} of ${items.length} complete`;
+          progress.textContent = t('checklistProgress', { done, total: items.length });
         };
         drawProgress();
         app.append(progress);
@@ -222,17 +229,31 @@
               [it.id]: box.checked ? { done: true, at: new Date().toISOString() } : { done: false } };
             item.classList.toggle('done', box.checked);
             drawProgress();
-            const completed = items.every(i => checked[i.id]?.done);
-            const { error } = await db.from('checklist_runs').upsert({
-              checklist_id: c.id, user_id: state.profile.id, checked, completed,
-              updated_at: new Date().toISOString(),
-            }, { onConflict: 'checklist_id,user_id' });
-            if (error) toast(error.message, 'err');
           });
           app.append(item);
         }
-        app.append(el('p', { class: 'muted', style: 'font-size:.8rem;margin-top:14px' },
-          'Progress saves automatically as you tick.'));
+        app.append(
+          labeled(t('notes'), notes),
+          el('button', { class: 'btn btn-primary btn-block btn-lg', style: 'margin-top:8px', onclick: submitChecklist }, t('completeChecklist')),
+        );
+
+        async function submitChecklist() {
+          const completed = items.every(i => checked[i.id]?.done);
+          const payload = {
+            checklist_id: c.id,
+            user_id: state.profile.id,
+            checked,
+            completed,
+            notes: notes.value.trim() || null,
+            submitted_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          };
+          const { error } = await db.from('checklist_runs')
+            .upsert(payload, { onConflict: 'checklist_id,user_id' });
+          if (error) return toast(error.message + ' - run the checklist/photo SQL migration first.', 'err');
+          toast(t('checklistComplete'));
+          back();
+        }
       },
     };
   }
@@ -240,14 +261,14 @@
   // ── incident reporting ─────────────────────────────────
   function reportsGroupView(g) {
     return {
-      title: g.name, tab: 'groups',
+      title: groupName(g), tab: 'groups',
       async render(app) {
         app.append(el('button', { class: 'btn btn-primary btn-lg btn-block', style: 'margin-bottom:18px',
-          onclick: () => go(reportForm()) }, '⚠  Report incident'));
-        app.append(el('h2', { class: 'display', style: 'font-size:1.1rem' }, 'Your recent reports'));
+          onclick: () => go(reportForm()) }, `!  ${t('reportIncident')}`));
+        app.append(el('h2', { class: 'display', style: 'font-size:1.1rem' }, t('yourRecentReports')));
         const { data } = await db.from('incidents').select('*')
           .eq('reporter_id', state.profile.id).order('created_at', { ascending: false }).limit(5);
-        if (!data?.length) return app.append(el('p', { class: 'muted' }, 'You have not reported anything yet.'));
+        if (!data?.length) return app.append(emptyState(t('noReports'), t('noReportsHint')));
         for (const i of data) app.append(incidentRow(i));
       },
     };
@@ -260,7 +281,7 @@
       el('span', { class: `pill ${incidentStatusClass(i)}`, style: incidentStatusStyle(i) }, statusLabel(i.status)),
     ]);
   }
-  const statusLabel = (s) => ({ open: 'Open', in_progress: 'In progress', resolved: 'Resolved' }[s] || s);
+  const statusLabel = (s) => ({ open: t('open'), in_progress: t('inProgress'), resolved: t('resolved') }[s] || s);
   function incidentStatusClass(inc) {
     const hasConsequences = (inc.consequence_ids || []).length > 0 || !!inc.consequence_other;
     return inc.status === 'open' && hasConsequences ? 'open-consequence' : inc.status;
@@ -279,19 +300,20 @@
 
   function reportForm() {
     return {
-      title: 'Report incident', tab: 'groups',
+      title: t('reportIncident'), tab: 'groups',
       async render(app) {
         const { data: cats } = await db.from('incident_categories').select('*').order('sort_order');
         const roots = (cats || []).filter(c => c.kind === 'root_cause');
         const cons  = (cats || []).filter(c => c.kind === 'consequence');
 
-        const what = el('textarea', { placeholder: 'Describe what happened, in your own words.' });
-        const wrong = el('textarea', { placeholder: 'What is wrong and needs to be fixed?' });
+        const what = el('textarea', { placeholder: t('whatHappened') });
+        const wrong = el('textarea', { placeholder: t('whatNeedsFixing') });
         const when = el('input', { type: 'datetime-local', value: localNow() });
-        const where = el('input', { type: 'text', placeholder: 'e.g. Reception, room 214, kitchen' });
+        const where = el('input', { type: 'text', placeholder: t('locationOptional') });
+        const photos = el('input', { type: 'file', accept: 'image/*', multiple: 'multiple' });
 
-        const rootBlock = categoryBlock('Likely root cause', roots);
-        const consBlock = categoryBlock('Potential consequence', cons);
+        const rootBlock = categoryBlock(t('rootCause'), roots);
+        const consBlock = categoryBlock(t('consequence'), cons);
 
         // anonymity toggle with a confirm step
         const anonBox = el('input', { type: 'checkbox' });
@@ -299,24 +321,29 @@
           if (anonBox.checked && !confirm('Are you sure you want to stay anonymous? Admins will not see who filed this report.'))
             anonBox.checked = false;
         });
-        const anonRow = el('label', { class: 'check-item' }, [anonBox, el('span', {}, 'Report anonymously')]);
+        const anonRow = el('label', { class: 'check-item' }, [anonBox, el('span', {}, t('reportAnonymously'))]);
 
         app.append(
-          labeled('What happened?', what, true),
-          labeled('What needs fixing?', wrong),
+          labeled(t('whatHappened'), what, true),
+          labeled(t('whatNeedsFixing'), wrong),
           el('div', { style: 'display:flex;gap:12px;flex-wrap:wrap' }, [
-            el('div', { style: 'flex:1;min-width:160px' }, labeled('When did it happen?', when)),
-            el('div', { style: 'flex:1;min-width:160px' }, labeled('Location (optional)', where)),
+            el('div', { style: 'flex:1;min-width:160px' }, labeled(t('whenHappened'), when)),
+            el('div', { style: 'flex:1;min-width:160px' }, labeled(t('locationOptional'), where)),
           ]),
           rootBlock.field,
           consBlock.field,
+          labeled(t('photosOptional'), photos),
           anonRow,
-          el('button', { class: 'btn btn-primary btn-block btn-lg', style: 'margin-top:8px', onclick: submit }, 'Submit report'),
+          el('button', { class: 'btn btn-primary btn-block btn-lg', style: 'margin-top:8px', onclick: submit }, t('submitReport')),
         );
 
         async function submit() {
-          if (!what.value.trim()) return toast('Please describe what happened.', 'err');
+          if (!what.value.trim()) return toast(t('whatHappened'), 'err');
+          const incidentId = crypto.randomUUID();
+          const photoPaths = await uploadIncidentPhotos(incidentId, photos.files);
+          if (photoPaths === null) return;
           const { error } = await db.from('incidents').insert({
+            id: incidentId,
             reporter_id: state.profile.id,
             what_happened: what.value.trim(),
             what_wrong: wrong.value.trim() || null,
@@ -327,12 +354,44 @@
             occurred_at: when.value ? new Date(when.value).toISOString() : null,
             location: where.value.trim() || null,
             is_anonymous: anonBox.checked,
+            photo_paths: photoPaths,
           });
           if (error) return toast(error.message, 'err');
-          toast('Report submitted.'); back();
+          toast(t('submitted')); back();
         }
       },
     };
+  }
+
+  async function uploadIncidentPhotos(incidentId, files) {
+    const selected = Array.from(files || []);
+    if (!selected.length) return [];
+    const paths = [];
+    for (const file of selected) {
+      const safeName = file.name.replace(/[^\w.\-]+/g, '_');
+      const path = `${incidentId}/${crypto.randomUUID()}-${safeName}`;
+      const { error } = await db.storage.from('incident-photos').upload(path, file);
+      if (error) {
+        toast(error.message + ' - create the incident-photos bucket with the SQL migration first.', 'err');
+        return null;
+      }
+      paths.push(path);
+    }
+    return paths;
+  }
+
+  async function renderIncidentPhotos(host, inc) {
+    const paths = inc.photo_paths || [];
+    if (!paths.length) return;
+    const grid = el('div', { class: 'photo-grid' });
+    host.append(el('div', { class: 'card' }, [
+      el('h3', {}, t('attachments')),
+      grid,
+    ]));
+    for (const path of paths) {
+      const { data, error } = await db.storage.from('incident-photos').createSignedUrl(path, 300);
+      if (!error && data?.signedUrl) grid.append(el('img', { src: data.signedUrl, alt: t('attachments'), class: 'incident-photo' }));
+    }
   }
 
   // A category group: selectable chips + an "Other" chip that reveals a text box.
@@ -346,14 +405,14 @@
       } }, c.name);
       row.append(chip);
     }
-    const otherInput = el('input', { type: 'text', placeholder: 'Describe it' });
+    const otherInput = el('input', { type: 'text', placeholder: t('other') });
     const otherWrap = el('div', { style: 'display:none;margin-top:8px' }, otherInput);
     const otherChip = el('button', { class: 'chip', onclick: () => {
       const turningOn = otherWrap.style.display === 'none';
       otherWrap.style.display = turningOn ? 'block' : 'none';
       otherChip.classList.toggle('on', turningOn);
       if (turningOn) otherInput.focus(); else otherInput.value = '';
-    } }, 'Other');
+    } }, t('other'));
     row.append(otherChip);
     const field = el('div', { class: 'field' }, [el('span', {}, labelText), row, otherWrap]);
     return { field, picked, getOther: () => otherInput.value.trim() };
@@ -367,14 +426,14 @@
 
   function myIncidentView(id) {
     return {
-      title: 'Your report', tab: 'reports',
+      title: t('yourReport'), tab: 'reports',
       async render(app) {
         const { data: inc } = await db.from('incidents').select('*').eq('id', id).single();
         app.append(el('div', { class: 'card' }, [
-          el('div', { class: 'section-head' }, [el('h3', {}, 'What happened'),
+          el('div', { class: 'section-head' }, [el('h3', {}, t('whatHappenedTitle')),
             el('span', { class: `pill ${incidentStatusClass(inc)}`, style: incidentStatusStyle(inc) }, statusLabel(inc.status))]),
           el('p', {}, inc.what_happened),
-          inc.what_wrong ? el('h3', { style: 'margin-top:14px' }, 'What needs fixing') : null,
+          inc.what_wrong ? el('h3', { style: 'margin-top:14px' }, t('whatNeedsFixing')) : null,
           inc.what_wrong ? el('p', {}, inc.what_wrong) : null,
           el('p', { class: 'muted', style: 'font-size:.82rem;margin-top:12px' }, [
             inc.occurred_at ? `Occurred ${fmt(inc.occurred_at)}` : `Reported ${fmt(inc.created_at)}`,
@@ -382,10 +441,11 @@
             inc.is_anonymous ? ' · submitted anonymously' : '',
           ].join('')),
         ]));
+        await renderIncidentPhotos(app, inc);
 
         if (inc.status === 'resolved' && inc.final_report) {
           app.append(el('div', { class: 'card' }, [
-            el('h3', {}, 'Final report'),
+            el('h3', {}, t('finalReport')),
             el('p', {}, inc.final_report),
             inc.resolved_at ? el('p', { class: 'muted', style: 'font-size:.82rem' }, `Closed ${fmt(inc.resolved_at)}`) : null,
           ]));
@@ -402,11 +462,11 @@
 
   function myReportsView() {
     return {
-      title: 'My reports', tab: 'reports',
+      title: t('myReports'), tab: 'reports',
       async render(app) {
         const { data } = await db.from('incidents').select('*')
           .eq('reporter_id', state.profile.id).order('created_at', { ascending: false });
-        if (!data?.length) return app.append(emptyState('No reports', 'Incidents you report will appear here.'));
+        if (!data?.length) return app.append(emptyState(t('noReports'), t('noReportsHint')));
         for (const i of data) app.append(incidentRow(i));
       },
     };
@@ -415,10 +475,10 @@
   // ── documents ──────────────────────────────────────────
   function documentsGroupView(g) {
     return {
-      title: g.name, tab: 'groups',
+      title: groupName(g), tab: 'groups',
       async render(app) {
         const { data } = await db.from('documents').select('*').eq('group_id', g.id).order('created_at', { ascending: false });
-        if (!data?.length) return app.append(emptyState('No documents', 'Nothing shared here yet.'));
+        if (!data?.length) return app.append(emptyState(t('noDocuments'), t('noDocumentsHint')));
         for (const d of data)
           app.append(el('div', { class: 'row' }, [
             el('div', { class: 'grow' }, [el('div', {}, d.name),
@@ -427,7 +487,7 @@
               const { data: u, error } = await db.storage.from('documents').createSignedUrl(d.storage_path, 60);
               if (error) return toast(error.message, 'err');
               window.open(u.signedUrl, '_blank');
-            } }, 'Open'),
+            } }, t('open')),
           ]));
       },
     };
@@ -436,10 +496,10 @@
   // ── procedures (fill published forms) ──────────────────
   function proceduresGroupView(g) {
     return {
-      title: g.name, tab: 'groups',
+      title: groupName(g), tab: 'groups',
       async render(app) {
         const { data } = await db.from('procedures').select('*').eq('group_id', g.id).eq('is_draft', false).order('created_at');
-        if (!data?.length) return app.append(emptyState('No procedures', 'Nothing published here yet.'));
+        if (!data?.length) return app.append(emptyState(t('noProcedures'), t('noProceduresHint')));
         for (const p of data)
           app.append(el('div', { class: 'row', onclick: () => go(procedureFill(p)), style: 'cursor:pointer' }, [
             el('div', { class: 'grow' }, [el('div', {}, p.title),
@@ -462,6 +522,7 @@
           else if (f.type === 'dropdown') {
             input = el('select', { onchange: e => answers[f.key] = e.target.value },
               [opt('', '— choose —'), ...(f.options || []).map(o => opt(o, o))]);
+            input.options[0].textContent = `- ${t('choose')} -`;
           } else if (f.type === 'checkbox') {
             input = el('input', { type: 'checkbox', onchange: e => answers[f.key] = e.target.checked });
             app.append(el('label', { class: 'check-item' }, [input, el('span', {}, f.label + (f.required ? ' *' : ''))]));
@@ -469,7 +530,7 @@
           } else input = el('input', { type: 'text', oninput: e => answers[f.key] = e.target.value });
           app.append(labeled(f.label, input, f.required));
         }
-        app.append(el('button', { class: 'btn btn-primary btn-block btn-lg', onclick: submit }, 'Submit'));
+        app.append(el('button', { class: 'btn btn-primary btn-block btn-lg', onclick: submit }, t('submit')));
         async function submit() {
           for (const f of p.fields)
             if (f.required && !answers[f.key] && f.type !== 'checkbox')
@@ -477,7 +538,7 @@
           const { error } = await db.from('procedure_submissions').insert({
             procedure_id: p.id, user_id: state.profile.id, answers });
           if (error) return toast(error.message, 'err');
-          toast('Submitted.'); back();
+          toast(t('submitted')); back();
         }
       },
     };
@@ -486,7 +547,7 @@
   // ── helpers ────────────────────────────────────────────
   function settingsView() {
     return {
-      title: 'Settings', tab: 'settings',
+      title: t('settings'), tab: 'settings',
       async render(app) {
         const fresh = await reloadMyProfile();
         if (fresh) state.profile = fresh;
@@ -502,7 +563,8 @@
         email.value = p.email || '';
 
         app.append(el('div', { class: 'card settings-card' }, [
-          el('h3', {}, 'Your details'),
+          el('h3', {}, t('yourDetails')),
+          languageSelect(() => go(settingsView(), { reset: true })),
           el('div', { class: 'settings-current' }, [
             kv('Name', p.full_name || '-'),
             kv('Username', p.username ? `@${p.username}` : '-'),

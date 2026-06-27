@@ -23,9 +23,10 @@
   <div id="screen"></div>
 
   <script type="module">
-    import { db, currentProfile, el, $, toast, initTheme, themeToggleButton } from './config.js';
+    import { db, currentProfile, el, $, toast, initTheme, themeToggleButton, initLanguage, languageSelect, t } from './config.js';
 
     initTheme();
+    initLanguage();
     const screen = $('#screen');
     const isAdmin = (profile) => ['admin', 'super_admin'].includes(profile?.role);
     const openPage = (page) => location.replace(new URL(page, location.href).href);
@@ -39,23 +40,24 @@
 
     function showLogin() {
       screen.innerHTML = '';
-      const ident = el('input', { type: 'text', id: 'ident', autocomplete: 'username', placeholder: 'Username or email' });
-      const password = el('input', { type: 'password', id: 'pw', autocomplete: 'current-password', placeholder: 'Password' });
+      const ident = el('input', { type: 'text', id: 'ident', autocomplete: 'username', placeholder: t('usernameOrEmail') });
+      const password = el('input', { type: 'password', id: 'pw', autocomplete: 'current-password', placeholder: t('password') });
       const form = el('form', { class: 'login-form', onsubmit: submit }, [
-        labeled('Username or email', ident),
-        labeled('Password', password),
-        el('button', { class: 'btn btn-primary btn-block', type: 'submit' }, 'Sign in'),
+        labeled(t('usernameOrEmail'), ident),
+        labeled(t('password'), password),
+        el('button', { class: 'btn btn-primary btn-block', type: 'submit' }, t('signIn')),
       ]);
 
       screen.append(el('div', { class: 'launch' },
         el('div', { class: 'launch-card auth-card' }, [
           el('div', { class: 'card-actions' }, themeToggleButton()),
           el('div', { class: 'launch-brand' }, 'Nicosoft HMS manager'),
-          el('div', { class: 'launch-tag' }, 'Sign in to continue.'),
+          el('div', { class: 'launch-tag' }, t('signInContinue')),
+          languageSelect(showLogin),
           form,
           el('div', { class: 'launch-foot muted' }, [
-            document.createTextNode('Need an account? '),
-            el('a', { href: './user.html' }, 'Create one'),
+            document.createTextNode(t('needAccount')),
+            el('a', { href: './user.html' }, t('createOne')),
           ]),
         ])
       ));
@@ -67,24 +69,25 @@
         el('div', { class: 'launch-card auth-card' }, [
           el('div', { class: 'card-actions' }, themeToggleButton()),
           el('div', { class: 'launch-brand' }, 'Nicosoft HMS manager'),
-          el('div', { class: 'launch-tag' }, `Signed in as ${profile.email || profile.username || 'admin'}.`),
+          el('div', { class: 'launch-tag' }, t('signedInAs', { name: profile.email || profile.username || 'admin' })),
+          languageSelect(() => showAdminChoice(profile)),
           el('div', { class: 'launch-grid' }, [
             el('button', { class: 'tile', onclick: () => openPage('./user.html') }, [
               el('span', { class: 'glyph' }, '▦'),
               el('div', {}, [
-                el('div', { class: 't-name' }, 'Worker app'),
-                el('div', { class: 't-meta' }, 'Checklists, reports, and documents'),
+                el('div', { class: 't-name' }, t('workerApp')),
+                el('div', { class: 't-meta' }, t('workerAppMeta')),
               ]),
             ]),
             el('button', { class: 'tile', onclick: () => openPage('./admin.html') }, [
               el('span', { class: 'glyph' }, '⚙'),
               el('div', {}, [
-                el('div', { class: 't-name' }, 'Admin console'),
-                el('div', { class: 't-meta' }, 'Manage groups, incidents, and access'),
+                el('div', { class: 't-name' }, t('adminConsole')),
+                el('div', { class: 't-meta' }, t('adminConsoleMeta')),
               ]),
             ]),
           ]),
-          el('button', { class: 'btn btn-ghost btn-block', style: 'margin-top:14px', onclick: signOut }, 'Sign out'),
+          el('button', { class: 'btn btn-ghost btn-block', style: 'margin-top:14px', onclick: signOut }, t('signOut')),
         ])
       ));
     }
@@ -93,13 +96,13 @@
       event.preventDefault();
       const rawIdent = $('#ident').value.trim();
       const password = $('#pw').value;
-      if (!rawIdent || !password) return toast('Enter your username or email and password.', 'err');
+      if (!rawIdent || !password) return toast(t('enterLogin'), 'err');
 
       let email = rawIdent;
       if (!rawIdent.includes('@')) {
         const { data: resolved, error } = await db.rpc('get_email_for_username', { p_username: rawIdent });
         if (error) return toast(error.message, 'err');
-        if (!resolved) return toast('No account found for that username.', 'err');
+        if (!resolved) return toast(t('userEmailNotFound'), 'err');
         email = resolved;
       }
 
