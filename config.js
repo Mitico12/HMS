@@ -5,8 +5,8 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 // ─── FILL THESE IN ───────────────────────────────────────────
 // Project settings → API. The anon key is safe to ship client-side;
 // Row Level Security in schema.sql is what actually protects the data.
-const SUPABASE_URL = 'https://YOUR-PROJECT.supabase.co';
-const SUPABASE_ANON_KEY = 'YOUR-ANON-KEY';
+const SUPABASE_URL = 'https://vtiobzmsalsvwocvlotm.supabase.co';
+const SUPABASE_ANON_KEY = 'sb_publishable_BfCizLoxWkUk2L9sUXzv9w_M5TdA3uD';
 // ─────────────────────────────────────────────────────────────
 
 export const db = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
