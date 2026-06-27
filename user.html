@@ -5,6 +5,17 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Ops</title>
   <link rel="stylesheet" href="./styles.css">
+  <style>
+    .settings-card { display: grid; gap: 12px; }
+    .settings-current { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+    .kv { padding: 12px; border: 1px solid rgba(26,47,54,.10); border-radius: 14px; background: rgba(255,255,255,.45); }
+    .kv .k { color: var(--steel, #6b7780); font-size: .78rem; text-transform: uppercase; letter-spacing: .04em; }
+    .kv .v { font-weight: 650; margin-top: 3px; overflow-wrap: anywhere; }
+    .change-lines { display: grid; gap: 6px; margin-top: 8px; }
+    .change-line { font-size: .92rem; }
+    .change-line strong { display: inline-block; min-width: 88px; }
+    @media (max-width: 720px) { .settings-current { grid-template-columns: 1fr; } }
+  </style>
 </head>
 <body>
   <div id="screen"></div>
@@ -105,8 +116,9 @@
   function renderBotnav(active) {
     const nav = $('#botnav'); nav.innerHTML = '';
     const tabs = [
-      { id: 'groups',  ic: '▦', label: 'Groups',     onclick: () => go(homeView(), { reset: true }) },
-      { id: 'reports', ic: '⚠', label: 'My reports', onclick: () => go(myReportsView(), { reset: true }) },
+      { id: 'groups',   ic: '▦', label: 'Groups',     onclick: () => go(homeView(), { reset: true }) },
+      { id: 'reports',  ic: '⚠', label: 'My reports', onclick: () => go(myReportsView(), { reset: true }) },
+      { id: 'settings', ic: '⚙', label: 'Settings',   onclick: () => go(settingsView(), { reset: true }) },
     ];
     for (const t of tabs)
       nav.append(el('button', { class: active === t.id ? 'active' : '', onclick: t.onclick },
@@ -448,6 +460,145 @@
         }
       },
     };
+  }
+
+
+  // ── settings / profile-change requests ─────────────────
+  function settingsView() {
+    return {
+      title: 'Settings', tab: 'settings',
+      async render(app) {
+        const fresh = await reloadMyProfile();
+        if (fresh) state.profile = fresh;
+        const p = state.profile;
+        const requests = await loadMyProfileChangeRequests();
+        const hasPending = requests.some(r => r.status === 'pending');
+
+        const fullName = el('input', { type: 'text', autocomplete: 'name' });
+        fullName.value = p.full_name || '';
+        const username = el('input', { type: 'text', autocomplete: 'username' });
+        username.value = p.username || '';
+        const email = el('input', { type: 'email', autocomplete: 'email' });
+        email.value = p.email || '';
+
+        app.append(el('div', { class: 'card settings-card' }, [
+          el('h3', {}, 'Your details'),
+          el('div', { class: 'settings-current' }, [
+            kv('Name', p.full_name || '—'),
+            kv('Username', p.username ? `@${p.username}` : '—'),
+            kv('Email', p.email || '—'),
+          ]),
+          el('hr', { class: 'soft' }),
+          labeled('Name', fullName),
+          labeled('Username', username),
+          labeled('Email', email),
+          hasPending ? el('p', { class: 'muted' }, 'You already have a pending profile change. Wait for an admin to approve or reject it before sending another one.') : null,
+          el('button', { class: 'btn btn-primary btn-block', onclick: submitChange, disabled: hasPending ? 'disabled' : null }, 'Request change'),
+          el('p', { class: 'muted', style: 'font-size:.82rem' }, 'Changes are sent to admins for approval, like account verification.'),
+        ]));
+
+        app.append(el('div', { class: 'card' }, [
+          el('h3', {}, 'Change requests'),
+          requests.length ? null : el('p', { class: 'muted' }, 'No change requests yet.'),
+          ...requests.map(changeRequestCard),
+        ]));
+
+        async function submitChange() {
+          const next = {
+            full_name: fullName.value.trim(),
+            username: username.value.trim(),
+            email: email.value.trim(),
+          };
+          if (!next.username || !next.email) return toast('Username and email are required.', 'err');
+          const unchanged =
+            (p.full_name || '') === next.full_name &&
+            (p.username || '') === next.username &&
+            (p.email || '') === next.email;
+          if (unchanged) return toast('Nothing changed.', 'err');
+
+          if ((p.username || '') !== next.username) {
+            const { data: free, error: freeErr } = await db.rpc('username_available', { p_username: next.username });
+            if (!freeErr && free === false) return toast('That username is taken.', 'err');
+          }
+
+          const rpc = await db.rpc('request_profile_change', {
+            p_full_name: next.full_name || null,
+            p_username: next.username,
+            p_email: next.email,
+          });
+          if (rpc.error && !missingOptionalRpc(rpc.error)) return toast(rpc.error.message, 'err');
+          if (rpc.error) {
+            const { error } = await db.from('profile_change_requests').insert({
+              user_id: p.id,
+              current_full_name: p.full_name || null,
+              requested_full_name: next.full_name || null,
+              current_username: p.username || null,
+              requested_username: next.username,
+              current_email: p.email || null,
+              requested_email: next.email,
+              status: 'pending',
+            });
+            if (error) return toast(error.message + ' — the SQL patch for profile change requests is probably missing.', 'err');
+          }
+          toast('Change request sent.');
+          refresh();
+        }
+      },
+    };
+  }
+
+  async function reloadMyProfile() {
+    const { data, error } = await db.from('profiles').select('*').eq('id', state.profile.id).single();
+    if (error) { toast(error.message, 'err'); return null; }
+    return data;
+  }
+  async function loadMyProfileChangeRequests() {
+    const { data, error } = await db.from('profile_change_requests')
+      .select('*')
+      .eq('user_id', state.profile.id)
+      .order('requested_at', { ascending: false });
+    if (error) {
+      if (!missingOptionalTable(error)) toast(error.message, 'err');
+      return [];
+    }
+    return data || [];
+  }
+  function missingOptionalTable(error) {
+    if (!error) return false;
+    return ['42P01', 'PGRST116'].includes(error.code) || /does not exist|schema cache|Could not find/i.test(error.message || '');
+  }
+  function missingOptionalRpc(error) {
+    if (!error) return false;
+    return ['42883', 'PGRST202'].includes(error.code) || /function|schema cache|not found/i.test(error.message || '');
+  }
+  function kv(k, v) {
+    return el('div', { class: 'kv' }, [el('div', { class: 'k' }, k), el('div', { class: 'v' }, v)]);
+  }
+  function changeRequestCard(r) {
+    const statusText = ({ pending: 'Pending', approved: 'Approved', rejected: 'Rejected' }[r.status] || r.status || 'Pending');
+    return el('div', { class: 'row', style: 'align-items:flex-start' }, [
+      el('div', { class: 'grow' }, [
+        el('div', {}, `Profile change · ${statusText}`),
+        el('div', { class: 'sub' }, r.requested_at ? fmt(r.requested_at) : ''),
+        el('div', { class: 'change-lines' }, profileChangeLines(r)),
+        r.admin_note ? el('div', { class: 'sub' }, `Admin note: ${r.admin_note}`) : null,
+      ]),
+      el('span', { class: `pill ${r.status || ''}` }, statusText),
+    ]);
+  }
+  function profileChangeLines(r) {
+    const pairs = [
+      ['Name', r.current_full_name, r.requested_full_name],
+      ['Username', r.current_username, r.requested_username],
+      ['Email', r.current_email, r.requested_email],
+    ];
+    const lines = pairs
+      .filter(([, a, b]) => (a || '') !== (b || ''))
+      .map(([label, a, b]) => el('div', { class: 'change-line' }, [
+        el('strong', {}, label),
+        document.createTextNode(`${a || '—'} → ${b || '—'}`),
+      ]));
+    return lines.length ? lines : [el('span', { class: 'muted' }, 'No visible changes')];
   }
 
   // ── helpers ────────────────────────────────────────────
