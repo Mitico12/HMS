@@ -321,83 +321,147 @@
     return ({ checklists: t('checklists'), reports: t('reports'), documents: t('documents'), procedures: t('procedures') }[key] || g.name);
   };
 
+  // Inclusive date-range test against an ISO timestamp; bounds are YYYY-MM-DD strings.
+  function inDateRange(iso, fromStr, untilStr) {
+    if (!fromStr && !untilStr) return true;
+    if (!iso) return false;
+    const ms = new Date(iso).getTime();
+    if (fromStr && ms < new Date(fromStr + 'T00:00:00').getTime()) return false;
+    if (untilStr && ms > new Date(untilStr + 'T23:59:59.999').getTime()) return false;
+    return true;
+  }
+
   function logsView() {
     return {
       title: t('logs'), tab: 'groups',
       async render(app) {
         await loadProfiles();
-
-        // ── Archived reports, grouped by type ──
         const archived = await fetchArchivedReports();
-        const archHead = el('div', { class: 'section-head' }, [
+        const runsQ = await db.from('checklist_runs').select('*').not('submitted_at', 'is', null).order('submitted_at', { ascending: false });
+        const runs = runsQ.error ? [] : (runsQ.data || []);
+        const { data: checklists } = await db.from('checklists').select('*');
+        const byChecklist = new Map((checklists || []).map(c => [c.id, c]));
+
+        // ════════ REPORTS ════════
+        app.append(el('div', { class: 'section-head', style: 'margin-bottom:10px' }, [
           el('h2', { class: 'display', style: 'font-size:1.15rem;margin:0' }, t('archivedReports')),
           archived.length ? el('button', { class: 'btn btn-ghost', onclick: () =>
-            exportReportsExcel(archived, 'archived-reports.xlsx') }, `⬇  ${t('exportExcel')}`) : null,
+            exportReportsExcel(rFiltered(), 'archived-reports.xlsx') }, `⬇  ${t('exportExcel')}`) : null,
+        ]));
+
+        const rFilters = { from: '', until: '', admin: 'all', user: 'all' };
+        const rFrom = el('input', { type: 'date', onchange: e => { rFilters.from = e.target.value; drawReports(); } });
+        const rUntil = el('input', { type: 'date', onchange: e => { rFilters.until = e.target.value; drawReports(); } });
+
+        const adminIds = [...new Set(archived.map(r => r.assigned_to).filter(Boolean))];
+        const rAdmin = el('select', { onchange: e => { rFilters.admin = e.target.value; drawReports(); } }, [
+          opt('all', t('anyAssignee')),
+          opt('unassigned', t('unassigned')),
+          ...adminIds.map(id => opt(id, labelOf(state.profiles.find(p => p.id === id)))),
         ]);
-        app.append(archHead);
-        if (!archived.length) {
-          app.append(el('p', { class: 'muted', style: 'margin-bottom:18px' }, 'No archived reports yet.'));
-        } else {
+        // Privacy-safe: anonymous reporters are never listed by name, only as one bucket.
+        const namedReporterIds = [...new Set(archived.filter(r => !r.is_anonymous).map(r => r.reporter_id).filter(Boolean))];
+        const hasAnon = archived.some(r => r.is_anonymous);
+        const rUser = el('select', { onchange: e => { rFilters.user = e.target.value; drawReports(); } }, [
+          opt('all', t('anyReporter')),
+          ...namedReporterIds.map(id => opt(id, labelOf(state.profiles.find(p => p.id === id)))),
+          ...(hasAnon ? [opt('anon', t('anonymous'))] : []),
+        ]);
+
+        app.append(el('div', { style: 'display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px' }, [
+          el('div', { style: 'flex:1;min-width:130px' }, labeled(t('dateFrom'), rFrom)),
+          el('div', { style: 'flex:1;min-width:130px' }, labeled(t('dateUntil'), rUntil)),
+          el('div', { style: 'flex:1;min-width:150px' }, labeled(t('filterByAssignee'), rAdmin)),
+          el('div', { style: 'flex:1;min-width:150px' }, labeled(t('filterByReporter'), rUser)),
+        ]));
+        const reportsHost = el('div', {});
+        app.append(reportsHost);
+
+        const rFiltered = () => archived.filter(r =>
+          inDateRange(r.created_at, rFilters.from, rFilters.until) &&
+          (rFilters.admin === 'all' ? true : rFilters.admin === 'unassigned' ? !r.assigned_to : r.assigned_to === rFilters.admin) &&
+          (rFilters.user === 'all' ? true : rFilters.user === 'anon' ? !!r.is_anonymous : (!r.is_anonymous && r.reporter_id === rFilters.user)));
+
+        function drawReports() {
+          reportsHost.innerHTML = '';
+          const rows = rFiltered();
+          if (!rows.length) { reportsHost.append(el('p', { class: 'muted', style: 'margin-bottom:18px' }, archived.length ? 'No reports match these filters.' : 'No archived reports yet.')); return; }
           const byType = new Map();
-          for (const r of archived) {
+          for (const r of rows) {
             const k = r.report_type || 'incident';
             if (!byType.has(k)) byType.set(k, []);
             byType.get(k).push(r);
           }
-          for (const [k, rows] of byType) {
-            app.append(el('h3', { style: 'margin:14px 0 8px' }, `${typeLabel(k)} (${rows.length})`));
-            for (const i of rows) {
-              app.append(el('div', { class: 'row', onclick: () => go(incidentView(i.id)), style: 'cursor:pointer' }, [
+          for (const [k, group] of byType) {
+            reportsHost.append(el('h3', { style: 'margin:14px 0 8px' }, `${typeLabel(k)} (${group.length})`));
+            for (const i of group) {
+              reportsHost.append(el('div', { class: 'row', onclick: () => go(incidentView(i.id)), style: 'cursor:pointer' }, [
                 el('div', { class: 'grow' }, [
                   el('div', {}, truncate(i.what_happened, 70)),
-                  el('div', { class: 'sub' }, `${reporterOf(i)} · ${i.archived_at ? fmt(i.archived_at) : fmt(i.created_at)}`),
+                  el('div', { class: 'sub' }, `${reporterOf(i)} · ${fmt(i.created_at)}`),
                 ]),
                 el('span', { class: `pill ${incidentStatusClass(i)}`, style: incidentStatusStyle(i) }, statusLabel(i.status)),
               ]));
             }
           }
         }
+        drawReports();
 
-        app.append(el('h2', { class: 'display', style: 'font-size:1.15rem;margin:24px 0 12px' }, t('checklistLogs')));
-
-        // ── Checklist logs ──
-        const runsQ = await db.from('checklist_runs').select('*').not('submitted_at', 'is', null).order('submitted_at', { ascending: false });
+        // ════════ CHECKLISTS ════════
+        app.append(el('h2', { class: 'display', style: 'font-size:1.15rem;margin:24px 0 10px' }, t('checklistLogs')));
         if (runsQ.error) {
           app.append(emptyState(t('noChecklistLogs'), 'Run migration_incident_photos_checklist_logs.sql first.'));
           return;
         }
-        const { data: checklists } = await db.from('checklists').select('*');
-        const byChecklist = new Map((checklists || []).map(c => [c.id, c]));
-        const runs = runsQ.data || [];
-        if (!runs.length) { app.append(emptyState(t('noChecklistLogs'), t('checklistLogsMeta'))); return; }
-        for (const run of runs) {
-          const checklist = byChecklist.get(run.checklist_id);
-          const items = checklist?.items || [];
-          const missing = items.filter(i => !run.checked?.[i.id]?.done);
-          const hasNotes = !!(run.notes || '').trim();
-          const needsReview = missing.length > 0 || hasNotes;
-          const card = el('div', { class: 'card log-card' + (needsReview ? ' log-warning' : '') }, [
-            el('div', { class: 'section-head' }, [
-              el('div', {}, [
-                el('h3', {}, checklist?.title || t('checklist')),
-                el('div', { class: 'sub' }, `${nameOf(run.user_id)} - ${fmt(run.submitted_at || run.updated_at)}`),
+
+        const cFilters = { from: '', until: '', user: 'all' };
+        const cFrom = el('input', { type: 'date', onchange: e => { cFilters.from = e.target.value; drawChecklists(); } });
+        const cUntil = el('input', { type: 'date', onchange: e => { cFilters.until = e.target.value; drawChecklists(); } });
+        const runUserIds = [...new Set(runs.map(r => r.user_id).filter(Boolean))];
+        const cUser = el('select', { onchange: e => { cFilters.user = e.target.value; drawChecklists(); } }, [
+          opt('all', t('anyReporter')),
+          ...runUserIds.map(id => opt(id, labelOf(state.profiles.find(p => p.id === id)))),
+        ]);
+        app.append(el('div', { style: 'display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px' }, [
+          el('div', { style: 'flex:1;min-width:130px' }, labeled(t('dateFrom'), cFrom)),
+          el('div', { style: 'flex:1;min-width:130px' }, labeled(t('dateUntil'), cUntil)),
+          el('div', { style: 'flex:1;min-width:150px' }, labeled(t('filterByUser'), cUser)),
+        ]));
+        const checklistHost = el('div', {});
+        app.append(checklistHost);
+
+        function drawChecklists() {
+          checklistHost.innerHTML = '';
+          const rows = runs.filter(r =>
+            inDateRange(r.submitted_at || r.updated_at, cFilters.from, cFilters.until) &&
+            (cFilters.user === 'all' || r.user_id === cFilters.user));
+          if (!rows.length) { checklistHost.append(el('p', { class: 'muted' }, runs.length ? 'No checklists match these filters.' : t('noChecklistLogs'))); return; }
+          for (const run of rows) {
+            const checklist = byChecklist.get(run.checklist_id);
+            const items = checklist?.items || [];
+            const missing = items.filter(i => !run.checked?.[i.id]?.done);
+            const hasNotes = !!(run.notes || '').trim();
+            const needsReview = missing.length > 0 || hasNotes;
+            const card = el('div', { class: 'card log-card' + (needsReview ? ' log-warning' : '') }, [
+              el('div', { class: 'section-head' }, [
+                el('div', {}, [
+                  el('h3', {}, checklist?.title || t('checklist')),
+                  el('div', { class: 'sub' }, `${nameOf(run.user_id)} - ${fmt(run.submitted_at || run.updated_at)}`),
+                ]),
+                el('span', { class: 'pill', style: needsReview ? 'background:#f2c94c;color:#17212b;border-color:#f2c94c' : '' },
+                  needsReview ? t('checklistLogNeedsAttention') : t('completed')),
               ]),
-              el('span', { class: 'pill', style: needsReview ? 'background:#f2c94c;color:#17212b;border-color:#f2c94c' : '' },
-                needsReview ? t('checklistLogNeedsAttention') : t('completed')),
-            ]),
-            el('div', { class: 'sub' }, missing.length ? t('missingItems', { count: missing.length }) : t('completed')),
-          ]);
-          if (missing.length) {
-            card.append(el('ul', { class: 'log-missing' }, missing.map(i => el('li', {}, i.label))));
-          }
-          if (hasNotes) {
-            card.append(el('div', { class: 'log-notes' }, [
+              el('div', { class: 'sub' }, missing.length ? t('missingItems', { count: missing.length }) : t('completed')),
+            ]);
+            if (missing.length) card.append(el('ul', { class: 'log-missing' }, missing.map(i => el('li', {}, i.label))));
+            if (hasNotes) card.append(el('div', { class: 'log-notes' }, [
               el('strong', {}, `${t('notes')}: `),
               document.createTextNode(run.notes.trim()),
             ]));
+            checklistHost.append(card);
           }
-          app.append(card);
         }
+        drawChecklists();
       },
     };
   }
