@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>Ops Admin</title>
+  <title>Nicosoft HMS manager</title>
   <link rel="stylesheet" href="./styles.css">
   <style>
     /* Users page polish. Keeps the old global styles, but keeps access controls out of account details. */
@@ -87,7 +87,7 @@
     const render = () => {
       card.innerHTML = '';
       card.append(
-        el('div', { class: 'brand' }, 'Ops Admin'),
+        el('div', { class: 'brand' }, 'Nicosoft HMS manager'),
         el('div', { class: 'tag' }, mode === 'login' ? 'Sign in to manage groups and incidents.' : 'Create an account, then ask an admin to grant access.'),
         ...(mode === 'login'
           ? [labeled('Username or email', el('input', { type: 'text', id: 'lid', autocomplete: 'username' })),
@@ -142,8 +142,8 @@
         el('button', { class: 'btn btn-ghost btn-block', onclick: signOut }, 'Sign out')
       )));
   }
-  async function signOut() { await db.auth.signOut(); location.reload(); }
   function goIndex() { location.href = new URL('./index.html', location.href).href; }
+  async function signOut() { await db.auth.signOut(); goIndex(); }
 
   // ── app shell ──────────────────────────────────────────
   function showApp() {
@@ -1072,7 +1072,7 @@
   }
   function makeTempPassword() {
     const a = new Uint32Array(3); crypto.getRandomValues(a);
-    return 'Ops-' + [...a].map(n => n.toString(36)).join('-').slice(0, 16);
+    return 'HMS-' + [...a].map(n => n.toString(36)).join('-').slice(0, 16);
   }
 
 

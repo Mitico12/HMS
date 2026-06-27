@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>Ops</title>
+  <title>Nicosoft HMS manager</title>
   <link rel="stylesheet" href="./styles.css">
   <style>
     .settings-card { display: grid; gap: 12px; }
@@ -64,7 +64,7 @@
            labeled('Full name', el('input', { type: 'text', id: 'fn' })),
            labeled('Password', el('input', { type: 'password', id: 'pw', autocomplete: 'new-password' }))];
       card.append(
-        el('div', { class: 'brand' }, 'Ops'),
+        el('div', { class: 'brand' }, 'Nicosoft HMS manager'),
         el('div', { class: 'tag' }, mode === 'login' ? 'Sign in to your workplace tools.' : 'Create your account.'),
         ...fields,
         el('button', { class: 'btn btn-primary btn-block', style: 'margin-top:8px', onclick: submit },
@@ -102,8 +102,8 @@
     render();
     screen.append(el('div', { class: 'auth-screen' }, card));
   }
-  async function signOut() { await db.auth.signOut(); location.reload(); }
   function goIndex() { location.href = new URL('./index.html', location.href).href; }
+  async function signOut() { await db.auth.signOut(); goIndex(); }
 
   // ── shell + router ─────────────────────────────────────
   function showApp() {
