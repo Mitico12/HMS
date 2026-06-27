@@ -13,9 +13,12 @@ create table if not exists profiles (
   id          uuid primary key references auth.users (id) on delete cascade,
   email       text,
   full_name   text,
-  role        text not null default 'user',   -- 'user' | 'admin'
+  role        text not null default 'user',   -- 'user' | 'admin' | 'super_admin'
+  is_verified boolean not null default false,  -- admin must approve before access
+  username    text,                            -- optional login handle (unique, case-insensitive)
   created_at  timestamptz not null default now()
 );
+create unique index if not exists profiles_username_lower_key on profiles (lower(username));
 
 -- Auto-create a profile row whenever a new auth user signs up.
 create or replace function handle_new_user()
@@ -24,8 +27,10 @@ language plpgsql
 security definer set search_path = public
 as $$
 begin
-  insert into profiles (id, email, full_name)
-  values (new.id, new.email, coalesce(new.raw_user_meta_data->>'full_name', new.email))
+  insert into profiles (id, email, full_name, username)
+  values (new.id, new.email,
+          coalesce(new.raw_user_meta_data->>'full_name', new.email),
+          new.raw_user_meta_data->>'username')
   on conflict (id) do nothing;
   return new;
 end;
@@ -36,7 +41,7 @@ create trigger on_auth_user_created
   after insert on auth.users
   for each row execute function handle_new_user();
 
--- Helper: is the calling user an admin? Used by RLS policies below.
+-- Helper: is the calling user an admin (either rank)? Used by RLS policies below.
 create or replace function is_admin()
 returns boolean
 language sql
@@ -45,9 +50,69 @@ stable
 as $$
   select exists (
     select 1 from profiles
-    where id = auth.uid() and role = 'admin'
+    where id = auth.uid() and role in ('admin','super_admin')
   );
 $$;
+
+create or replace function is_super()
+returns boolean
+language sql security definer set search_path = public stable
+as $$
+  select exists (select 1 from profiles where id = auth.uid() and role = 'super_admin');
+$$;
+
+-- Username → email lookup for login (callable before authentication).
+create or replace function get_email_for_username(p_username text) returns text
+language sql security definer set search_path = public stable as $$
+  select email from profiles where lower(username) = lower(p_username) limit 1;
+$$;
+grant execute on function get_email_for_username(text) to anon, authenticated;
+
+create or replace function username_available(p_username text) returns boolean
+language sql security definer set search_path = public stable as $$
+  select not exists (select 1 from profiles where lower(username) = lower(p_username));
+$$;
+grant execute on function username_available(text) to anon, authenticated;
+
+-- Approve / revoke an account. Normal admins can't touch admin accounts.
+create or replace function set_verification(target uuid, verified boolean) returns void
+language plpgsql security definer set search_path = public as $$
+declare caller_role text; target_role text;
+begin
+  select role into caller_role from profiles where id = auth.uid();
+  select role into target_role from profiles where id = target;
+  if caller_role not in ('admin','super_admin') then raise exception 'Not authorized'; end if;
+  if caller_role = 'admin' and target_role in ('admin','super_admin') then
+    raise exception 'Normal admins cannot modify admin accounts';
+  end if;
+  update profiles set is_verified = verified where id = target;
+end; $$;
+grant execute on function set_verification(uuid, boolean) to authenticated;
+
+-- Change a role. super_admin: any change. admin: only promote a user to admin.
+create or replace function set_role(target uuid, new_role text) returns void
+language plpgsql security definer set search_path = public as $$
+declare caller_role text; target_role text;
+begin
+  if new_role not in ('user','admin','super_admin') then raise exception 'Invalid role'; end if;
+  select role into caller_role from profiles where id = auth.uid();
+  select role into target_role from profiles where id = target;
+  if caller_role = 'super_admin' then
+    update profiles set role = new_role,
+      is_verified = case when new_role <> 'user' then true else is_verified end
+      where id = target;
+    return;
+  end if;
+  if caller_role = 'admin' then
+    if target_role <> 'user' or new_role <> 'admin' then
+      raise exception 'Normal admins can only promote a user to admin';
+    end if;
+    update profiles set role = 'admin', is_verified = true where id = target;
+    return;
+  end if;
+  raise exception 'Not authorized';
+end; $$;
+grant execute on function set_role(uuid, text) to authenticated;
 
 -- ------------------------------------------------------------
 --  GROUPS  (the home-page tiles)
@@ -171,6 +236,18 @@ create table if not exists documents (
 -- ============================================================
 -- insert into storage.buckets (id, name, public) values ('documents','documents', false) on conflict do nothing;
 
+-- Storage RLS: admins manage the bucket, signed-in users can read (for signed URLs).
+drop policy if exists "documents admin all" on storage.objects;
+create policy "documents admin all" on storage.objects
+  for all
+  using      (bucket_id = 'documents' and public.is_admin())
+  with check (bucket_id = 'documents' and public.is_admin());
+
+drop policy if exists "documents read" on storage.objects;
+create policy "documents read" on storage.objects
+  for select
+  using (bucket_id = 'documents' and auth.role() = 'authenticated');
+
 -- ============================================================
 --  ROW LEVEL SECURITY
 --  Baseline policies: every authenticated user can read shared
@@ -189,43 +266,64 @@ alter table incident_actions      enable row level security;
 alter table documents             enable row level security;
 
 -- profiles: read own + (admins read all); update own non-role fields
+drop policy if exists profiles_read on profiles;
 create policy profiles_read   on profiles for select using (id = auth.uid() or is_admin());
-create policy profiles_update on profiles for update using (id = auth.uid() or is_admin());
+drop policy if exists profiles_update on profiles;
+create policy profiles_update   on profiles for update using (is_super()) with check (is_super());
 
 -- shared read content (groups, procedures, checklists, categories, documents)
-create policy groups_read     on groups              for select using (auth.role() = 'authenticated');
-create policy groups_admin    on groups              for all    using (is_admin()) with check (is_admin());
+drop policy if exists groups_read on groups;
+create policy groups_read   on groups              for select using (auth.role() = 'authenticated');
+drop policy if exists groups_admin on groups;
+create policy groups_admin   on groups              for all    using (is_admin()) with check (is_admin());
 
-create policy proc_read       on procedures          for select using (auth.role() = 'authenticated');
-create policy proc_admin      on procedures          for all    using (is_admin()) with check (is_admin());
+drop policy if exists proc_read on procedures;
+create policy proc_read   on procedures          for select using (auth.role() = 'authenticated');
+drop policy if exists proc_admin on procedures;
+create policy proc_admin   on procedures          for all    using (is_admin()) with check (is_admin());
 
-create policy check_read      on checklists          for select using (auth.role() = 'authenticated');
-create policy check_admin     on checklists          for all    using (is_admin()) with check (is_admin());
+drop policy if exists check_read on checklists;
+create policy check_read   on checklists          for select using (auth.role() = 'authenticated');
+drop policy if exists check_admin on checklists;
+create policy check_admin   on checklists          for all    using (is_admin()) with check (is_admin());
 
-create policy cat_read        on incident_categories for select using (auth.role() = 'authenticated');
-create policy cat_admin       on incident_categories for all    using (is_admin()) with check (is_admin());
+drop policy if exists cat_read on incident_categories;
+create policy cat_read   on incident_categories for select using (auth.role() = 'authenticated');
+drop policy if exists cat_admin on incident_categories;
+create policy cat_admin   on incident_categories for all    using (is_admin()) with check (is_admin());
 
-create policy doc_read        on documents           for select using (auth.role() = 'authenticated');
-create policy doc_admin       on documents           for all    using (is_admin()) with check (is_admin());
+drop policy if exists doc_read on documents;
+create policy doc_read   on documents           for select using (auth.role() = 'authenticated');
+drop policy if exists doc_admin on documents;
+create policy doc_admin   on documents           for all    using (is_admin()) with check (is_admin());
 
 -- checklist_runs: a user manages only their own row; admins read all
-create policy runs_own        on checklist_runs      for all
+drop policy if exists runs_own on checklist_runs;
+create policy runs_own   on checklist_runs      for all
   using (user_id = auth.uid()) with check (user_id = auth.uid());
-create policy runs_admin_read on checklist_runs      for select using (is_admin());
+drop policy if exists runs_admin_read on checklist_runs;
+create policy runs_admin_read   on checklist_runs      for select using (is_admin());
 
 -- procedure_submissions: user inserts/reads own; admins read all
-create policy sub_own         on procedure_submissions for all
+drop policy if exists sub_own on procedure_submissions;
+create policy sub_own   on procedure_submissions for all
   using (user_id = auth.uid()) with check (user_id = auth.uid());
-create policy sub_admin_read  on procedure_submissions for select using (is_admin());
+drop policy if exists sub_admin_read on procedure_submissions;
+create policy sub_admin_read   on procedure_submissions for select using (is_admin());
 
 -- incidents: reporter reads own; admins read & write all; reporter inserts own
-create policy inc_insert      on incidents for insert with check (reporter_id = auth.uid());
-create policy inc_read        on incidents for select using (reporter_id = auth.uid() or is_admin());
-create policy inc_admin_write on incidents for update using (is_admin()) with check (is_admin());
+drop policy if exists inc_insert on incidents;
+create policy inc_insert   on incidents for insert with check (reporter_id = auth.uid());
+drop policy if exists inc_read on incidents;
+create policy inc_read   on incidents for select using (reporter_id = auth.uid() or is_admin());
+drop policy if exists inc_admin_write on incidents;
+create policy inc_admin_write   on incidents for update using (is_admin()) with check (is_admin());
 
 -- incident_actions: admins write; reporter of the parent incident may read
-create policy act_admin       on incident_actions for all using (is_admin()) with check (is_admin());
-create policy act_read        on incident_actions for select using (
+drop policy if exists act_admin on incident_actions;
+create policy act_admin   on incident_actions for all using (is_admin()) with check (is_admin());
+drop policy if exists act_read on incident_actions;
+create policy act_read   on incident_actions for select using (
   is_admin() or exists (
     select 1 from incidents i
     where i.id = incident_actions.incident_id and i.reporter_id = auth.uid()

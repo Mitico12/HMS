@@ -46,9 +46,13 @@
       card.append(
         el('div', { class: 'brand' }, 'Ops Admin'),
         el('div', { class: 'tag' }, mode === 'login' ? 'Sign in to manage groups and incidents.' : 'Create an account, then ask an admin to grant access.'),
-        labeled('Email', el('input', { type: 'email', id: 'em', autocomplete: 'email' })),
-        labeled('Password', el('input', { type: 'password', id: 'pw', autocomplete: 'current-password' })),
-        ...(mode === 'signup' ? [labeled('Full name', el('input', { type: 'text', id: 'fn' }))] : []),
+        ...(mode === 'login'
+          ? [labeled('Username or email', el('input', { type: 'text', id: 'lid', autocomplete: 'username' })),
+             labeled('Password', el('input', { type: 'password', id: 'pw', autocomplete: 'current-password' }))]
+          : [labeled('Email', el('input', { type: 'email', id: 'em', autocomplete: 'email' })),
+             labeled('Username', el('input', { type: 'text', id: 'un', autocomplete: 'username' })),
+             labeled('Full name', el('input', { type: 'text', id: 'fn' })),
+             labeled('Password', el('input', { type: 'password', id: 'pw', autocomplete: 'new-password' }))]),
         el('button', { class: 'btn btn-primary btn-block', style: 'margin-top:8px', onclick: submit },
           mode === 'login' ? 'Sign in' : 'Create account'),
         el('button', { class: 'btn btn-ghost btn-block', style: 'margin-top:10px',
@@ -57,16 +61,26 @@
       );
     };
     async function submit() {
-      const email = $('#em').value.trim(), password = $('#pw').value;
-      if (!email || !password) return toast('Email and password are required.', 'err');
+      const password = $('#pw').value;
       if (mode === 'signup') {
-        const full_name = $('#fn').value.trim();
+        const email = $('#em').value.trim(), username = $('#un').value.trim(), full_name = $('#fn').value.trim();
+        if (!email || !username || !password) return toast('Email, username and password are required.', 'err');
+        const { data: free } = await db.rpc('username_available', { p_username: username });
+        if (free === false) return toast('That username is taken.', 'err');
         const { error } = await db.auth.signUp({ email, password,
-          options: { data: { full_name }, emailRedirectTo: new URL('confirmed.html', location.href).href } });
+          options: { data: { full_name, username }, emailRedirectTo: new URL('confirmed.html', location.href).href } });
         if (error) return toast(error.message, 'err');
-        toast('Account created. Ask an admin to grant access, then sign in.');
+        toast('Account created. Confirm your email, then ask an admin to grant access.');
         mode = 'login'; render();
       } else {
+        const ident = $('#lid').value.trim();
+        if (!ident || !password) return toast('Enter your username or email and password.', 'err');
+        let email = ident;
+        if (!ident.includes('@')) {
+          const { data: resolved } = await db.rpc('get_email_for_username', { p_username: ident });
+          if (!resolved) return toast('No account found for that username.', 'err');
+          email = resolved;
+        }
         const { error } = await db.auth.signInWithPassword({ email, password });
         if (error) return toast(error.message, 'err');
         location.reload();
@@ -123,7 +137,7 @@
     const bar = $('#topbar'); bar.innerHTML = '';
     if (viewStack.length > 1) bar.append(el('button', { class: 'iconbtn', onclick: back }, '‹'));
     bar.append(el('h1', {}, view.title));
-    bar.append(el('span', { class: 'role-pill' }, 'admin'));
+    bar.append(el('span', { class: 'role-pill' }, state.profile.role === 'super_admin' ? 'super admin' : 'admin'));
     bar.append(el('button', { class: 'iconbtn', title: 'Sign out', onclick: signOut }, '⏻'));
     if (view.action) bar.append(view.action);
     const app = $('#app'); app.innerHTML = '';
@@ -149,7 +163,7 @@
         const { data } = await db.from('groups').select('*').order('sort_order');
         state.groups = data || [];
         await loadProfiles();
-        const pending = state.profiles.filter(p => !p.is_verified && p.role !== 'admin').length;
+        const pending = state.profiles.filter(p => p.role === 'user' && !p.is_verified).length;
         const grid = el('div', { class: 'tile-grid' });
 
         // fixed admin-only tile: account verifications
@@ -650,29 +664,55 @@
       title: 'Verifications', tab: 'groups',
       async render(app) {
         await loadProfiles();
-        const pending = state.profiles.filter(p => !p.is_verified && p.role !== 'admin');
-        const settled = state.profiles.filter(p => p.is_verified || p.role === 'admin');
+        const me = state.profile;
+        const iAmSuper = me.role === 'super_admin';
+        const pending = state.profiles.filter(p => p.role === 'user' && !p.is_verified);
+        const settled = state.profiles.filter(p => !(p.role === 'user' && !p.is_verified));
 
         const label = (p) => p.full_name || p.email;
+        const roleName = (r) => ({ user: 'User', admin: 'Admin', super_admin: 'Super admin' }[r] || r);
+
         const personRow = (p) => {
-          const roleSel = el('select', { onchange: async e => {
-            const { error } = await db.from('profiles').update({ role: e.target.value }).eq('id', p.id);
-            if (error) return toast(error.message, 'err');
-            toast(`${label(p)} is now ${e.target.value}.`); refresh();
-          } }, [opt('user', 'User'), opt('admin', 'Admin')]);
-          roleSel.value = p.role;
-          const approveBtn = el('button', {
-            class: 'btn ' + (p.is_verified ? 'btn-danger' : 'btn-primary'),
-            onclick: async () => {
-              const { error } = await db.from('profiles').update({ is_verified: !p.is_verified }).eq('id', p.id);
+          const controls = [];
+
+          // role control
+          if (p.id === me.id) {
+            controls.push(el('span', { class: 'pill', style: 'background:#e6e3da' }, 'you'));
+          } else if (iAmSuper) {
+            const sel = el('select', { onchange: async e => {
+              const { error } = await db.rpc('set_role', { target: p.id, new_role: e.target.value });
               if (error) return toast(error.message, 'err');
-              toast(p.is_verified ? 'Access revoked.' : 'Account approved.'); refresh();
-            } }, p.is_verified ? 'Revoke' : 'Approve');
+              toast(`${label(p)} → ${roleName(e.target.value)}.`); refresh();
+            } }, [opt('user', 'User'), opt('admin', 'Admin'), opt('super_admin', 'Super admin')]);
+            sel.value = p.role;
+            controls.push(sel);
+          } else if (p.role === 'user') {
+            controls.push(el('button', { class: 'btn btn-ghost', onclick: async () => {
+              const { error } = await db.rpc('set_role', { target: p.id, new_role: 'admin' });
+              if (error) return toast(error.message, 'err');
+              toast(`${label(p)} is now an admin.`); refresh();
+            } }, 'Make admin'));
+          } else {
+            controls.push(el('span', { class: 'muted', style: 'font-size:.85rem' }, roleName(p.role)));
+          }
+
+          // approve / revoke — only for regular-user accounts
+          if (p.role === 'user') {
+            controls.push(el('button', {
+              class: 'btn ' + (p.is_verified ? 'btn-danger' : 'btn-primary'),
+              onclick: async () => {
+                const { error } = await db.rpc('set_verification', { target: p.id, verified: !p.is_verified });
+                if (error) return toast(error.message, 'err');
+                toast(p.is_verified ? 'Access revoked.' : 'Account approved.'); refresh();
+              } }, p.is_verified ? 'Revoke' : 'Approve'));
+          }
+
+          const tag = p.role !== 'user' ? ` · ${roleName(p.role).toLowerCase()}`
+                    : p.is_verified ? ' · approved' : ' · awaiting approval';
           return el('div', { class: 'row' }, [
             el('div', { class: 'grow' }, [el('div', {}, label(p)),
-              el('div', { class: 'sub' }, p.email + (p.role === 'admin' ? ' · admin'
-                : p.is_verified ? ' · approved' : ' · awaiting approval'))]),
-            roleSel, approveBtn,
+              el('div', { class: 'sub' }, p.email + tag)]),
+            ...controls,
           ]);
         };
 
@@ -683,6 +723,9 @@
 
         app.append(el('h2', { class: 'display', style: 'font-size:1.15rem;margin:24px 0 12px' }, 'All accounts'));
         for (const p of settled) app.append(personRow(p));
+
+        if (!iAmSuper) app.append(el('p', { class: 'muted', style: 'font-size:.8rem;margin-top:16px' },
+          'Only super admins can change or remove admin access.'));
       },
     };
   }

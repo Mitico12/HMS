@@ -24,7 +24,7 @@ export async function currentProfile() {
 export async function requireSession({ admin = false } = {}) {
   const profile = await currentProfile();
   if (!profile) return { ok: false, reason: 'no-session' };
-  if (admin && profile.role !== 'admin') return { ok: false, reason: 'not-admin', profile };
+  if (admin && !['admin', 'super_admin'].includes(profile.role)) return { ok: false, reason: 'not-admin', profile };
   return { ok: true, profile };
 }
 

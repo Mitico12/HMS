@@ -45,12 +45,17 @@
     const card = el('div', { class: 'auth-card' });
     const render = () => {
       card.innerHTML = '';
+      const fields = mode === 'login'
+        ? [labeled('Username or email', el('input', { type: 'text', id: 'lid', autocomplete: 'username' })),
+           labeled('Password', el('input', { type: 'password', id: 'pw', autocomplete: 'current-password' }))]
+        : [labeled('Email', el('input', { type: 'email', id: 'em', autocomplete: 'email' })),
+           labeled('Username', el('input', { type: 'text', id: 'un', autocomplete: 'username' })),
+           labeled('Full name', el('input', { type: 'text', id: 'fn' })),
+           labeled('Password', el('input', { type: 'password', id: 'pw', autocomplete: 'new-password' }))];
       card.append(
         el('div', { class: 'brand' }, 'Ops'),
         el('div', { class: 'tag' }, mode === 'login' ? 'Sign in to your workplace tools.' : 'Create your account.'),
-        labeled('Email', el('input', { type: 'email', id: 'em', autocomplete: 'email' })),
-        labeled('Password', el('input', { type: 'password', id: 'pw', autocomplete: 'current-password' })),
-        ...(mode === 'signup' ? [labeled('Full name', el('input', { type: 'text', id: 'fn' }))] : []),
+        ...fields,
         el('button', { class: 'btn btn-primary btn-block', style: 'margin-top:8px', onclick: submit },
           mode === 'login' ? 'Sign in' : 'Create account'),
         el('button', { class: 'btn btn-ghost btn-block', style: 'margin-top:10px',
@@ -59,15 +64,25 @@
       );
     };
     async function submit() {
-      const email = $('#em').value.trim(), password = $('#pw').value;
-      if (!email || !password) return toast('Email and password are required.', 'err');
+      const password = $('#pw').value;
       if (mode === 'signup') {
-        const full_name = $('#fn').value.trim();
+        const email = $('#em').value.trim(), username = $('#un').value.trim(), full_name = $('#fn').value.trim();
+        if (!email || !username || !password) return toast('Email, username and password are required.', 'err');
+        const { data: free } = await db.rpc('username_available', { p_username: username });
+        if (free === false) return toast('That username is taken.', 'err');
         const { error } = await db.auth.signUp({ email, password,
-          options: { data: { full_name }, emailRedirectTo: new URL('confirmed.html', location.href).href } });
+          options: { data: { full_name, username }, emailRedirectTo: new URL('confirmed.html', location.href).href } });
         if (error) return toast(error.message, 'err');
-        toast('Account created. You can sign in now.'); mode = 'login'; render();
+        toast('Account created. Confirm your email, then wait for admin approval.'); mode = 'login'; render();
       } else {
+        const ident = $('#lid').value.trim();
+        if (!ident || !password) return toast('Enter your username or email and password.', 'err');
+        let email = ident;
+        if (!ident.includes('@')) {
+          const { data: resolved } = await db.rpc('get_email_for_username', { p_username: ident });
+          if (!resolved) return toast('No account found for that username.', 'err');
+          email = resolved;
+        }
         const { error } = await db.auth.signInWithPassword({ email, password });
         if (error) return toast(error.message, 'err');
         location.reload();
