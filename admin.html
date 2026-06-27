@@ -6,18 +6,20 @@
   <title>Ops Admin</title>
   <link rel="stylesheet" href="./styles.css">
   <style>
-    /* Users page polish. Keeps the old global styles, but fixes the stretched controls shown in the screenshot. */
+    /* Users page polish. Keeps the old global styles, but keeps access controls out of account details. */
     .user-stack { display: grid; gap: 12px; }
-    .user-card { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 14px; align-items: center; padding: 16px 18px; background: var(--paper, #fffaf0); border: 1px solid rgba(26, 47, 54, .12); border-radius: 18px; box-shadow: 0 1px 2px rgba(0,0,0,.04); cursor: pointer; }
+    .user-card { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) max-content; gap: 18px; align-items: center; padding: 16px 18px; background: var(--paper, #fffaf0); border: 1px solid rgba(26, 47, 54, .12); border-radius: 18px; box-shadow: 0 1px 2px rgba(0,0,0,.04); cursor: pointer; }
     .user-card:hover { transform: translateY(-1px); box-shadow: 0 5px 16px rgba(0,0,0,.07); }
     .user-main { min-width: 0; }
     .user-name { font-weight: 700; color: var(--ink, #102a32); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .user-meta { color: var(--steel, #6b7780); font-size: .86rem; margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .user-actions { display: flex; gap: 8px; align-items: center; justify-content: flex-end; flex-wrap: wrap; }
-    .user-actions select { width: auto; min-width: 140px; max-width: 190px; }
-    .user-actions .btn { white-space: nowrap; }
+    .user-actions { position: static; display: flex; gap: 8px; align-items: center; justify-content: flex-end; flex-wrap: nowrap; min-width: 0; max-width: 100%; }
+    .user-actions select { flex: 0 0 180px; width: 180px !important; min-width: 140px; max-width: 180px; }
+    .user-actions .btn { flex: 0 0 auto; white-space: nowrap; }
     .users-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 22px 0 12px; }
     .users-head:first-child { margin-top: 0; }
+    .settings-card { display: grid; gap: 12px; }
+    .settings-current { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
     .detail-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
     .kv { padding: 12px; border: 1px solid rgba(26, 47, 54, .10); border-radius: 14px; background: rgba(255,255,255,.45); }
     .kv .k { color: var(--steel, #6b7780); font-size: .78rem; text-transform: uppercase; letter-spacing: .04em; }
@@ -28,8 +30,9 @@
     .email-log-item { border-left: 3px solid rgba(26,47,54,.18); padding: 8px 0 8px 12px; margin: 6px 0; }
     @media (max-width: 720px) {
       .user-card { grid-template-columns: 1fr; }
-      .user-actions { justify-content: flex-start; }
-      .user-actions select { width: 100%; max-width: none; }
+      .user-actions { justify-content: flex-start; flex-wrap: wrap; }
+      .user-actions select { flex: 1 1 100%; width: 100% !important; max-width: none; }
+      .settings-current { grid-template-columns: 1fr; }
       .detail-grid { grid-template-columns: 1fr; }
     }
   </style>
@@ -694,19 +697,19 @@
         const username = el('input', { type: 'text', autocomplete: 'username' }); username.value = p.username || '';
         const email = el('input', { type: 'email', autocomplete: 'email' }); email.value = p.email || '';
 
-        app.append(el('div', { class: 'card' }, [
+        app.append(el('div', { class: 'card settings-card' }, [
           el('h3', {}, 'Your details'),
-          el('div', { class: 'detail-grid' }, [
+          el('div', { class: 'settings-current' }, [
             kv('Name', p.full_name || '—'),
             kv('Username', p.username ? `@${p.username}` : '—'),
             kv('Email', p.email || '—'),
-            kv('Access', roleName(p.role)),
           ]),
+          kv('Access', roleName(p.role)),
           el('hr', { class: 'soft' }),
           labeled('Name', fullName),
           labeled('Username', username),
           labeled('Email', email),
-          hasPending ? el('p', { class: 'muted' }, 'You already have a pending profile change.') : null,
+          hasPending ? el('p', { class: 'muted' }, 'You already have a pending profile change. Wait for it to be approved or rejected before sending another one.') : null,
           el('button', { class: 'btn btn-primary btn-block', disabled: hasPending ? 'disabled' : null, onclick: async () => {
             const next = { full_name: fullName.value.trim(), username: username.value.trim(), email: email.value.trim() };
             if (!next.username || !next.email) return toast('Username and email are required.', 'err');
@@ -733,8 +736,9 @@
           el('p', { class: 'muted', style: 'font-size:.82rem' }, 'Changes are sent to admins for approval, like account verification.'),
         ]));
 
-        if (requests.length) app.append(el('div', { class: 'card' }, [
-          el('h3', {}, 'Your change requests'),
+        app.append(el('div', { class: 'card' }, [
+          el('h3', {}, 'Change requests'),
+          requests.length ? null : el('p', { class: 'muted' }, 'No change requests yet.'),
           ...requests.map(r => changeRequestCard(r, { embedded: true, readOnly: r.status !== 'pending' })),
         ]));
 
