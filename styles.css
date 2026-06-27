@@ -356,6 +356,38 @@ input[type="checkbox"], input[type="radio"] {
   gap: 14px;
 }
 
+.kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+.kpi-card {
+  min-height: 96px;
+  padding: 16px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--paper);
+  box-shadow: var(--shadow-soft);
+  display: grid;
+  align-content: center;
+  gap: 6px;
+}
+
+.kpi-value {
+  color: var(--ink);
+  font-size: 2rem;
+  line-height: 1;
+  font-weight: 800;
+}
+
+.kpi-label {
+  color: var(--steel);
+  font-size: .86rem;
+  font-weight: 650;
+}
+
 .tile {
   min-height: 118px;
   width: 100%;

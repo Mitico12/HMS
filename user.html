@@ -157,8 +157,9 @@
     return {
       title: t('groups'), tab: 'groups',
       async render(app) {
+        await renderUserKpiDashboard(app);
         const { data } = await db.from('groups').select('*').order('sort_order');
-        state.groups = data || [];
+        state.groups = visibleGroups(data || []);
         const grid = el('div', { class: 'tile-grid' });
         for (const g of state.groups)
           grid.append(el('button', { class: 'tile', onclick: () => go(groupView(g)) }, [
@@ -173,8 +174,54 @@
   const kindLabel = (k) => ({ checklist: t('checklists'), reports: t('incidentReports'), documents: t('documents'), procedures: t('procedures') }[k] || k);
   const groupName = (g) => {
     const key = (g.name || '').trim().toLowerCase();
-    return ({ checklists: t('checklists'), reports: t('reports'), documents: t('documents'), procedures: t('procedures') }[key] || g.name);
+    return ({ checklists: t('checklists'), reports: t('reports'), documents: t('documents'), documentation: t('documents'), procedures: t('procedures') }[key] || g.name);
   };
+
+  function visibleGroups(groups) {
+    const seenDefaultKinds = new Set();
+    return groups.filter(g => {
+      const key = (g.name || '').trim().toLowerCase();
+      const isDefault = ['checklists', 'reports', 'documents', 'documentation', 'procedures'].includes(key);
+      if (!isDefault) return true;
+      if (seenDefaultKinds.has(g.kind)) return false;
+      seenDefaultKinds.add(g.kind);
+      return true;
+    });
+  }
+
+  async function renderUserKpiDashboard(app) {
+    const { start, end } = todayBounds();
+    const [completed, reports] = await Promise.all([
+      countRows(db.from('checklist_runs').select('id', { count: 'exact', head: true })
+        .eq('user_id', state.profile.id).eq('completed', true).gte('submitted_at', start).lt('submitted_at', end)),
+      countRows(db.from('incidents').select('id', { count: 'exact', head: true })
+        .eq('reporter_id', state.profile.id).gte('created_at', start).lt('created_at', end)),
+    ]);
+    app.append(el('div', { class: 'kpi-grid' }, [
+      kpiCard(t('checklistsCompletedToday'), completed),
+      kpiCard(t('reportsToday'), reports),
+    ]));
+  }
+
+  async function countRows(query) {
+    const { count, error } = await query;
+    return error ? null : (count || 0);
+  }
+
+  function todayBounds() {
+    const start = new Date();
+    start.setHours(0, 0, 0, 0);
+    const end = new Date(start);
+    end.setDate(end.getDate() + 1);
+    return { start: start.toISOString(), end: end.toISOString() };
+  }
+
+  function kpiCard(label, value) {
+    return el('div', { class: 'kpi-card' }, [
+      el('div', { class: 'kpi-value' }, value == null ? '-' : String(value)),
+      el('div', { class: 'kpi-label' }, label),
+    ]);
+  }
 
   function groupView(g) {
     if (g.kind === 'checklist') return checklistGroupView(g);

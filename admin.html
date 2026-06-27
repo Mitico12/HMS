@@ -275,8 +275,9 @@
       action: el('button', { class: 'iconbtn', title: t('addGroup'), onclick: addGroupModal }, '+'),
       async render(app) {
         const { data } = await db.from('groups').select('*').order('sort_order');
-        state.groups = data || [];
+        state.groups = visibleGroups(data || []);
         await loadProfiles();
+        await renderAdminKpiDashboard(app);
         const pendingAccounts = state.profiles.filter(p => p.role === 'user' && !p.is_verified).length;
         const pendingChanges = await pendingProfileChangeCount();
         const pending = pendingAccounts + pendingChanges;
@@ -318,8 +319,60 @@
   const kindLabel = (k) => ({ checklist: t('checklists'), reports: t('incidentReports'), documents: t('documents'), procedures: t('procedures') }[k] || k);
   const groupName = (g) => {
     const key = (g.name || '').trim().toLowerCase();
-    return ({ checklists: t('checklists'), reports: t('reports'), documents: t('documents'), procedures: t('procedures') }[key] || g.name);
+    return ({ checklists: t('checklists'), reports: t('reports'), documents: t('documents'), documentation: t('documents'), procedures: t('procedures') }[key] || g.name);
   };
+
+  function visibleGroups(groups) {
+    const seenDefaultKinds = new Set();
+    return groups.filter(g => {
+      const key = (g.name || '').trim().toLowerCase();
+      const isDefault = ['checklists', 'reports', 'documents', 'documentation', 'procedures'].includes(key);
+      if (!isDefault) return true;
+      if (seenDefaultKinds.has(g.kind)) return false;
+      seenDefaultKinds.add(g.kind);
+      return true;
+    });
+  }
+
+  async function renderAdminKpiDashboard(app) {
+    const { start, end } = todayBounds();
+    const [completed, reports, closed, assigned] = await Promise.all([
+      countRows(db.from('checklist_runs').select('id', { count: 'exact', head: true })
+        .eq('completed', true).gte('submitted_at', start).lt('submitted_at', end)),
+      countRows(db.from('incidents').select('id', { count: 'exact', head: true })
+        .gte('created_at', start).lt('created_at', end)),
+      countRows(db.from('incidents').select('id', { count: 'exact', head: true })
+        .eq('status', 'resolved').gte('resolved_at', start).lt('resolved_at', end)),
+      countRows(db.from('incidents').select('id', { count: 'exact', head: true })
+        .eq('status', 'in_progress').eq('assigned_to', state.profile.id)),
+    ]);
+    app.append(el('div', { class: 'kpi-grid admin-kpi-grid' }, [
+      kpiCard(t('checklistsCompletedToday'), completed),
+      kpiCard(t('reportsToday'), reports),
+      kpiCard(t('reportsClosedToday'), closed),
+      kpiCard(t('inProgressAssignedToYou'), assigned),
+    ]));
+  }
+
+  async function countRows(query) {
+    const { count, error } = await query;
+    return error ? null : (count || 0);
+  }
+
+  function todayBounds() {
+    const start = new Date();
+    start.setHours(0, 0, 0, 0);
+    const end = new Date(start);
+    end.setDate(end.getDate() + 1);
+    return { start: start.toISOString(), end: end.toISOString() };
+  }
+
+  function kpiCard(label, value) {
+    return el('div', { class: 'kpi-card' }, [
+      el('div', { class: 'kpi-value' }, value == null ? '-' : String(value)),
+      el('div', { class: 'kpi-label' }, label),
+    ]);
+  }
 
   // Inclusive date-range test against an ISO timestamp; bounds are YYYY-MM-DD strings.
   function inDateRange(iso, fromStr, untilStr) {

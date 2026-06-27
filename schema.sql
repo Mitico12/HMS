@@ -352,11 +352,15 @@ create policy act_read   on incident_actions for select using (
 -- ============================================================
 --  SEED  (the three default groups + starter incident categories)
 -- ============================================================
+-- Default groups are seeded safely in migration_dedupe_default_groups.sql.
+-- The old direct seed is kept here as a reference only; do not run it repeatedly.
+/*
 insert into groups (name, icon, kind, sort_order) values
   ('Checklists',    '✅', 'checklist',  1),
   ('Reports',       '⚠️', 'reports',    2),
   ('Documentation', '📄', 'documents',  3)
 on conflict do nothing;
+*/
 
 insert into incident_categories (kind, name, sort_order) values
   ('root_cause', 'Faulty procedures',  1),
