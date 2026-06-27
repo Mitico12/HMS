@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <script>try{document.documentElement.dataset.theme=localStorage.getItem('theme')||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light')}catch(e){}</script>
   <title>Nicosoft HMS manager</title>
   <link rel="stylesheet" href="./styles.css">
   <style>
@@ -22,8 +23,9 @@
   <div id="screen"></div>
 
   <script type="module">
-    import { db, currentProfile, el, $, toast } from './config.js';
+    import { db, currentProfile, el, $, toast, initTheme, themeToggleButton } from './config.js';
 
+    initTheme();
     const screen = $('#screen');
     const isAdmin = (profile) => ['admin', 'super_admin'].includes(profile?.role);
     const openPage = (page) => location.replace(new URL(page, location.href).href);
@@ -47,6 +49,7 @@
 
       screen.append(el('div', { class: 'launch' },
         el('div', { class: 'launch-card auth-card' }, [
+          el('div', { class: 'card-actions' }, themeToggleButton()),
           el('div', { class: 'launch-brand' }, 'Nicosoft HMS manager'),
           el('div', { class: 'launch-tag' }, 'Sign in to continue.'),
           form,
@@ -62,6 +65,7 @@
       screen.innerHTML = '';
       screen.append(el('div', { class: 'launch' },
         el('div', { class: 'launch-card auth-card' }, [
+          el('div', { class: 'card-actions' }, themeToggleButton()),
           el('div', { class: 'launch-brand' }, 'Nicosoft HMS manager'),
           el('div', { class: 'launch-tag' }, `Signed in as ${profile.email || profile.username || 'admin'}.`),
           el('div', { class: 'launch-grid' }, [
