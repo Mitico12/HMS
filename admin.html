@@ -32,6 +32,9 @@
     state.profiles = data || [];
   }
   const nameOf = (id) => state.profiles.find(p => p.id === id)?.full_name || '—';
+  const emailOf = (id) => state.profiles.find(p => p.id === id)?.email || '';
+  // Reporter identity for the UI, hidden when the report is anonymous.
+  const reporterOf = (inc) => inc.is_anonymous ? 'Anonymous' : (emailOf(inc.reporter_id) || nameOf(inc.reporter_id));
 
   // ── auth screens ───────────────────────────────────────
   function showAuth() {
@@ -286,7 +289,7 @@
             listHost.append(el('div', { class: 'row', onclick: () => go(incidentView(i.id)), style: 'cursor:pointer' }, [
               el('div', { class: 'grow' }, [
                 el('div', {}, truncate(i.what_happened, 70)),
-                el('div', { class: 'sub' }, `${nameOf(i.reporter_id)} · ${fmt(i.created_at)}`),
+                el('div', { class: 'sub' }, `${reporterOf(i)} · ${fmt(i.created_at)}`),
               ]),
               el('span', { class: `pill ${i.status}` }, statusLabel(i.status)),
             ]));
@@ -316,27 +319,45 @@
           el('p', {}, inc.what_happened),
           inc.what_wrong ? el('h3', { style: 'margin-top:14px' }, 'What needs fixing') : null,
           inc.what_wrong ? el('p', {}, inc.what_wrong) : null,
-          el('p', { class: 'muted', style: 'margin-top:12px;font-size:.82rem' },
-            `Reported by ${nameOf(inc.reporter_id)} · ${fmt(inc.created_at)}`),
-          tagLine('Root cause', (inc.root_cause_ids || []).map(catName)),
-          tagLine('Consequence', (inc.consequence_ids || []).map(catName)),
+          tagLine('Root cause', (inc.root_cause_ids || []).map(catName), inc.root_cause_other),
+          tagLine('Consequence', (inc.consequence_ids || []).map(catName), inc.consequence_other),
+          el('hr', { class: 'soft' }),
+          el('div', { class: 'muted', style: 'font-size:.82rem;line-height:1.7' }, [
+            el('div', {}, `Reported by: ${reporterOf(inc)}`),
+            el('div', {}, `Occurred: ${inc.occurred_at ? fmt(inc.occurred_at) : '—'}`),
+            el('div', {}, `Location: ${inc.location || '—'}`),
+            el('div', {}, `Submitted: ${fmt(inc.created_at)}`),
+          ]),
         ]));
 
-        // processing controls
-        const status = el('select', {}, [opt('open', 'Open'), opt('in_progress', 'In progress'), opt('resolved', 'Resolved')]);
-        status.value = inc.status;
+        // processing controls — status as open/close buttons
+        const setStatus = async (next) => {
+          const patch = { status: next,
+            resolved_at: next === 'resolved' ? new Date().toISOString() : null };
+          const { error } = await db.from('incidents').update(patch).eq('id', id);
+          if (error) return toast(error.message, 'err');
+          toast(next === 'resolved' ? 'Case closed.' : 'Case reopened.'); refresh();
+        };
+        const statusBtn = (next, label) => el('button', {
+          class: 'btn ' + (inc.status === next ? 'btn-primary' : 'btn-ghost'),
+          onclick: () => setStatus(next),
+        }, label);
+
         const assign = el('select', {}, [opt('', '— unassigned —'), ...state.profiles.map(p => opt(p.id, p.full_name || p.email))]);
         assign.value = inc.assigned_to || '';
         app.append(el('div', { class: 'card' }, [
           el('h3', {}, 'Processing'),
-          labeled('Status', status), labeled('Assigned to', assign),
-          el('button', { class: 'btn btn-primary', onclick: async () => {
-            const patch = { status: status.value, assigned_to: assign.value || null,
-              resolved_at: status.value === 'resolved' ? new Date().toISOString() : null };
-            const { error } = await db.from('incidents').update(patch).eq('id', id);
+          el('div', { style: 'display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px' }, [
+            statusBtn('open', 'Open'),
+            statusBtn('in_progress', 'In progress'),
+            statusBtn('resolved', 'Close case'),
+          ]),
+          labeled('Assigned to', assign),
+          el('button', { class: 'btn btn-ghost', onclick: async () => {
+            const { error } = await db.from('incidents').update({ assigned_to: assign.value || null }).eq('id', id);
             if (error) return toast(error.message, 'err');
-            toast('Updated.'); refresh();
-          } }, 'Save status'),
+            toast('Assignment saved.');
+          } }, 'Save assignment'),
         ]));
 
         // action log
@@ -366,7 +387,7 @@
         fr.value = inc.final_report || '';
         app.append(el('div', { class: 'card' }, [
           el('h3', {}, 'Final report'),
-          el('p', { class: 'muted', style: 'font-size:.82rem' }, 'Visible to the reporter once saved. Set status to Resolved when the case is closed.'),
+          el('p', { class: 'muted', style: 'font-size:.82rem' }, 'Visible to the reporter once saved. Use "Close case" above when it is resolved.'),
           fr,
           el('button', { class: 'btn btn-primary', style: 'margin-top:10px', onclick: async () => {
             const { error } = await db.from('incidents').update({ final_report: fr.value.trim() || null }).eq('id', id);
@@ -377,11 +398,12 @@
       },
     };
   }
-  function tagLine(label, names) {
-    const filled = names.filter(Boolean);
-    return el('div', { style: 'margin-top:8px' }, [
-      el('span', { class: 'muted', style: 'font-size:.8rem' }, label + ': '),
-      el('span', {}, filled.length ? filled.join(', ') : '—'),
+  function tagLine(label, names, other) {
+    const parts = names.filter(Boolean);
+    if (other) parts.push(`${other} (other)`);
+    return el('div', { style: 'margin-top:10px' }, [
+      el('div', { class: 'muted', style: 'font-size:.78rem;text-transform:uppercase;letter-spacing:.05em' }, label),
+      el('div', { style: 'font-weight:500' }, parts.length ? parts.join(', ') : '—'),
     ]);
   }
 

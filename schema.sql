@@ -129,10 +129,15 @@ create table if not exists incidents (
   what_wrong       text,
   root_cause_ids   jsonb not null default '[]'::jsonb,    -- [category_id]
   consequence_ids  jsonb not null default '[]'::jsonb,    -- [category_id]
+  root_cause_other  text,                                 -- free-text "Other" root cause
+  consequence_other text,                                 -- free-text "Other" consequence
   status           text not null default 'open',          -- open | in_progress | resolved
   assigned_to      uuid references profiles (id),
   final_report     text,
-  created_at       timestamptz not null default now(),
+  is_anonymous     boolean not null default false,        -- hide reporter identity in the UI
+  location         text,                                  -- where it happened (optional)
+  occurred_at      timestamptz,                           -- when it happened (reporter-set)
+  created_at       timestamptz not null default now(),    -- when it was submitted
   resolved_at      timestamptz
 );
 

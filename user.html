@@ -221,17 +221,34 @@
         const { data: cats } = await db.from('incident_categories').select('*').order('sort_order');
         const roots = (cats || []).filter(c => c.kind === 'root_cause');
         const cons  = (cats || []).filter(c => c.kind === 'consequence');
-        const pickedRoot = new Set(), pickedCons = new Set();
 
         const what = el('textarea', { placeholder: 'Describe what happened, in your own words.' });
         const wrong = el('textarea', { placeholder: 'What is wrong and needs to be fixed?' });
+        const when = el('input', { type: 'datetime-local', value: localNow() });
+        const where = el('input', { type: 'text', placeholder: 'e.g. Reception, room 214, kitchen' });
+
+        const rootBlock = categoryBlock('Likely root cause', roots);
+        const consBlock = categoryBlock('Potential consequence', cons);
+
+        // anonymity toggle with a confirm step
+        const anonBox = el('input', { type: 'checkbox' });
+        anonBox.addEventListener('change', () => {
+          if (anonBox.checked && !confirm('Are you sure you want to stay anonymous? Admins will not see who filed this report.'))
+            anonBox.checked = false;
+        });
+        const anonRow = el('label', { class: 'check-item' }, [anonBox, el('span', {}, 'Report anonymously')]);
 
         app.append(
           labeled('What happened?', what, true),
           labeled('What needs fixing?', wrong),
-          el('div', { class: 'field' }, [el('span', {}, 'Likely root cause'), chipRow(roots, pickedRoot)]),
-          el('div', { class: 'field' }, [el('span', {}, 'Potential consequence'), chipRow(cons, pickedCons)]),
-          el('button', { class: 'btn btn-primary btn-block btn-lg', onclick: submit }, 'Submit report'),
+          el('div', { style: 'display:flex;gap:12px;flex-wrap:wrap' }, [
+            el('div', { style: 'flex:1;min-width:160px' }, labeled('When did it happen?', when)),
+            el('div', { style: 'flex:1;min-width:160px' }, labeled('Location (optional)', where)),
+          ]),
+          rootBlock.field,
+          consBlock.field,
+          anonRow,
+          el('button', { class: 'btn btn-primary btn-block btn-lg', style: 'margin-top:8px', onclick: submit }, 'Submit report'),
         );
 
         async function submit() {
@@ -240,8 +257,13 @@
             reporter_id: state.profile.id,
             what_happened: what.value.trim(),
             what_wrong: wrong.value.trim() || null,
-            root_cause_ids: [...pickedRoot],
-            consequence_ids: [...pickedCons],
+            root_cause_ids: [...rootBlock.picked],
+            consequence_ids: [...consBlock.picked],
+            root_cause_other: rootBlock.getOther() || null,
+            consequence_other: consBlock.getOther() || null,
+            occurred_at: when.value ? new Date(when.value).toISOString() : null,
+            location: where.value.trim() || null,
+            is_anonymous: anonBox.checked,
           });
           if (error) return toast(error.message, 'err');
           toast('Report submitted.'); back();
@@ -249,7 +271,10 @@
       },
     };
   }
-  function chipRow(cats, picked) {
+
+  // A category group: selectable chips + an "Other" chip that reveals a text box.
+  function categoryBlock(labelText, cats) {
+    const picked = new Set();
     const row = el('div', {});
     for (const c of cats) {
       const chip = el('button', { class: 'chip', onclick: () => {
@@ -258,8 +283,23 @@
       } }, c.name);
       row.append(chip);
     }
-    if (!cats.length) row.append(el('span', { class: 'muted' }, 'No options set.'));
-    return row;
+    const otherInput = el('input', { type: 'text', placeholder: 'Describe it' });
+    const otherWrap = el('div', { style: 'display:none;margin-top:8px' }, otherInput);
+    const otherChip = el('button', { class: 'chip', onclick: () => {
+      const turningOn = otherWrap.style.display === 'none';
+      otherWrap.style.display = turningOn ? 'block' : 'none';
+      otherChip.classList.toggle('on', turningOn);
+      if (turningOn) otherInput.focus(); else otherInput.value = '';
+    } }, 'Other');
+    row.append(otherChip);
+    const field = el('div', { class: 'field' }, [el('span', {}, labelText), row, otherWrap]);
+    return { field, picked, getOther: () => otherInput.value.trim() };
+  }
+
+  // Local "now" string for a datetime-local input (YYYY-MM-DDTHH:mm).
+  function localNow() {
+    const d = new Date(), p = n => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
   }
 
   function myIncidentView(id) {
@@ -273,7 +313,11 @@
           el('p', {}, inc.what_happened),
           inc.what_wrong ? el('h3', { style: 'margin-top:14px' }, 'What needs fixing') : null,
           inc.what_wrong ? el('p', {}, inc.what_wrong) : null,
-          el('p', { class: 'muted', style: 'font-size:.82rem;margin-top:12px' }, `Reported ${fmt(inc.created_at)}`),
+          el('p', { class: 'muted', style: 'font-size:.82rem;margin-top:12px' }, [
+            inc.occurred_at ? `Occurred ${fmt(inc.occurred_at)}` : `Reported ${fmt(inc.created_at)}`,
+            inc.location ? ` · ${inc.location}` : '',
+            inc.is_anonymous ? ' · submitted anonymously' : '',
+          ].join('')),
         ]));
 
         if (inc.status === 'resolved' && inc.final_report) {
