@@ -29,6 +29,9 @@
     .change-line { font-size: .92rem; }
     .change-line strong { display: inline-block; min-width: 88px; }
     .email-log-item { border-left: 3px solid rgba(26,47,54,.18); padding: 8px 0 8px 12px; margin: 6px 0; }
+    .users-tools { display: grid; gap: 10px; margin: 12px 0 14px; }
+    .users-filterbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .users-search { width: 100%; }
     @media (max-width: 720px) {
       .user-card { grid-template-columns: 1fr; }
       .user-actions { justify-content: flex-start; flex-wrap: wrap; }
@@ -127,18 +130,25 @@
 
   async function loadProfiles() {
     const withUsername = await db.from('profiles')
-      .select('id, full_name, username, email, role, is_verified')
+      .select('id, full_name, username, email, mobile_number, role, is_verified')
       .order('full_name');
     if (withUsername.error) {
       // Older databases may not have the username column yet. The SQL patch below adds it.
-      const fallback = await db.from('profiles')
+      let fallback = await db.from('profiles')
+        .select('id, full_name, username, email, role, is_verified')
+        .order('full_name');
+      if (!fallback.error) {
+        state.profiles = (fallback.data || []).map(p => ({ ...p, mobile_number: '' }));
+        return;
+      }
+      fallback = await db.from('profiles')
         .select('id, full_name, email, role, is_verified')
         .order('full_name');
       if (fallback.error) { toast(fallback.error.message, 'err'); state.profiles = []; return; }
-      state.profiles = (fallback.data || []).map(p => ({ ...p, username: '' }));
+      state.profiles = (fallback.data || []).map(p => ({ ...p, username: '', mobile_number: '' }));
       return;
     }
-    state.profiles = withUsername.data || [];
+    state.profiles = (withUsername.data || []).map(p => ({ ...p, mobile_number: p.mobile_number || '' }));
   }
   const nameOf = (id) => state.profiles.find(p => p.id === id)?.full_name || '—';
   const emailOf = (id) => state.profiles.find(p => p.id === id)?.email || '';
@@ -773,11 +783,21 @@
         await loadProfiles();
         const isSuper = state.profile.role === 'super_admin';
         const archived = await fetchArchivedReports();
+        const importInput = el('input', { type: 'file', accept: '.xlsx,.xls', style: 'display:none',
+          onchange: async e => {
+            const file = e.target.files?.[0];
+            e.target.value = '';
+            if (file) await importReportLogsExcel(file, () => go(reportLogsView(), { reset: true }));
+          } });
+        app.append(importInput);
 
         app.append(el('div', { class: 'section-head', style: 'margin-bottom:10px' }, [
           el('h2', { class: 'display', style: 'font-size:1.15rem;margin:0' }, t('archivedReports')),
-          archived.length ? el('button', { class: 'btn btn-ghost', onclick: () =>
-            exportReportsExcel(rFiltered(), 'archived-reports.xlsx') }, t('exportExcel')) : null,
+          el('div', { style: 'display:flex;gap:8px;flex-wrap:wrap' }, [
+            archived.length ? el('button', { class: 'btn btn-ghost', onclick: () =>
+              exportReportsExcel(rFiltered(), 'archived-reports.xlsx') }, t('exportExcel')) : null,
+            el('button', { class: 'btn btn-ghost', onclick: () => importInput.click() }, t('importExcel')),
+          ]),
         ]));
 
         const rFilters = { from: '', until: '', admin: 'all', user: 'all' };
@@ -1489,13 +1509,56 @@
     return q.error ? [] : (q.data || []);
   }
 
-  // Export a set of reports to a real .xlsx, loading SheetJS on demand.
-  // Reporter identity respects anonymity exactly as the UI does.
-  async function exportReportsExcel(rows, filename) {
-    if (!rows.length) return toast('Nothing to export.', 'err');
+  const REPORT_LOG_COLUMNS = [
+    'Type', 'Status', 'What happened', 'Needs fixing', 'Root causes', 'Consequences',
+    'Reporter', 'Assigned to', 'Location', 'Occurred', 'Submitted', 'Resolved', 'Archived',
+  ];
+  const USER_COLUMNS = [
+    'Full name', 'Username', 'Email', 'Mobile number', 'Role', 'Approved', 'Temporary password',
+  ];
+
+  async function loadXlsx() {
     let XLSX;
     try { XLSX = await import('https://cdn.sheetjs.com/xlsx-0.20.3/package/xlsx.mjs'); }
-    catch (e) { return toast('Could not load the Excel library (check the network).', 'err'); }
+    catch (e) { toast('Could not load the Excel library (check the network).', 'err'); return null; }
+    return XLSX;
+  }
+
+  function assertExcelHeaders(rows, columns, label) {
+    const headers = Object.keys(rows[0] || {});
+    const same = headers.length === columns.length && columns.every((c, i) => headers[i] === c);
+    if (!same) {
+      toast(`${label} import needs these columns, in order: ${columns.join(', ')}`, 'err');
+      return false;
+    }
+    return true;
+  }
+
+  async function readExcelRows(file, columns, label) {
+    const XLSX = await loadXlsx();
+    if (!XLSX) return null;
+    const buf = await file.arrayBuffer();
+    const wb = XLSX.read(buf, { type: 'array', cellDates: false });
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    const rows = XLSX.utils.sheet_to_json(ws, { defval: '' });
+    if (!rows.length) { toast('The spreadsheet is empty.', 'err'); return null; }
+    if (!assertExcelHeaders(rows, columns, label)) return null;
+    return rows;
+  }
+
+  function writeExcel(rows, sheetName, filename) {
+    return loadXlsx().then(XLSX => {
+      if (!XLSX) return;
+      const ws = XLSX.utils.json_to_sheet(rows);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, sheetName);
+      XLSX.writeFile(wb, filename);
+    });
+  }
+
+  // Export a set of reports to a real .xlsx. Reporter identity respects anonymity exactly as the UI does.
+  async function exportReportsExcel(rows, filename) {
+    if (!rows.length) return toast('Nothing to export.', 'err');
     const { data: cats } = await db.from('incident_categories').select('*');
     const catName = (id) => (cats || []).find(c => c.id === id)?.name || id;
     const joinCats = (ids, other) => {
@@ -1518,10 +1581,73 @@
       Resolved: i.resolved_at ? fmt(i.resolved_at) : '',
       Archived: i.archived_at ? fmt(i.archived_at) : '',
     }));
-    const ws = XLSX.utils.json_to_sheet(sheet);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'Reports');
-    XLSX.writeFile(wb, filename);
+    await writeExcel(sheet, 'Reports', filename);
+  }
+
+  async function importReportLogsExcel(file, refreshView) {
+    const rows = await readExcelRows(file, REPORT_LOG_COLUMNS, 'Report logs');
+    if (!rows) return;
+    await loadProfiles();
+    const profileByLabel = new Map();
+    state.profiles.forEach(p => {
+      [p.email, p.full_name, p.username, labelOf(p)].filter(Boolean)
+        .forEach(v => profileByLabel.set(String(v).trim().toLowerCase(), p));
+    });
+    const statusFromLabel = (v) => {
+      const s = String(v || '').trim().toLowerCase();
+      if (!s || s === t('open').toLowerCase()) return 'open';
+      if (s === t('inProgress').toLowerCase() || s === 'in progress') return 'in_progress';
+      if (s === t('resolved').toLowerCase()) return 'resolved';
+      return ['open', 'in_progress', 'resolved'].includes(s) ? s : null;
+    };
+    const typeFromLabel = (v) => {
+      const s = String(v || '').trim().toLowerCase();
+      if (!s || s === t('incident').toLowerCase()) return 'incident';
+      if (s === t('hazard').toLowerCase()) return 'hazard';
+      return ['incident', 'hazard'].includes(s) ? s : null;
+    };
+    const isoOrNull = (v) => {
+      const raw = String(v || '').trim();
+      if (!raw) return null;
+      const d = new Date(raw);
+      return Number.isNaN(d.getTime()) ? null : d.toISOString();
+    };
+    const payload = [];
+    for (const [idx, r] of rows.entries()) {
+      const report_type = typeFromLabel(r.Type);
+      const status = statusFromLabel(r.Status);
+      if (!report_type || !status || !String(r['What happened'] || '').trim()) {
+        return toast(`Row ${idx + 2} has an invalid type, status, or missing "What happened".`, 'err');
+      }
+      const reporterKey = String(r.Reporter || '').trim().toLowerCase();
+      const assigneeKey = String(r['Assigned to'] || '').trim().toLowerCase();
+      const reporter = profileByLabel.get(reporterKey);
+      const assignee = profileByLabel.get(assigneeKey);
+      payload.push({
+        reporter_id: reporter?.id || state.profile.id,
+        report_type,
+        status,
+        what_happened: String(r['What happened'] || '').trim(),
+        what_wrong: String(r['Needs fixing'] || '').trim() || null,
+        root_cause_ids: [],
+        consequence_ids: [],
+        root_cause_other: String(r['Root causes'] || '').trim() || null,
+        consequence_other: String(r.Consequences || '').trim() || null,
+        assigned_to: assignee?.id || null,
+        location: String(r.Location || '').trim() || null,
+        occurred_at: isoOrNull(r.Occurred),
+        created_at: isoOrNull(r.Submitted) || new Date().toISOString(),
+        resolved_at: isoOrNull(r.Resolved),
+        archived: true,
+        archived_at: isoOrNull(r.Archived) || new Date().toISOString(),
+        archived_by: state.profile.id,
+        is_anonymous: reporterKey === t('anonymous').toLowerCase(),
+      });
+    }
+    const { error } = await db.from('incidents').insert(payload);
+    if (error) return toast(error.message + ' - run migration_report_types_archive.sql if archive columns are missing.', 'err');
+    toast(`${payload.length} report log${payload.length === 1 ? '' : 's'} imported.`);
+    refreshView();
   }
   const statusLabel = (s) => ({ open: t('open'), in_progress: t('inProgress'), resolved: t('resolved') }[s] || s);
   function incidentStatusClass(inc) {
@@ -2161,6 +2287,97 @@
     return data || [];
   }
 
+  async function exportUsersExcel(rows) {
+    if (!rows.length) return toast('Nothing to export.', 'err');
+    await writeExcel(rows.map(p => ({
+      'Full name': p.full_name || '',
+      Username: p.username || '',
+      Email: p.email || '',
+      'Mobile number': p.mobile_number || '',
+      Role: roleName(p.role),
+      Approved: p.role === 'user' ? (p.is_verified ? 'Yes' : 'No') : 'Yes',
+      'Temporary password': '',
+    })), 'Users', 'users.xlsx');
+  }
+
+  async function importUsersExcel(file) {
+    const rows = await readExcelRows(file, USER_COLUMNS, 'Users');
+    if (!rows) return;
+    const parseRole = (v) => {
+      const s = String(v || '').trim().toLowerCase().replace(/\s+/g, '_');
+      if (['user', 'admin', 'super_admin'].includes(s)) return s;
+      if (s === 'superadmin') return 'super_admin';
+      return null;
+    };
+    const parseApproved = (v) => {
+      const s = String(v || '').trim().toLowerCase();
+      return ['yes', 'true', '1', 'approved', 'ja'].includes(s);
+    };
+    for (const [idx, r] of rows.entries()) {
+      const role = parseRole(r.Role);
+      if (!String(r.Email || '').trim() || !String(r.Username || '').trim() || !String(r['Temporary password'] || '').trim()) {
+        return toast(`Row ${idx + 2} needs Email, Username, and Temporary password.`, 'err');
+      }
+      if (!role) return toast(`Row ${idx + 2} has an invalid Role. Use User, Admin, or Super admin.`, 'err');
+      if (state.profile.role !== 'super_admin' && role !== 'user') {
+        return toast('Only super admins can bulk import admin accounts.', 'err');
+      }
+      if (String(r['Temporary password']).trim().length < 6) {
+        return toast(`Row ${idx + 2} temporary password must be at least 6 characters.`, 'err');
+      }
+    }
+
+    const auth = newAuthClient();
+    let created = 0;
+    for (const [idx, r] of rows.entries()) {
+      const email = String(r.Email || '').trim();
+      const username = String(r.Username || '').trim();
+      const fullName = String(r['Full name'] || '').trim();
+      const mobile = String(r['Mobile number'] || '').trim();
+      const role = parseRole(r.Role);
+      const password = String(r['Temporary password'] || '').trim();
+      const { data: free, error: freeErr } = await db.rpc('username_available', { p_username: username });
+      if (!freeErr && free === false) {
+        await auth.auth.signOut();
+        return toast(`Row ${idx + 2}: username "${username}" is taken.`, 'err');
+      }
+      const { data, error } = await auth.auth.signUp({ email, password,
+        options: { data: { full_name: fullName, username, mobile_number: mobile }, emailRedirectTo: new URL('confirmed.html', location.href).href } });
+      if (error) {
+        await auth.auth.signOut();
+        return toast(`Row ${idx + 2}: ${error.message}`, 'err');
+      }
+      const id = data?.user?.id;
+      if (!id) {
+        await auth.auth.signOut();
+        return toast(`Row ${idx + 2}: user created, but Supabase did not return an id.`, 'err');
+      }
+      const payload = {
+        id,
+        email,
+        username,
+        full_name: fullName || null,
+        mobile_number: mobile || null,
+        role,
+        is_verified: role !== 'user' ? true : parseApproved(r.Approved),
+      };
+      let { error: profileErr } = await db.from('profiles').upsert(payload, { onConflict: 'id' });
+      if (profileErr && /mobile_number/i.test(profileErr.message || '')) {
+        delete payload.mobile_number;
+        ({ error: profileErr } = await db.from('profiles').upsert(payload, { onConflict: 'id' }));
+      }
+      if (profileErr) {
+        await auth.auth.signOut();
+        return toast(`Row ${idx + 2}: ${profileErr.message}`, 'err');
+      }
+      created++;
+    }
+    await auth.auth.signOut();
+    toast(`${created} user${created === 1 ? '' : 's'} imported.`);
+    await loadProfiles();
+    refresh();
+  }
+
   function usersView() {
     return {
       title: 'Users', tab: 'groups',
@@ -2170,13 +2387,26 @@
         const pendingAccounts = state.profiles.filter(p => p.role === 'user' && !p.is_verified);
         const pendingChanges = await loadProfileChangeRequests(null, true);
         const settled = state.profiles.filter(p => !(p.role === 'user' && !p.is_verified));
+        let roleFilter = 'all';
+        let searchText = '';
+        const importInput = el('input', { type: 'file', accept: '.xlsx,.xls', style: 'display:none',
+          onchange: async e => {
+            const file = e.target.files?.[0];
+            e.target.value = '';
+            if (file) await importUsersExcel(file);
+          } });
+        app.append(importInput);
 
         app.append(el('div', { class: 'users-head' }, [
           el('h2', { class: 'display', style: 'font-size:1.15rem;margin:0' },
             (pendingAccounts.length + pendingChanges.length)
               ? `Waiting for approval (${pendingAccounts.length + pendingChanges.length})`
               : 'Waiting for approval'),
-          el('button', { class: 'btn btn-ghost', onclick: addUserModal }, '+ Add user'),
+          el('div', { style: 'display:flex;gap:8px;flex-wrap:wrap' }, [
+            el('button', { class: 'btn btn-ghost', onclick: addUserModal }, '+ Add user'),
+            el('button', { class: 'btn btn-ghost', onclick: () => exportUsersExcel(state.profiles) }, t('exportExcel')),
+            el('button', { class: 'btn btn-ghost', onclick: () => importInput.click() }, t('importExcel')),
+          ]),
         ]));
 
         if (!pendingAccounts.length && !pendingChanges.length) {
@@ -2187,13 +2417,51 @@
         for (const r of pendingChanges) pendingHost.append(changeRequestCard(r, { compact: true }));
         app.append(pendingHost);
 
+        app.append(el('div', { class: 'kpi-grid', style: 'margin-top:18px' }, [
+          metricCard({ label: t('totalUsers'), value: state.profiles.length }),
+          metricCard({ label: t('totalAdmins'), value: state.profiles.filter(p => ['admin', 'super_admin'].includes(p.role)).length }),
+        ]));
+
+        const search = el('input', { class: 'users-search', type: 'search', placeholder: t('searchUsers'),
+          oninput: e => { searchText = e.target.value; drawUsers(); } });
+        const chips = {};
+        const filterBar = el('div', { class: 'users-filterbar' });
+        const setFilter = (value) => {
+          roleFilter = value;
+          Object.entries(chips).forEach(([k, chip]) => chip.classList.toggle('on', k === roleFilter));
+          drawUsers();
+        };
+        [
+          ['all', t('all')],
+          ['user', t('users')],
+          ['admin', t('admins')],
+          ['super_admin', t('superAdmins')],
+        ].forEach(([value, label]) => {
+          const chip = el('button', { class: 'chip', onclick: () => setFilter(value) }, label);
+          chips[value] = chip;
+          filterBar.append(chip);
+        });
+        app.append(el('div', { class: 'users-tools' }, [search, filterBar]));
+
         app.append(el('div', { class: 'users-head' }, [
           el('h2', { class: 'display', style: 'font-size:1.15rem;margin:0' }, 'All users'),
-          el('span', { class: 'muted' }, `${state.profiles.length} total`),
+          el('span', { class: 'muted' }, `${settled.length} total`),
         ]));
         const list = el('div', { class: 'user-stack' });
-        for (const p of settled) list.append(userCard(p));
         app.append(list);
+        function drawUsers() {
+          list.innerHTML = '';
+          const needle = searchText.trim().toLowerCase();
+          const rows = settled.filter(p => {
+            if (roleFilter !== 'all' && p.role !== roleFilter) return false;
+            if (!needle) return true;
+            return [p.full_name, p.username, p.email, p.mobile_number, roleName(p.role)]
+              .filter(Boolean).some(v => String(v).toLowerCase().includes(needle));
+          });
+          for (const p of rows) list.append(userCard(p));
+          if (!rows.length) list.append(el('p', { class: 'muted' }, 'No users match these filters.'));
+        }
+        setFilter('all');
 
         if (!pendingChanges.length) app.append(el('p', { class: 'muted', style: 'font-size:.8rem;margin-top:16px' },
           'Profile change approvals need the SQL patch included with this update.'));
@@ -2205,6 +2473,7 @@
     const meta = [
       p.email || 'No email',
       p.username ? `@${p.username}` : null,
+      p.mobile_number || null,
       roleName(p.role).toLowerCase(),
       p.role === 'user' ? (p.is_verified ? 'approved' : 'awaiting approval') : null,
     ].filter(Boolean).join(' · ');
@@ -2278,6 +2547,7 @@
             kv('Name', p.full_name || '—'),
             kv('Username', p.username ? `@${p.username}` : '—'),
             kv('Email', p.email || '—'),
+            kv('Mobile', p.mobile_number || '—'),
             kv('Access', `${roleName(p.role)}${p.role === 'user' ? (p.is_verified ? ' · approved' : ' · awaiting approval') : ''}`),
           ]),
         ]));
@@ -2388,6 +2658,7 @@
       const email = el('input', { type: 'email', autocomplete: 'off', placeholder: 'name@example.com' });
       const username = el('input', { type: 'text', autocomplete: 'off', placeholder: 'username' });
       const fullName = el('input', { type: 'text', autocomplete: 'off', placeholder: 'Full name' });
+      const mobile = el('input', { type: 'tel', autocomplete: 'off', placeholder: '+47 ...' });
       const password = el('input', { type: 'text', autocomplete: 'off' });
       password.value = makeTempPassword();
       const role = el('select', {}, state.profile.role === 'super_admin'
@@ -2399,6 +2670,7 @@
         labeled('Email', email, true),
         labeled('Username', username, true),
         labeled('Full name', fullName),
+        labeled('Mobile number', mobile),
         labeled('Temporary password', password, true),
         labeled('Role', role),
         el('label', { class: 'check-item' }, [verified, el('span', {}, 'Approve immediately')]),
@@ -2407,6 +2679,7 @@
           const em = email.value.trim();
           const un = username.value.trim();
           const fn = fullName.value.trim();
+          const mob = mobile.value.trim();
           const pw = password.value.trim();
           if (!em || !un || !pw) return toast('Email, username and temporary password are required.', 'err');
           if (pw.length < 6) return toast('Password must be at least 6 characters.', 'err');
@@ -2415,18 +2688,22 @@
 
           const auth = newAuthClient();
           const { data, error } = await auth.auth.signUp({ email: em, password: pw,
-            options: { data: { full_name: fn, username: un }, emailRedirectTo: new URL('confirmed.html', location.href).href } });
+            options: { data: { full_name: fn, username: un, mobile_number: mob }, emailRedirectTo: new URL('confirmed.html', location.href).href } });
           await auth.auth.signOut();
           if (error) return toast(error.message, 'err');
           const id = data?.user?.id;
           if (!id) return toast('User created, but Supabase did not return an id. Refresh and check Users.', 'err');
-          const payload = { id, email: em, username: un, full_name: fn || null, role: role.value, is_verified: verified.checked };
+          const payload = { id, email: em, username: un, full_name: fn || null, mobile_number: mob || null, role: role.value, is_verified: verified.checked };
           let { error: profileErr } = await db.from('profiles').upsert(payload, { onConflict: 'id' });
           if (profileErr && /username/i.test(profileErr.message || '')) {
             delete payload.username;
             ({ error: profileErr } = await db.from('profiles').upsert(payload, { onConflict: 'id' }));
           }
-          if (profileErr) return toast(profileErr.message, 'err');
+          if (profileErr && /mobile_number/i.test(profileErr.message || '')) {
+            delete payload.mobile_number;
+            ({ error: profileErr } = await db.from('profiles').upsert(payload, { onConflict: 'id' }));
+          }
+          if (profileErr) return toast(profileErr.message + ' - run migration_mobile_number_users.sql if the mobile column is missing.', 'err');
           toast('User added. Send them the temporary password.');
           close(); await loadProfiles(); refresh();
         } }, 'Create user'),

@@ -7,6 +7,7 @@ create extension if not exists pgcrypto;
 -- Your app already uses username_available/get_email_for_username, so username likely exists.
 -- This keeps older copies safe.
 alter table public.profiles add column if not exists username text;
+alter table public.profiles add column if not exists mobile_number text;
 
 create unique index if not exists profiles_username_lower_unique
   on public.profiles (lower(username))

@@ -13,6 +13,7 @@ create table if not exists profiles (
   id          uuid primary key references auth.users (id) on delete cascade,
   email       text,
   full_name   text,
+  mobile_number text,
   role        text not null default 'user',   -- 'user' | 'admin' | 'super_admin'
   is_verified boolean not null default false,  -- admin must approve before access
   username    text,                            -- optional login handle (unique, case-insensitive)
@@ -27,10 +28,11 @@ language plpgsql
 security definer set search_path = public
 as $$
 begin
-  insert into profiles (id, email, full_name, username)
+  insert into profiles (id, email, full_name, username, mobile_number)
   values (new.id, new.email,
           coalesce(new.raw_user_meta_data->>'full_name', new.email),
-          new.raw_user_meta_data->>'username')
+          new.raw_user_meta_data->>'username',
+          new.raw_user_meta_data->>'mobile_number')
   on conflict (id) do nothing;
   return new;
 end;
@@ -336,6 +338,8 @@ create policy sub_admin_read   on procedure_submissions for select using (is_adm
 -- incidents: reporter reads own; admins read & write all; reporter inserts own
 drop policy if exists inc_insert on incidents;
 create policy inc_insert   on incidents for insert with check (reporter_id = auth.uid());
+drop policy if exists inc_admin_insert on incidents;
+create policy inc_admin_insert   on incidents for insert with check (is_admin());
 drop policy if exists inc_read on incidents;
 create policy inc_read   on incidents for select using (reporter_id = auth.uid() or is_admin());
 drop policy if exists inc_admin_write on incidents;
