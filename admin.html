@@ -43,6 +43,7 @@
 
   <script type="module">
   import { db, requireSession, currentProfile, el, $, fmt, toast, newAuthClient, initTheme, themeToggleButton, initLanguage, languageSelect, t } from './config.js';
+  import { coursesGroupView, courseBuild, courseResults } from './courses.js';
 
   initTheme();
   initLanguage();
@@ -308,7 +309,7 @@
       },
     };
   }
-  const kindLabel = (k) => ({ checklist: t('checklists'), reports: t('incidentReports'), documents: t('documents'), procedures: t('procedures') }[k] || k);
+  const kindLabel = (k) => ({ checklist: t('checklists'), reports: t('incidentReports'), documents: t('documents'), procedures: t('procedures'), courses: t('courses') }[k] || k);
   const groupName = (g) => {
     const key = (g.name || '').trim().toLowerCase();
     return ({ checklists: t('checklists'), reports: t('reports'), documents: t('documents'), documentation: t('documents'), procedures: t('procedures') }[key] || g.name);
@@ -1012,6 +1013,7 @@
         opt('checklist', t('checklists')),
         opt('reports', t('incidentReports')),
         opt('documents', t('documents')),
+        opt('courses', t('courses')),
       ]);
       body.append(
         labeled(t('name'), name, true),
@@ -1046,6 +1048,7 @@
     if (g.kind === 'checklist')  return checklistGroupView(g);
     if (g.kind === 'reports')    return reportsGroupView(g);
     if (g.kind === 'documents')  return documentsGroupView(g);
+    if (g.kind === 'courses')    return coursesGroupView(g, { go, back, state });
     return proceduresGroupView(g);
   }
 

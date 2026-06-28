@@ -59,6 +59,13 @@ export function el(tag, props = {}, kids = []) {
 
 export const $ = (sel, root = document) => root.querySelector(sel);
 
+// <option> shorthand and a labelled form field — shared by the group modules.
+export const opt = (v, label) => el('option', { value: v }, label);
+export function labeled(text, inputEl, required = false) {
+  return el('label', { class: 'field' },
+    [el('span', {}, [text, required ? el('span', { class: 'req' }, ' *') : null]), inputEl]);
+}
+
 export function initTheme() {
   const saved = localStorage.getItem('theme');
   const prefersDark = window.matchMedia?.('(prefers-color-scheme: dark)')?.matches;
@@ -153,6 +160,7 @@ const TEXT = {
     checklistNotesPlaceholder: 'Write any notes before submitting.',
     checklistProgress: '{done} of {total} complete',
     checklists: 'Checklists',
+    courses: 'Courses',
     choose: 'Choose',
     closeCase: 'Close case',
     completeChecklist: 'Complete checklist',
@@ -369,6 +377,7 @@ const TEXT = {
     checklistNotesPlaceholder: 'Skriv eventuelle notater for innsending.',
     checklistProgress: '{done} av {total} fullfort',
     checklists: 'Sjekklister',
+    courses: 'Kurs',
     choose: 'Velg',
     closeCase: 'Lukk sak',
     completeChecklist: 'Fullfor sjekkliste',

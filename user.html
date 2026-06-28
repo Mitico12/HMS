@@ -23,6 +23,7 @@
 
   <script type="module">
   import { db, requireSession, el, $, fmt, toast, initTheme, themeToggleButton, initLanguage, languageSelect, t } from './config.js';
+  import { courseListView } from './courses.js';
 
   initTheme();
   initLanguage();
@@ -172,7 +173,7 @@
       },
     };
   }
-  const kindLabel = (k) => ({ checklist: t('checklists'), reports: t('incidentReports'), documents: t('documents'), procedures: t('procedures') }[k] || k);
+  const kindLabel = (k) => ({ checklist: t('checklists'), reports: t('incidentReports'), documents: t('documents'), procedures: t('procedures'), courses: t('courses') }[k] || k);
   const groupName = (g) => {
     const key = (g.name || '').trim().toLowerCase();
     return ({ checklists: t('checklists'), reports: t('reports'), documents: t('documents'), documentation: t('documents'), procedures: t('procedures') }[key] || g.name);
@@ -418,6 +419,7 @@
     if (g.kind === 'checklist') return checklistGroupView(g);
     if (g.kind === 'reports')   return reportsGroupView(g);
     if (g.kind === 'documents') return documentsGroupView(g);
+    if (g.kind === 'courses')   return courseListView(g, { go, back, state });
     return proceduresGroupView(g);
   }
 
