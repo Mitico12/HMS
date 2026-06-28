@@ -5,12 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <script>try{document.documentElement.dataset.theme=localStorage.getItem('theme')||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light')}catch(e){}</script>
   <title>Nicosoft HMS manager</title>
-  <link rel="stylesheet" href="./styles.css">
+  <link rel="stylesheet" href="./styles.css?v=sidebar-20260628">
   <style>
     /* Users page polish. Keeps the old global styles, but keeps access controls out of account details. */
     .user-stack { display: grid; gap: 12px; }
-    .user-card { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) max-content; gap: 18px; align-items: center; padding: 16px 18px; background: var(--paper, #fffaf0); border: 1px solid rgba(26, 47, 54, .12); border-radius: 18px; box-shadow: 0 1px 2px rgba(0,0,0,.04); cursor: pointer; }
-    .user-card:hover { transform: translateY(-1px); box-shadow: 0 5px 16px rgba(0,0,0,.07); }
+    .user-card { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) max-content; gap: 18px; align-items: center; padding: 16px 18px; background: var(--paper, #fff); border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow-soft); cursor: pointer; }
+    .user-card:hover { transform: translateY(-1px); box-shadow: var(--shadow-soft); }
     .user-main { min-width: 0; }
     .user-name { font-weight: 700; color: var(--ink, #102a32); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .user-meta { color: var(--steel, #6b7780); font-size: .86rem; margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -22,7 +22,7 @@
     .settings-card { display: grid; gap: 12px; }
     .settings-current { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
     .detail-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
-    .kv { padding: 12px; border: 1px solid rgba(26, 47, 54, .10); border-radius: 14px; background: rgba(255,255,255,.45); }
+    .kv { padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: color-mix(in srgb, var(--paper-2) 48%, var(--paper)); }
     .kv .k { color: var(--steel, #6b7780); font-size: .78rem; text-transform: uppercase; letter-spacing: .04em; }
     .kv .v { font-weight: 650; margin-top: 3px; overflow-wrap: anywhere; }
     .change-lines { display: grid; gap: 6px; margin-top: 8px; }
@@ -227,12 +227,14 @@
   // ── app shell ──────────────────────────────────────────
   function showApp() {
     screen.innerHTML = '';
-    screen.append(
+    screen.append(el('div', { class: 'app-shell' }, [
+      el('aside', { class: 'sidebar', id: 'sidebar' }),
       el('header', { class: 'topbar', id: 'topbar' }),
       el('main', { class: 'wrap', id: 'app' }),
-      el('nav', { class: 'botnav', id: 'botnav' })
-    );
+      el('nav', { class: 'botnav', id: 'botnav' }),
+    ]));
     renderBotnav('groups');
+    renderSidebar('analytics');
   }
 
   function renderBotnav(active) {
@@ -245,6 +247,90 @@
       nav.append(el('button', { class: active === t.id ? 'active' : '', onclick: t.onclick },
         el('span', { class: 'ic' }, t.ic), document.createTextNode(t.label)));
     }
+  }
+  function renderSidebar(active) {
+    const side = $('#sidebar');
+    if (!side) return;
+    const userName = labelOf(state.profile);
+    const userInitial = userName.trim().slice(0, 1).toUpperCase() || 'A';
+    side.innerHTML = '';
+    side.append(
+      el('div', { class: 'sidebar-brand' }, [
+        el('div', { class: 'sidebar-logo' }, '⌾'),
+        el('div', {}, [
+          el('div', { class: 'sidebar-title' }, 'Nicosoft HMS'),
+          el('div', { class: 'sidebar-subtitle' }, 'HSE Portal'),
+        ]),
+      ]),
+      el('div', { class: 'workspace-card' }, [
+        el('div', { class: 'workspace-head' }, [
+          el('span', {}, 'Current workspace'),
+          el('span', { class: 'workspace-role' }, state.profile.role.replace('_', ' ')),
+        ]),
+        el('div', { class: 'workspace-switch' }, [
+          el('button', { onclick: () => location.href = new URL('./user.html', location.href).href }, 'Worker App'),
+          el('button', { class: 'active', onclick: () => go(homeView(), { reset: true }) }, 'Admin Console'),
+        ]),
+      ]),
+      el('div', { class: 'sidebar-section-label' }, 'Management panel'),
+    );
+    const nav = el('div', { class: 'sidebar-nav' });
+    const pendingAccounts = state.profiles.filter(p => p.role === 'user' && !p.is_verified).length;
+    const fixed = [
+      { id: 'analytics', ic: '▦', label: 'Executive Analytics', open: () => go(homeView(), { reset: true }) },
+      { id: 'incidents', ic: '⚠', label: 'Incidents Queue', badge: true, open: () => openKind('reports') },
+      { id: 'logs', ic: '☑', label: t('logs'), open: () => go(logsView()) },
+      { id: 'procedures', ic: '▤', label: 'Procedure Submissions', open: () => openKind('procedures') },
+      { id: 'courses', ic: '▣', label: 'Manage Courses', open: () => openKind('courses') },
+      { id: 'users', ic: 'U', label: 'Accounts', count: pendingAccounts, open: () => go(usersView()) },
+    ];
+    for (const item of fixed) nav.append(sidebarButton(item, active));
+    const extras = state.groups.filter(g => !['reports', 'procedures', 'courses'].includes(g.kind));
+    if (extras.length) {
+      nav.append(el('div', { class: 'sidebar-section-label' }, 'Content groups'));
+      for (const g of extras) {
+        nav.append(sidebarButton({
+          id: `group:${g.id}`,
+          ic: g.icon || '•',
+          label: groupName(g),
+          open: () => go(groupView(g)),
+        }, active));
+      }
+    }
+    nav.append(sidebarButton({ id: 'add-group', ic: '+', label: t('addGroup'), open: addGroupModal }, active));
+    side.append(nav, el('button', { class: `sidebar-footer ${active === 'settings' ? 'active' : ''}`, title: t('settings'), onclick: () => go(settingsView(), { reset: true }) }, [
+      el('div', { class: 'sidebar-avatar' }, userInitial),
+      el('div', { class: 'sidebar-user' }, [
+        el('div', { class: 'sidebar-user-name' }, userName),
+        el('div', { class: 'sidebar-user-meta' }, state.profile?.email || state.profile?.username || ''),
+      ]),
+    ]));
+    updateReportsBadge();
+  }
+  function sidebarButton(item, active) {
+    return el('button', { class: `sidebar-link ${active === item.id ? 'active' : ''}`, onclick: item.open }, [
+      el('span', { class: 'ic' }, item.ic),
+      el('span', { class: 'label' }, item.label),
+      item.badge ? el('span', { class: 'badge reports-badge' }, '') : (item.count ? el('span', { class: 'badge' }, String(item.count)) : null),
+    ]);
+  }
+  function firstGroup(kind) {
+    return state.groups.find(g => g.kind === kind);
+  }
+  function openKind(kind) {
+    const group = firstGroup(kind);
+    if (group) go(groupView(group));
+    else toast(`No ${kind} group found.`, 'err');
+  }
+  const REVIEWED_CHECKLIST_LOGS_KEY = 'reviewedChecklistLogIds';
+  function reviewedChecklistLogIds() {
+    try { return new Set(JSON.parse(localStorage.getItem(REVIEWED_CHECKLIST_LOGS_KEY) || '[]')); }
+    catch (err) { return new Set(); }
+  }
+  function markChecklistLogReviewed(id) {
+    const ids = reviewedChecklistLogIds();
+    ids.add(id);
+    localStorage.setItem(REVIEWED_CHECKLIST_LOGS_KEY, JSON.stringify([...ids]));
   }
 
   // ── view stack / router ────────────────────────────────
@@ -267,6 +353,7 @@
     if (view.action) bar.append(view.action);
     const app = $('#app'); app.innerHTML = '';
     renderBotnav(view.tab || 'groups');
+    renderSidebar(view.side || view.tab || 'analytics');
     view.render(app);
   }
   const refresh = () => paint();
@@ -282,17 +369,17 @@
   // ════════════════════════════════════════════════════════
   function homeView() {
     return {
-      title: t('groups'), tab: 'groups',
-      action: el('button', { class: 'iconbtn', title: t('addGroup'), onclick: addGroupModal }, '+'),
+      title: 'Executive Analytics', tab: 'groups', side: 'analytics',
       async render(app) {
         const { data } = await db.from('groups').select('*').order('sort_order');
         state.groups = visibleGroups(data || []);
         await loadProfiles();
+        renderSidebar('analytics');
         await renderAdminKpiDashboard(app);
         const pendingAccounts = state.profiles.filter(p => p.role === 'user' && !p.is_verified).length;
         const pendingChanges = await pendingProfileChangeCount();
         const pending = pendingAccounts + pendingChanges;
-        const grid = el('div', { class: 'tile-grid' });
+        const grid = el('div', { class: 'tile-grid mobile-only-groups' });
         const cards = [
           { id: 'fixed:users', glyph: '👥', name: t('users'), meta: pending ? `${pending} ${t('waitingApproval').toLowerCase()}` : t('accountsAccess'), open: () => go(usersView()) },
           { id: 'fixed:logs', glyph: '☑', name: t('logs'), meta: t('logsMeta'), open: () => go(logsView()) },
@@ -464,6 +551,11 @@
     else if (type === 'incidents') await renderIncidentsKpi(host, period, cur, prev, incidentStatus);
     else if (type === 'checklists') await renderChecklistsKpi(host, period, prev, checklists, selectedCl);
     else await renderAdminPerformanceKpi(host, adminSel.value);
+    if (type !== 'admin_performance') {
+      let latest = await fetchActiveReports();
+      if (type === 'incidents' && incidentStatus !== 'all') latest = latest.filter(i => i.status === incidentStatus);
+      host.append(latestReportsPanel(latest.slice(0, 3)));
+    }
   }
 
   // ── OVERVIEW ────────────────────────────────────────────────
@@ -548,6 +640,40 @@
     host.append(el('div', { class: 'kpi-card', style: 'margin-top:14px' }, [
       el('div', { class: 'kpi-label', style: 'margin-bottom:10px' }, 'Reports by worst consequence'), bar, legend,
     ]));
+
+  }
+
+  function latestReportsPanel(reports) {
+    const body = el('div', { class: 'latest-report-list' });
+    if (!reports.length) {
+      body.append(el('p', { class: 'muted', style: 'margin:0' }, 'No recent reports in this filter.'));
+    } else {
+      for (const report of reports) body.append(latestReportCard(report));
+    }
+    return el('div', { class: 'card latest-reports-card' }, [
+      el('div', { class: 'section-head' }, [
+        el('div', {}, [
+          el('h3', {}, 'Latest reports'),
+          el('div', { class: 'sub' }, 'Last 3 submitted reports'),
+        ]),
+        el('button', { class: 'btn btn-ghost', onclick: () => openKind('reports') }, 'Open queue'),
+      ]),
+      body,
+    ]);
+  }
+
+  function latestReportCard(report) {
+    return el('button', { class: 'latest-report-card', onclick: () => go(incidentView(report.id)) }, [
+      el('div', { class: 'latest-report-main' }, [
+        el('div', { class: 'latest-report-top' }, [
+          el('span', { class: 'latest-report-type' }, typeLabel(report.report_type)),
+          el('span', { class: 'sub' }, reporterOf(report)),
+        ]),
+        el('div', { class: 'latest-report-text' }, truncate(report.what_happened, 110)),
+        el('div', { class: 'latest-report-meta' }, [report.location, fmt(report.created_at)].filter(Boolean).join(' - ')),
+      ]),
+      el('span', { class: `pill ${incidentStatusClass(report)}`, style: incidentStatusStyle(report) }, statusLabel(report.status)),
+    ]);
   }
 
   // ── CHECKLISTS (quota model) ────────────────────────────────
@@ -792,7 +918,7 @@
 
   function logsView() {
     return {
-      title: t('logs'), tab: 'groups',
+      title: t('logs'), tab: 'groups', side: 'logs',
       async render(app) {
         const grid = el('div', { class: 'tile-grid' });
         renderLogTiles(grid, [
@@ -820,7 +946,7 @@
 
   function reportLogsView() {
     return {
-      title: t('archivedReports'), tab: 'groups',
+      title: t('archivedReports'), tab: 'groups', side: 'logs',
       async render(app) {
         await loadProfiles();
         const isSuper = state.profile.role === 'super_admin';
@@ -934,7 +1060,7 @@
 
   function checklistLogsView() {
     return {
-      title: t('checklistLogs'), tab: 'groups',
+      title: t('checklistLogs'), tab: 'groups', side: 'logs',
       async render(app) {
         await loadProfiles();
         const isSuper = state.profile.role === 'super_admin';
@@ -948,13 +1074,15 @@
           app.append(emptyState(t('noChecklistLogs'), 'Run migration_incident_photos_checklist_logs.sql first.'));
           return;
         }
-        const reviewCount = runs.filter(run => {
+        const reviewed = reviewedChecklistLogIds();
+        const rawNeedsReview = (run) => {
           const checklist = byChecklist.get(run.checklist_id);
           const items = checklist?.items || [];
           const missing = items.filter(i => !run.checked?.[i.id]?.done);
           const issues = items.filter(i => run.checked?.[i.id]?.needs_fix);
           return missing.length > 0 || issues.length > 0 || !!(run.notes || '').trim();
-        }).length;
+        };
+        const reviewCount = runs.filter(run => rawNeedsReview(run) && !reviewed.has(run.id)).length;
         app.append(el('div', { class: 'kpi-grid', style: 'margin-bottom:14px' }, [
           metricCard({ label: 'Checklist logs', value: runs.length }),
           metricCard({ label: t('checklistLogNeedsAttention'), value: reviewCount }),
@@ -997,7 +1125,9 @@
             const missing = items.filter(i => !run.checked?.[i.id]?.done);
             const issues = items.filter(i => run.checked?.[i.id]?.needs_fix);
             const hasNotes = !!(run.notes || '').trim();
-            const needsReview = missing.length > 0 || issues.length > 0 || hasNotes;
+            const rawReview = missing.length > 0 || issues.length > 0 || hasNotes;
+            const isReviewed = reviewed.has(run.id);
+            const needsReview = rawReview && !isReviewed;
             const card = el('div', {
               class: 'card log-card' + (needsReview ? ' log-warning' : ''),
               style: 'cursor:pointer',
@@ -1010,7 +1140,9 @@
                 ]),
                 el('div', { style: 'display:flex;gap:8px;align-items:center' }, [
                   el('span', { class: 'pill', style: needsReview ? 'background:#f2c94c;color:#17212b;border-color:#f2c94c' : '' },
-                    needsReview ? t('checklistLogNeedsAttention') : t('completed')),
+                    needsReview ? t('checklistLogNeedsAttention') : (isReviewed ? 'Reviewed' : t('completed'))),
+                  needsReview ? el('button', { class: 'btn btn-ghost', title: 'Mark reviewed',
+                    onclick: e => { e.stopPropagation(); markChecklistLogReviewed(run.id); reviewed.add(run.id); toast('Checklist log marked reviewed.'); drawChecklists(); } }, 'Mark reviewed') : null,
                   isSuper ? el('button', { class: 'btn btn-danger', title: t('deleteLog'),
                     onclick: e => { e.stopPropagation(); deleteChecklistLog(run); } }, 'X') : null,
                 ]),
@@ -1044,7 +1176,7 @@
 
   function completedCourseLogsView() {
     return {
-      title: t('completedCourses'), tab: 'groups',
+      title: t('completedCourses'), tab: 'groups', side: 'logs',
       async render(app) {
         await loadProfiles();
         const subsQ = await db.from('course_submissions').select('*').eq('passed', true).order('created_at', { ascending: false });
@@ -1121,14 +1253,26 @@
       render(app) {
         const items = checklist?.items || [];
         const answers = run.checked || {};
+        const missing = items.filter(i => !answers[i.id]?.done);
+        const issues = items.filter(i => answers[i.id]?.needs_fix);
+        const rawReview = missing.length > 0 || issues.length > 0 || !!(run.notes || '').trim();
+        const isReviewed = reviewedChecklistLogIds().has(run.id);
         app.append(el('div', { class: 'card' }, [
           el('div', { class: 'section-head' }, [
             el('h3', {}, t('submittedAnswers')),
-            el('button', { class: 'btn btn-ghost print-hide', onclick: () => window.print() }, t('printInspectionReport')),
+            el('div', { style: 'display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end' }, [
+              rawReview && !isReviewed ? el('button', { class: 'btn btn-primary print-hide', onclick: () => {
+                markChecklistLogReviewed(run.id);
+                toast('Checklist log marked reviewed.');
+                go(checklistLogDetailView(run, checklist), { reset: false });
+              } }, 'Mark reviewed') : null,
+              el('button', { class: 'btn btn-ghost print-hide', onclick: () => window.print() }, t('printInspectionReport')),
+            ]),
           ]),
           el('div', { class: 'sub' }, `${nameOf(run.user_id)} - ${fmt(run.submitted_at || run.updated_at)}`),
-          run.completed ? el('span', { class: 'pill', style: 'margin-top:10px' }, t('completed'))
-            : el('span', { class: 'pill', style: 'margin-top:10px;background:#f2c94c;color:#17212b;border-color:#f2c94c' }, t('checklistLogNeedsAttention')),
+          rawReview && !isReviewed
+            ? el('span', { class: 'pill', style: 'margin-top:10px;background:#f2c94c;color:#17212b;border-color:#f2c94c' }, t('checklistLogNeedsAttention'))
+            : el('span', { class: 'pill', style: 'margin-top:10px' }, isReviewed ? 'Reviewed' : t('completed')),
         ]));
         if (!items.length) {
           app.append(emptyState(t('noChecklists'), t('noChecklistLogs')));
@@ -1242,11 +1386,17 @@
   //  GROUP — routes by kind
   // ════════════════════════════════════════════════════════
   function groupView(g) {
-    if (g.kind === 'checklist')  return checklistGroupView(g);
-    if (g.kind === 'reports')    return reportsGroupView(g);
-    if (g.kind === 'documents')  return documentsGroupView(g);
-    if (g.kind === 'courses')    return coursesGroupView(g, { go, back, state });
-    return proceduresGroupView(g);
+    const view =
+      g.kind === 'checklist' ? checklistGroupView(g) :
+      g.kind === 'reports' ? reportsGroupView(g) :
+      g.kind === 'documents' ? documentsGroupView(g) :
+      g.kind === 'courses' ? coursesGroupView(g, { go, back, state }) :
+      proceduresGroupView(g);
+    view.side = g.kind === 'reports' ? 'incidents'
+      : g.kind === 'procedures' ? 'procedures'
+      : g.kind === 'courses' ? 'courses'
+      : `group:${g.id}`;
+    return view;
   }
 
   // ─── CHECKLISTS ─────────────────────────────────────────
@@ -2234,7 +2384,7 @@
   // ════════════════════════════════════════════════════════
   function settingsView() {
     return {
-      title: t('settings'), tab: 'settings',
+      title: t('settings'), tab: 'settings', side: 'settings',
       async render(app) {
         await loadProfiles();
         const fresh = await db.from('profiles').select('*').eq('id', state.profile.id).single();
@@ -2478,7 +2628,7 @@
 
   function usersView() {
     return {
-      title: 'Users', tab: 'groups',
+      title: 'Users', tab: 'groups', side: 'users',
       action: el('button', { class: 'iconbtn', title: 'Add user', onclick: addUserModal }, '+'),
       async render(app) {
         await loadProfiles();

@@ -5,11 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <script>try{document.documentElement.dataset.theme=localStorage.getItem('theme')||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light')}catch(e){}</script>
   <title>Nicosoft HMS manager</title>
-  <link rel="stylesheet" href="./styles.css">
+  <link rel="stylesheet" href="./styles.css?v=sidebar-20260628">
   <style>
     .settings-card { display: grid; gap: 12px; }
     .settings-current { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
-    .kv { padding: 12px; border: 1px solid rgba(26,47,54,.10); border-radius: 14px; background: rgba(255,255,255,.45); }
+    .kv { padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: color-mix(in srgb, var(--paper-2) 48%, var(--paper)); }
     .kv .k { color: var(--steel, #6b7780); font-size: .78rem; text-transform: uppercase; letter-spacing: .04em; }
     .kv .v { font-weight: 650; margin-top: 3px; overflow-wrap: anywhere; }
     .change-lines { display: grid; gap: 6px; margin-top: 8px; }
@@ -114,11 +114,13 @@
   // ── shell + router ─────────────────────────────────────
   function showApp() {
     screen.innerHTML = '';
-    screen.append(
+    screen.append(el('div', { class: 'app-shell' }, [
+      el('aside', { class: 'sidebar', id: 'sidebar' }),
       el('header', { class: 'topbar', id: 'topbar' }),
       el('main', { class: 'wrap', id: 'app' }),
-      el('nav', { class: 'botnav', id: 'botnav' })
-    );
+      el('nav', { class: 'botnav', id: 'botnav' }),
+    ]));
+    renderSidebar('groups');
   }
   function renderBotnav(active) {
     const nav = $('#botnav'); nav.innerHTML = '';
@@ -130,6 +132,59 @@
     for (const t of tabs)
       nav.append(el('button', { class: active === t.id ? 'active' : '', onclick: t.onclick },
         el('span', { class: 'ic' }, t.ic), document.createTextNode(t.label)));
+  }
+  function renderSidebar(active) {
+    const side = $('#sidebar');
+    if (!side) return;
+    const isAdmin = ['admin', 'super_admin'].includes(state.profile?.role);
+    const page = new URL(location.href);
+    const userName = state.profile?.full_name || state.profile?.username || state.profile?.email || 'User';
+    const userInitial = userName.trim().slice(0, 1).toUpperCase() || 'U';
+    side.innerHTML = '';
+    side.append(
+      el('div', { class: 'sidebar-brand' }, [
+        el('div', { class: 'sidebar-logo' }, '⌾'),
+        el('div', {}, [
+          el('div', { class: 'sidebar-title' }, 'Nicosoft HMS'),
+          el('div', { class: 'sidebar-subtitle' }, 'HSE Portal'),
+        ]),
+      ]),
+      el('div', { class: 'workspace-card' }, [
+        el('div', { class: 'workspace-head' }, [
+          el('span', {}, 'Current workspace'),
+          el('span', { class: 'workspace-role' }, isAdmin ? state.profile.role.replace('_', ' ') : 'worker'),
+        ]),
+        el('div', { class: 'workspace-switch' }, [
+          el('button', { class: 'active', onclick: () => go(homeView(), { reset: true }) }, 'Worker App'),
+          el('button', {
+            disabled: isAdmin ? null : 'disabled',
+            title: isAdmin ? t('adminConsole') : 'Admin access required',
+            onclick: () => { if (isAdmin) location.href = new URL('./admin.html', page).href; },
+          }, 'Admin Console'),
+        ]),
+      ]),
+      el('div', { class: 'sidebar-section-label' }, t('groups')),
+    );
+    const nav = el('div', { class: 'sidebar-nav' });
+    const items = [
+      { id: 'groups', ic: '▦', label: t('groups'), open: () => go(homeView(), { reset: true }) },
+      { id: 'reports', ic: '⚠', label: t('myReports'), open: () => go(myReportsView(), { reset: true }) },
+      ...state.groups.map(g => ({ id: `group:${g.id}`, ic: g.icon || '•', label: groupName(g), open: () => go(groupView(g)) })),
+    ];
+    for (const item of items) nav.append(sidebarButton(item, active));
+    side.append(nav, el('button', { class: `sidebar-footer ${active === 'settings' ? 'active' : ''}`, title: t('settings'), onclick: () => go(settingsView(), { reset: true }) }, [
+      el('div', { class: 'sidebar-avatar' }, userInitial),
+      el('div', { class: 'sidebar-user' }, [
+        el('div', { class: 'sidebar-user-name' }, userName),
+        el('div', { class: 'sidebar-user-meta' }, state.profile?.email || state.profile?.username || ''),
+      ]),
+    ]));
+  }
+  function sidebarButton(item, active) {
+    return el('button', { class: `sidebar-link ${active === item.id ? 'active' : ''}`, onclick: item.open }, [
+      el('span', { class: 'ic' }, item.ic),
+      el('span', { class: 'label' }, item.label),
+    ]);
   }
   function go(view, { reset = false } = {}) { if (reset) viewStack.length = 0; viewStack.push(view); paint(); }
   function back() { if (viewStack.length > 1) { viewStack.pop(); paint(); } }
@@ -144,6 +199,7 @@
     if (view.action) bar.append(view.action);
     const app = $('#app'); app.innerHTML = '';
     renderBotnav(view.tab || 'groups');
+    renderSidebar(view.side || view.tab || 'groups');
     view.render(app);
   }
   const refresh = () => paint();
@@ -161,7 +217,8 @@
         await renderUserKpiDashboard(app);
         const { data } = await db.from('groups').select('*').order('sort_order');
         state.groups = visibleGroups(data || []);
-        const grid = el('div', { class: 'tile-grid' });
+        renderSidebar('groups');
+        const grid = el('div', { class: 'tile-grid mobile-only-groups' });
         renderSortableHomeTiles(grid, state.groups.map(g => ({
           id: `group:${g.id}`,
           glyph: g.icon || '📁',
@@ -416,11 +473,14 @@
   }
 
   function groupView(g) {
-    if (g.kind === 'checklist') return checklistGroupView(g);
-    if (g.kind === 'reports')   return reportsGroupView(g);
-    if (g.kind === 'documents') return documentsGroupView(g);
-    if (g.kind === 'courses')   return courseListView(g, { go, back, state });
-    return proceduresGroupView(g);
+    const view =
+      g.kind === 'checklist' ? checklistGroupView(g) :
+      g.kind === 'reports' ? reportsGroupView(g) :
+      g.kind === 'documents' ? documentsGroupView(g) :
+      g.kind === 'courses' ? courseListView(g, { go, back, state }) :
+      proceduresGroupView(g);
+    view.side = `group:${g.id}`;
+    return view;
   }
 
   // ── checklists (tick, auto-save) ───────────────────────
@@ -1106,7 +1166,7 @@
   // ── helpers ────────────────────────────────────────────
   function settingsView() {
     return {
-      title: t('settings'), tab: 'settings',
+      title: t('settings'), tab: 'settings', side: 'settings',
       async render(app) {
         const fresh = await reloadMyProfile();
         if (fresh) state.profile = fresh;
