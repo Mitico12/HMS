@@ -504,7 +504,7 @@ input[type="checkbox"], input[type="radio"] {
 }
 
 .kpi-period {
-  color: var(--muted);
+  color: var(--muted, var(--steel));
   font-size: .78rem;
   font-weight: 650;
 }
@@ -848,6 +848,50 @@ input[type="checkbox"], input[type="radio"] {
 
 .kpi-toolbar-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
 .kpi-toolbar-row .spacer { flex: 1; }
+
+/* ── Dashboard control bar (restored) ── */
+.hidden { display: none !important; }
+
+.kpi-control-wrap { position: relative; }
+
+.kpi-filter {
+  width: auto;
+  min-width: 160px;
+}
+
+.kpi-period-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-size: .82rem;
+  font-weight: 650;
+  color: var(--steel);
+  background: color-mix(in srgb, var(--paper-2) 60%, transparent);
+  border: 1px solid var(--line);
+  white-space: nowrap;
+}
+
+.kpi-date-panel {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 20;
+  display: grid;
+  gap: 12px;
+  width: min(300px, 90vw);
+  padding: 16px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: var(--paper);
+  box-shadow: var(--shadow);
+}
+
+.kpi-date-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
 
 .sev-bar { display: flex; height: 14px; border-radius: 7px; overflow: hidden; gap: 2px; }
 .sev-legend { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 12px; font-size: .8rem; color: var(--steel); }
