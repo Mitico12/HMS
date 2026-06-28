@@ -434,9 +434,20 @@
     ]);
     const calBtn = el('button', { class: 'iconbtn', title: t('dashboardPeriod'), onclick: () => panel.classList.toggle('hidden') }, '📅');
 
+    // Incident status quick-filters — sit horizontally to the right of the type dropdown,
+    // and only on the incidents view. Selection persists like the other KPI filters.
+    const statusKey = 'adminKpiIncidentStatus';
+    const incidentStatus = localStorage.getItem(statusKey) || 'all';
+    const statusFilter = el('div', { class: 'kpi-status-filter' },
+      ['all', 'open', 'in_progress', 'resolved'].map(s =>
+        el('button', { class: 'chip' + (incidentStatus === s ? ' on' : ''), onclick: () => {
+          localStorage.setItem(statusKey, s); refresh();
+        } }, s === 'all' ? t('all') : statusLabel(s))));
+
     app.append(el('div', { class: 'kpi-control-wrap' }, [
       el('div', { class: 'kpi-toolbar-row' }, [
         typeSel,
+        type === 'incidents' ? statusFilter : null,
         el('span', { class: 'spacer' }),
         type === 'checklists' ? clSel : null,
         type === 'admin_performance' ? adminSel : null,
@@ -450,7 +461,7 @@
     app.append(host);
 
     if (type === 'overview') await renderOverviewKpi(host, period, cur, prev);
-    else if (type === 'incidents') await renderIncidentsKpi(host, period, cur, prev);
+    else if (type === 'incidents') await renderIncidentsKpi(host, period, cur, prev, incidentStatus);
     else if (type === 'checklists') await renderChecklistsKpi(host, period, prev, checklists, selectedCl);
     else await renderAdminPerformanceKpi(host, adminSel.value);
   }
@@ -491,15 +502,17 @@
   }
 
   // ── INCIDENTS ───────────────────────────────────────────────
-  async function renderIncidentsKpi(host, period, cur, prev) {
+  async function renderIncidentsKpi(host, period, cur, prev, status = 'all') {
+    // When a status quick-filter is active, scope every incident query to it.
+    const withStatus = (q) => status === 'all' ? q : q.eq('status', status);
     const { data: cats } = await db.from('incident_categories').select('id,name').eq('kind', 'consequence');
     const seriousNames = ['Death', 'Injury or sick leave', 'Environmental impact'];
     const seriousIds = (cats || []).filter(c => seriousNames.includes(c.name)).map(c => c.id);
 
-    const { data: rows = [] } = await db.from('incidents')
-      .select('id,consequence_ids,is_anonymous').gte('created_at', cur.start).lt('created_at', cur.end);
-    const { data: prevRows = [] } = await db.from('incidents')
-      .select('id,consequence_ids,is_anonymous').gte('created_at', prev.start).lt('created_at', prev.end);
+    const { data: rows = [] } = await withStatus(db.from('incidents')
+      .select('id,consequence_ids,is_anonymous').gte('created_at', cur.start).lt('created_at', cur.end));
+    const { data: prevRows = [] } = await withStatus(db.from('incidents')
+      .select('id,consequence_ids,is_anonymous').gte('created_at', prev.start).lt('created_at', prev.end));
 
     const inSet = (ids, set) => (ids || []).some(id => set.includes(id));
     const repCur = rows.length, repPrev = prevRows.length;
@@ -509,8 +522,8 @@
     const anonPrev = repPrev ? Math.round(prevRows.filter(r => r.is_anonymous).length / repPrev * 100) : 0;
 
     const [resCur, resPrev] = await Promise.all([
-      countRows(db.from('incidents').select('id', { count: 'exact', head: true }).eq('status', 'resolved').gte('resolved_at', cur.start).lt('resolved_at', cur.end)),
-      countRows(db.from('incidents').select('id', { count: 'exact', head: true }).eq('status', 'resolved').gte('resolved_at', prev.start).lt('resolved_at', prev.end)),
+      countRows(withStatus(db.from('incidents').select('id', { count: 'exact', head: true }).eq('status', 'resolved').gte('resolved_at', cur.start).lt('resolved_at', cur.end))),
+      countRows(withStatus(db.from('incidents').select('id', { count: 'exact', head: true }).eq('status', 'resolved').gte('resolved_at', prev.start).lt('resolved_at', prev.end))),
     ]);
 
     host.append(el('div', { class: 'kpi-grid' }, [
@@ -1511,9 +1524,11 @@
         ]);
 
         app.append(el('div', { style: 'display:grid;gap:10px;margin-bottom:14px' }, [
-          statusBar,
+          el('div', { style: 'display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end' }, [
+            el('div', { style: 'min-width:150px' }, labeled(t('filterByType'), typeSelect)),
+            statusBar,
+          ]),
           el('div', { style: 'display:flex;gap:10px;flex-wrap:wrap' }, [
-            el('div', { style: 'flex:1;min-width:150px' }, labeled(t('filterByType'), typeSelect)),
             el('div', { style: 'flex:1;min-width:150px' }, labeled(t('filterByAssignee'), assigneeSelect)),
             el('div', { style: 'flex:1;min-width:150px' }, labeled(t('filterByReporter'), reporterSelect)),
           ]),

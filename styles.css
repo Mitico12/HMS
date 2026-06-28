@@ -849,6 +849,10 @@ input[type="checkbox"], input[type="radio"] {
 .kpi-toolbar-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
 .kpi-toolbar-row .spacer { flex: 1; }
 
+/* Incident status quick-filters, lined up to the right of the type dropdown */
+.kpi-status-filter { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.kpi-status-filter .chip { margin: 0; }
+
 /* ── Dashboard control bar (restored) ── */
 .hidden { display: none !important; }
 
