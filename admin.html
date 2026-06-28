@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <script>try{document.documentElement.dataset.theme=localStorage.getItem('theme')||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light')}catch(e){}</script>
   <title>Nicosoft HMS manager</title>
-  <link rel="stylesheet" href="./styles.css?v=sidebar-20260628">
+  <link rel="stylesheet" href="./styles.css">
   <style>
     /* Users page polish. Keeps the old global styles, but keeps access controls out of account details. */
     .user-stack { display: grid; gap: 12px; }
@@ -279,13 +279,14 @@
     const fixed = [
       { id: 'analytics', ic: '▦', label: 'Executive Analytics', open: () => go(homeView(), { reset: true }) },
       { id: 'incidents', ic: '⚠', label: 'Incidents Queue', badge: true, open: () => openKind('reports') },
-      { id: 'logs', ic: '☑', label: t('logs'), open: () => go(logsView()) },
+      { id: 'checklist-logs', ic: '☑', label: 'Checklist Logs', open: () => go(checklistLogsView()) },
       { id: 'procedures', ic: '▤', label: 'Procedure Submissions', open: () => openKind('procedures') },
       { id: 'courses', ic: '▣', label: 'Manage Courses', open: () => openKind('courses') },
-      { id: 'users', ic: 'U', label: 'Accounts', count: pendingAccounts, open: () => go(usersView()) },
+      { id: 'users', ic: 'U', label: 'Verify Accounts', count: pendingAccounts, open: () => go(usersView()) },
     ];
     for (const item of fixed) nav.append(sidebarButton(item, active));
-    const extras = state.groups.filter(g => !['reports', 'procedures', 'courses'].includes(g.kind));
+    const hidden = hiddenGroupIds();
+    const extras = state.groups.filter(g => !['reports', 'procedures', 'courses'].includes(g.kind) && !hidden.has(g.id));
     if (extras.length) {
       nav.append(el('div', { class: 'sidebar-section-label' }, 'Content groups'));
       for (const g of extras) {
@@ -298,7 +299,8 @@
       }
     }
     nav.append(sidebarButton({ id: 'add-group', ic: '+', label: t('addGroup'), open: addGroupModal }, active));
-    side.append(nav, el('button', { class: `sidebar-footer ${active === 'settings' ? 'active' : ''}`, title: t('settings'), onclick: () => go(settingsView(), { reset: true }) }, [
+    nav.append(sidebarButton({ id: 'hidden-groups', ic: '🛇', label: t('hiddenGroups'), count: hidden.size || null, open: hiddenGroupsModal }, active));
+    side.append(nav, el('div', { class: 'sidebar-footer' }, [
       el('div', { class: 'sidebar-avatar' }, userInitial),
       el('div', { class: 'sidebar-user' }, [
         el('div', { class: 'sidebar-user-name' }, userName),
@@ -321,16 +323,6 @@
     const group = firstGroup(kind);
     if (group) go(groupView(group));
     else toast(`No ${kind} group found.`, 'err');
-  }
-  const REVIEWED_CHECKLIST_LOGS_KEY = 'reviewedChecklistLogIds';
-  function reviewedChecklistLogIds() {
-    try { return new Set(JSON.parse(localStorage.getItem(REVIEWED_CHECKLIST_LOGS_KEY) || '[]')); }
-    catch (err) { return new Set(); }
-  }
-  function markChecklistLogReviewed(id) {
-    const ids = reviewedChecklistLogIds();
-    ids.add(id);
-    localStorage.setItem(REVIEWED_CHECKLIST_LOGS_KEY, JSON.stringify([...ids]));
   }
 
   // ── view stack / router ────────────────────────────────
@@ -391,9 +383,12 @@
             meta: kindLabel(g.kind),
             badge: g.kind === 'reports',
             open: () => go(groupView(g)),
+            onHide: () => { setGroupHidden(g.id, true); toast(t('groupHidden')); go(homeView(), { reset: true }); },
           })),
         ];
-        renderSortableHomeTiles(grid, cards, 'adminHomeTileOrder', async ordered => {
+        const hidden = hiddenGroupIds();
+        const shownCards = cards.filter(c => !(c.group && hidden.has(c.group.id)));
+        renderSortableHomeTiles(grid, shownCards, 'adminHomeTileOrder', async ordered => {
           const orderedGroups = ordered.filter(c => c.group).map(c => c.group);
           state.groups = orderedGroups;
           await saveSortOrder('groups', orderedGroups);
@@ -421,6 +416,31 @@
       if (seenDefaultKinds.has(g.kind)) return false;
       seenDefaultKinds.add(g.kind);
       return true;
+    });
+  }
+
+  // Hidden groups are a per-admin UI preference, restorable from the sidebar.
+  const HIDDEN_GROUPS_KEY = 'adminHiddenGroups';
+  function hiddenGroupIds() {
+    try { return new Set(JSON.parse(localStorage.getItem(HIDDEN_GROUPS_KEY) || '[]')); }
+    catch (err) { return new Set(); }
+  }
+  function setGroupHidden(id, hidden) {
+    const s = hiddenGroupIds();
+    if (hidden) s.add(id); else s.delete(id);
+    localStorage.setItem(HIDDEN_GROUPS_KEY, JSON.stringify([...s]));
+  }
+  function hiddenGroupsModal() {
+    const hidden = hiddenGroupIds();
+    const groups = (state.groups || []).filter(g => hidden.has(g.id));
+    openModal(t('hiddenGroups'), (body, close) => {
+      if (!groups.length) { body.append(el('p', { class: 'muted' }, t('noHiddenGroups'))); return; }
+      groups.forEach(g => body.append(el('div', { class: 'hidden-group-row' }, [
+        el('span', { style: 'flex:1' }, `${g.icon || '📁'} ${groupName(g)}`),
+        el('button', { class: 'btn btn-ghost', onclick: () => {
+          setGroupHidden(g.id, false); close(); toast(t('groupRestored')); go(homeView(), { reset: true });
+        } }, t('restore')),
+      ])));
     });
   }
 
@@ -504,11 +524,11 @@
     clSel.value = checklists.some(c => c.id === selectedCl) ? selectedCl : 'all';
 
     const admins = state.profiles.filter(p => ['admin', 'super_admin'].includes(p.role));
-    const selectedAdmin = localStorage.getItem(adminKey) || admins[0]?.id || '';
+    const selectedAdmin = localStorage.getItem(adminKey) || 'all';
     const adminSel = el('select', { class: 'kpi-filter', onchange: e => {
       localStorage.setItem(adminKey, e.target.value); refresh();
-    } }, admins.map(p => opt(p.id, labelOf(p))));
-    adminSel.value = admins.some(p => p.id === selectedAdmin) ? selectedAdmin : (admins[0]?.id || '');
+    } }, [opt('all', t('allAdmins')), ...admins.map(p => opt(p.id, labelOf(p)))]);
+    adminSel.value = (selectedAdmin === 'all' || admins.some(p => p.id === selectedAdmin)) ? selectedAdmin : 'all';
 
     const from = el('input', { type: 'date', value: period.from });
     const until = el('input', { type: 'date', value: period.until });
@@ -551,11 +571,6 @@
     else if (type === 'incidents') await renderIncidentsKpi(host, period, cur, prev, incidentStatus);
     else if (type === 'checklists') await renderChecklistsKpi(host, period, prev, checklists, selectedCl);
     else await renderAdminPerformanceKpi(host, adminSel.value);
-    if (type !== 'admin_performance') {
-      let latest = await fetchActiveReports();
-      if (type === 'incidents' && incidentStatus !== 'all') latest = latest.filter(i => i.status === incidentStatus);
-      host.append(latestReportsPanel(latest.slice(0, 3)));
-    }
   }
 
   // ── OVERVIEW ────────────────────────────────────────────────
@@ -640,40 +655,6 @@
     host.append(el('div', { class: 'kpi-card', style: 'margin-top:14px' }, [
       el('div', { class: 'kpi-label', style: 'margin-bottom:10px' }, 'Reports by worst consequence'), bar, legend,
     ]));
-
-  }
-
-  function latestReportsPanel(reports) {
-    const body = el('div', { class: 'latest-report-list' });
-    if (!reports.length) {
-      body.append(el('p', { class: 'muted', style: 'margin:0' }, 'No recent reports in this filter.'));
-    } else {
-      for (const report of reports) body.append(latestReportCard(report));
-    }
-    return el('div', { class: 'card latest-reports-card' }, [
-      el('div', { class: 'section-head' }, [
-        el('div', {}, [
-          el('h3', {}, 'Latest reports'),
-          el('div', { class: 'sub' }, 'Last 3 submitted reports'),
-        ]),
-        el('button', { class: 'btn btn-ghost', onclick: () => openKind('reports') }, 'Open queue'),
-      ]),
-      body,
-    ]);
-  }
-
-  function latestReportCard(report) {
-    return el('button', { class: 'latest-report-card', onclick: () => go(incidentView(report.id)) }, [
-      el('div', { class: 'latest-report-main' }, [
-        el('div', { class: 'latest-report-top' }, [
-          el('span', { class: 'latest-report-type' }, typeLabel(report.report_type)),
-          el('span', { class: 'sub' }, reporterOf(report)),
-        ]),
-        el('div', { class: 'latest-report-text' }, truncate(report.what_happened, 110)),
-        el('div', { class: 'latest-report-meta' }, [report.location, fmt(report.created_at)].filter(Boolean).join(' - ')),
-      ]),
-      el('span', { class: `pill ${incidentStatusClass(report)}`, style: incidentStatusStyle(report) }, statusLabel(report.status)),
-    ]);
   }
 
   // ── CHECKLISTS (quota model) ────────────────────────────────
@@ -741,26 +722,109 @@
       metricCard({ label: 'Missed', value: missed, delta: pctChange(missed, 0), good: isGood(missed, 0, 'down'), hint: t('seeWhich') + ' ▾', onClick: () => { open = !open; drawDrill(); } }),
     ]));
     host.append(drillHost);
+
+    // ── recent submissions (with filing times) for this range ──
+    const runQ = db.from('checklist_runs')
+      .select('checklist_id,user_id,submitted_at,completed')
+      .not('submitted_at', 'is', null)
+      .gte('submitted_at', cur.start).lt('submitted_at', cur.end)
+      .order('submitted_at', { ascending: false });
+    const { data: runs = [] } = await (scopeIds.length
+      ? runQ.in('checklist_id', scopeIds)
+      : runQ.eq('checklist_id', '00000000-0000-0000-0000-000000000000'));
+    const titleOf = (id) => (checklists.find(c => c.id === id)?.title) || t('checklist');
+    const userName = (id) => { const p = state.profiles.find(u => u.id === id); return p ? labelOf(p) : '—'; };
+
+    // ── Expected vs received window — click to reveal when each was filed ──
+    const dailyExpected = scope.reduce((s, c) => s + c.daily_quota, 0);
+    const filedRuns = runs.filter(r => r.completed);
+    const filedHost = el('div', { style: 'margin-top:12px' });
+    let filedOpen = false;
+    const drawFiled = () => {
+      filedHost.innerHTML = '';
+      if (!filedOpen) return;
+      const card = el('div', { class: 'kpi-card' });
+      card.append(el('div', { class: 'kpi-label', style: 'margin-bottom:6px' }, t('whenFiled')));
+      if (!filedRuns.length) { card.append(el('p', { class: 'miss-sub' }, t('noRecentChecklists'))); filedHost.append(card); return; }
+      filedRuns.slice(0, 30).forEach(r => card.append(el('div', { class: 'miss-row' }, [
+        el('div', { class: 'miss-top' }, [
+          el('span', { style: 'flex:1' }, titleOf(r.checklist_id)),
+          el('span', { class: 'time-pill' }, fmt(r.submitted_at)),
+        ]),
+        el('p', { class: 'miss-sub' }, userName(r.user_id)),
+      ])));
+      if (filedRuns.length > 30) card.append(el('p', { class: 'miss-sub', style: 'padding-top:10px' }, `+ ${filedRuns.length - 30} more`));
+      filedHost.append(card);
+    };
+    host.append(el('div', { class: 'kpi-grid', style: 'margin-top:14px' }, [
+      metricCard({
+        label: t('expectedVsReceived'),
+        value: `${completions} / ${expected}`,
+        hint: `${t('dailyExpected')} ${dailyExpected} · ${t('tapToSeeFiled')}`,
+        onClick: () => { filedOpen = !filedOpen; drawFiled(); },
+      }),
+    ]));
+    host.append(filedHost);
+
+    // ── Latest checklists — most recent submissions in this range ──
+    const latestCard = el('div', { class: 'kpi-card', style: 'margin-top:14px' });
+    latestCard.append(el('div', { class: 'kpi-label', style: 'margin-bottom:8px' }, t('latestChecklists')));
+    if (!runs.length) latestCard.append(el('p', { class: 'miss-sub' }, t('noRecentChecklists')));
+    else runs.slice(0, 8).forEach(r => latestCard.append(el('div', { class: 'miss-row' }, [
+      el('div', { class: 'miss-top' }, [
+        el('span', { style: 'flex:1' }, titleOf(r.checklist_id)),
+        el('span', { class: 'miss-pill' }, fmt(r.submitted_at)),
+      ]),
+      el('p', { class: 'miss-sub' }, `${userName(r.user_id)}${r.completed ? ' · ✓' : ''}`),
+    ])));
+    host.append(latestCard);
   }
 
   async function renderAdminPerformanceKpi(host, adminId) {
-    if (!adminId) {
+    const admins = state.profiles.filter(p => ['admin', 'super_admin'].includes(p.role));
+    if (!admins.length) {
       host.append(emptyState(t('noAdminsFound'), t('createOrPromoteAdmin')));
       return;
     }
     const today = todayBounds();
-    const [assigned, completed, completedToday] = await Promise.all([
-      countRows(db.from('incidents').select('id', { count: 'exact', head: true }).eq('assigned_to', adminId)),
-      countRows(db.from('incidents').select('id', { count: 'exact', head: true }).eq('assigned_to', adminId).eq('status', 'resolved')),
-      countRows(db.from('incidents').select('id', { count: 'exact', head: true }).eq('assigned_to', adminId).eq('status', 'resolved').gte('resolved_at', today.start).lt('resolved_at', today.end)),
-    ]);
-    const completionRate = assigned ? Math.round(completed / assigned * 100) : 0;
+    const statFor = async (id) => {
+      const [assigned, completed, completedToday] = await Promise.all([
+        countRows(db.from('incidents').select('id', { count: 'exact', head: true }).eq('assigned_to', id)),
+        countRows(db.from('incidents').select('id', { count: 'exact', head: true }).eq('assigned_to', id).eq('status', 'resolved')),
+        countRows(db.from('incidents').select('id', { count: 'exact', head: true }).eq('assigned_to', id).eq('status', 'resolved').gte('resolved_at', today.start).lt('resolved_at', today.end)),
+      ]);
+      return { assigned: assigned || 0, completed: completed || 0, completedToday: completedToday || 0 };
+    };
+    const stats = await Promise.all(admins.map(async p => ({ id: p.id, name: labelOf(p), ...(await statFor(p.id)) })));
+
+    // metric cards — aggregate across everyone for "all", else the selected admin
+    const pick = adminId === 'all'
+      ? stats.reduce((a, s) => ({ assigned: a.assigned + s.assigned, completed: a.completed + s.completed, completedToday: a.completedToday + s.completedToday }), { assigned: 0, completed: 0, completedToday: 0 })
+      : (stats.find(x => x.id === adminId) || { assigned: 0, completed: 0, completedToday: 0 });
+    const completionRate = pick.assigned ? Math.round(pick.completed / pick.assigned * 100) : 0;
     host.append(el('div', { class: 'kpi-grid' }, [
-      metricCard({ label: t('assignedReports'), value: assigned }),
-      metricCard({ label: t('completedTotal'), value: completed }),
+      metricCard({ label: t('assignedReports'), value: pick.assigned }),
+      metricCard({ label: t('completedTotal'), value: pick.completed }),
       metricCard({ label: t('completionRate'), value: completionRate + '%' }),
-      metricCard({ label: t('completedToday'), value: completedToday }),
+      metricCard({ label: t('completedToday'), value: pick.completedToday }),
     ]));
+
+    // graph — completed vs assigned per admin, tallest bar normalises the width
+    const max = Math.max(1, ...stats.map(s => s.assigned));
+    const chart = el('div', { class: 'kpi-card', style: 'margin-top:14px' }, [
+      el('div', { class: 'kpi-label', style: 'margin-bottom:12px' }, t('completionByAdmin')),
+    ]);
+    stats.slice().sort((a, b) => b.completed - a.completed).forEach(s => {
+      const rate = s.assigned ? Math.round(s.completed / s.assigned * 100) : 0;
+      chart.append(el('div', { class: 'perf-row' + (s.id === adminId ? ' perf-row-active' : '') }, [
+        el('div', { class: 'perf-name', title: s.name }, s.name),
+        el('div', { class: 'perf-track' }, [
+          el('div', { class: 'perf-fill', style: `width:${s.completed / max * 100}%` }),
+        ]),
+        el('div', { class: 'perf-val' }, `${s.completed}/${s.assigned} · ${rate}%`),
+      ]));
+    });
+    host.append(chart);
   }
 
   // ── shared incident helpers ─────────────────────────────────
@@ -818,6 +882,10 @@
           ]),
         ]);
         if (card.badge) tile.append(el('span', { class: 'badge reports-badge' }));
+        if (card.onHide) {
+          const hideBtn = el('button', { class: 'tile-hide', title: t('hideGroup'), onclick: e => { e.stopPropagation(); card.onHide(); } }, '🛇');
+          tile.append(hideBtn);
+        }
         handle.addEventListener('click', e => e.stopPropagation());
         handle.addEventListener('dragstart', e => {
           dragIdx = idx;
@@ -918,7 +986,7 @@
 
   function logsView() {
     return {
-      title: t('logs'), tab: 'groups', side: 'logs',
+      title: t('logs'), tab: 'groups', side: 'checklist-logs',
       async render(app) {
         const grid = el('div', { class: 'tile-grid' });
         renderLogTiles(grid, [
@@ -946,7 +1014,7 @@
 
   function reportLogsView() {
     return {
-      title: t('archivedReports'), tab: 'groups', side: 'logs',
+      title: t('archivedReports'), tab: 'groups', side: 'incidents',
       async render(app) {
         await loadProfiles();
         const isSuper = state.profile.role === 'super_admin';
@@ -1060,7 +1128,7 @@
 
   function checklistLogsView() {
     return {
-      title: t('checklistLogs'), tab: 'groups', side: 'logs',
+      title: t('checklistLogs'), tab: 'groups', side: 'checklist-logs',
       async render(app) {
         await loadProfiles();
         const isSuper = state.profile.role === 'super_admin';
@@ -1074,15 +1142,13 @@
           app.append(emptyState(t('noChecklistLogs'), 'Run migration_incident_photos_checklist_logs.sql first.'));
           return;
         }
-        const reviewed = reviewedChecklistLogIds();
-        const rawNeedsReview = (run) => {
+        const reviewCount = runs.filter(run => {
           const checklist = byChecklist.get(run.checklist_id);
           const items = checklist?.items || [];
           const missing = items.filter(i => !run.checked?.[i.id]?.done);
           const issues = items.filter(i => run.checked?.[i.id]?.needs_fix);
           return missing.length > 0 || issues.length > 0 || !!(run.notes || '').trim();
-        };
-        const reviewCount = runs.filter(run => rawNeedsReview(run) && !reviewed.has(run.id)).length;
+        }).length;
         app.append(el('div', { class: 'kpi-grid', style: 'margin-bottom:14px' }, [
           metricCard({ label: 'Checklist logs', value: runs.length }),
           metricCard({ label: t('checklistLogNeedsAttention'), value: reviewCount }),
@@ -1125,9 +1191,7 @@
             const missing = items.filter(i => !run.checked?.[i.id]?.done);
             const issues = items.filter(i => run.checked?.[i.id]?.needs_fix);
             const hasNotes = !!(run.notes || '').trim();
-            const rawReview = missing.length > 0 || issues.length > 0 || hasNotes;
-            const isReviewed = reviewed.has(run.id);
-            const needsReview = rawReview && !isReviewed;
+            const needsReview = missing.length > 0 || issues.length > 0 || hasNotes;
             const card = el('div', {
               class: 'card log-card' + (needsReview ? ' log-warning' : ''),
               style: 'cursor:pointer',
@@ -1140,9 +1204,7 @@
                 ]),
                 el('div', { style: 'display:flex;gap:8px;align-items:center' }, [
                   el('span', { class: 'pill', style: needsReview ? 'background:#f2c94c;color:#17212b;border-color:#f2c94c' : '' },
-                    needsReview ? t('checklistLogNeedsAttention') : (isReviewed ? 'Reviewed' : t('completed'))),
-                  needsReview ? el('button', { class: 'btn btn-ghost', title: 'Mark reviewed',
-                    onclick: e => { e.stopPropagation(); markChecklistLogReviewed(run.id); reviewed.add(run.id); toast('Checklist log marked reviewed.'); drawChecklists(); } }, 'Mark reviewed') : null,
+                    needsReview ? t('checklistLogNeedsAttention') : t('completed')),
                   isSuper ? el('button', { class: 'btn btn-danger', title: t('deleteLog'),
                     onclick: e => { e.stopPropagation(); deleteChecklistLog(run); } }, 'X') : null,
                 ]),
@@ -1176,7 +1238,7 @@
 
   function completedCourseLogsView() {
     return {
-      title: t('completedCourses'), tab: 'groups', side: 'logs',
+      title: t('completedCourses'), tab: 'groups', side: 'courses',
       async render(app) {
         await loadProfiles();
         const subsQ = await db.from('course_submissions').select('*').eq('passed', true).order('created_at', { ascending: false });
@@ -1253,26 +1315,14 @@
       render(app) {
         const items = checklist?.items || [];
         const answers = run.checked || {};
-        const missing = items.filter(i => !answers[i.id]?.done);
-        const issues = items.filter(i => answers[i.id]?.needs_fix);
-        const rawReview = missing.length > 0 || issues.length > 0 || !!(run.notes || '').trim();
-        const isReviewed = reviewedChecklistLogIds().has(run.id);
         app.append(el('div', { class: 'card' }, [
           el('div', { class: 'section-head' }, [
             el('h3', {}, t('submittedAnswers')),
-            el('div', { style: 'display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end' }, [
-              rawReview && !isReviewed ? el('button', { class: 'btn btn-primary print-hide', onclick: () => {
-                markChecklistLogReviewed(run.id);
-                toast('Checklist log marked reviewed.');
-                go(checklistLogDetailView(run, checklist), { reset: false });
-              } }, 'Mark reviewed') : null,
-              el('button', { class: 'btn btn-ghost print-hide', onclick: () => window.print() }, t('printInspectionReport')),
-            ]),
+            el('button', { class: 'btn btn-ghost print-hide', onclick: () => window.print() }, t('printInspectionReport')),
           ]),
           el('div', { class: 'sub' }, `${nameOf(run.user_id)} - ${fmt(run.submitted_at || run.updated_at)}`),
-          rawReview && !isReviewed
-            ? el('span', { class: 'pill', style: 'margin-top:10px;background:#f2c94c;color:#17212b;border-color:#f2c94c' }, t('checklistLogNeedsAttention'))
-            : el('span', { class: 'pill', style: 'margin-top:10px' }, isReviewed ? 'Reviewed' : t('completed')),
+          run.completed ? el('span', { class: 'pill', style: 'margin-top:10px' }, t('completed'))
+            : el('span', { class: 'pill', style: 'margin-top:10px;background:#f2c94c;color:#17212b;border-color:#f2c94c' }, t('checklistLogNeedsAttention')),
         ]));
         if (!items.length) {
           app.append(emptyState(t('noChecklists'), t('noChecklistLogs')));
@@ -2384,7 +2434,7 @@
   // ════════════════════════════════════════════════════════
   function settingsView() {
     return {
-      title: t('settings'), tab: 'settings', side: 'settings',
+      title: t('settings'), tab: 'settings',
       async render(app) {
         await loadProfiles();
         const fresh = await db.from('profiles').select('*').eq('id', state.profile.id).single();
