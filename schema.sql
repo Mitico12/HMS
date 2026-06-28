@@ -138,6 +138,7 @@ create table if not exists procedures (
   description text,
   fields      jsonb not null default '[]'::jsonb,
   is_draft    boolean not null default true,
+  sort_order  int not null default 0,
   created_by  uuid references profiles (id),
   created_at  timestamptz not null default now()
 );
@@ -159,6 +160,7 @@ create table if not exists checklists (
   group_id    uuid not null references groups (id) on delete cascade,
   title       text not null,
   items       jsonb not null default '[]'::jsonb,
+  sort_order  int not null default 0,
   created_at  timestamptz not null default now()
 );
 
@@ -228,6 +230,7 @@ create table if not exists documents (
   storage_path  text not null,
   mime_type     text,
   size_bytes    bigint,
+  sort_order    int not null default 0,
   uploaded_by   uuid references profiles (id),
   created_at    timestamptz not null default now()
 );
@@ -352,11 +355,15 @@ create policy act_read   on incident_actions for select using (
 -- ============================================================
 --  SEED  (the three default groups + starter incident categories)
 -- ============================================================
+-- Default groups are seeded safely in migration_dedupe_default_groups.sql.
+-- The old direct seed is kept here as a reference only; do not run it repeatedly.
+/*
 insert into groups (name, icon, kind, sort_order) values
   ('Checklists',    '✅', 'checklist',  1),
   ('Reports',       '⚠️', 'reports',    2),
   ('Documentation', '📄', 'documents',  3)
 on conflict do nothing;
+*/
 
 insert into incident_categories (kind, name, sort_order) values
   ('root_cause', 'Faulty procedures',  1),

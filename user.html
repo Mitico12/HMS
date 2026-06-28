@@ -157,15 +157,17 @@
     return {
       title: t('groups'), tab: 'groups',
       async render(app) {
+        await renderUserKpiDashboard(app);
         const { data } = await db.from('groups').select('*').order('sort_order');
-        state.groups = data || [];
+        state.groups = visibleGroups(data || []);
         const grid = el('div', { class: 'tile-grid' });
-        for (const g of state.groups)
-          grid.append(el('button', { class: 'tile', onclick: () => go(groupView(g)) }, [
-            el('span', { class: 'glyph' }, g.icon || '📁'),
-            el('div', {}, [el('div', { class: 't-name' }, groupName(g)),
-              el('div', { class: 't-meta' }, kindLabel(g.kind))]),
-          ]));
+        renderSortableHomeTiles(grid, state.groups.map(g => ({
+          id: `group:${g.id}`,
+          glyph: g.icon || '📁',
+          name: groupName(g),
+          meta: kindLabel(g.kind),
+          open: () => go(groupView(g)),
+        })), 'userHomeTileOrder');
         app.append(grid);
       },
     };
@@ -173,8 +175,244 @@
   const kindLabel = (k) => ({ checklist: t('checklists'), reports: t('incidentReports'), documents: t('documents'), procedures: t('procedures') }[k] || k);
   const groupName = (g) => {
     const key = (g.name || '').trim().toLowerCase();
-    return ({ checklists: t('checklists'), reports: t('reports'), documents: t('documents'), procedures: t('procedures') }[key] || g.name);
+    return ({ checklists: t('checklists'), reports: t('reports'), documents: t('documents'), documentation: t('documents'), procedures: t('procedures') }[key] || g.name);
   };
+
+  function visibleGroups(groups) {
+    const seenDefaultKinds = new Set();
+    return groups.filter(g => {
+      const key = (g.name || '').trim().toLowerCase();
+      const isDefault = ['checklists', 'reports', 'documents', 'documentation', 'procedures'].includes(key);
+      if (!isDefault) return true;
+      if (seenDefaultKinds.has(g.kind)) return false;
+      seenDefaultKinds.add(g.kind);
+      return true;
+    });
+  }
+
+  function renderSortableHomeTiles(host, cards, storageKey) {
+    const saved = JSON.parse(localStorage.getItem(storageKey) || '[]');
+    const rank = new Map(saved.map((id, idx) => [id, idx]));
+    cards.sort((a, b) => (rank.get(a.id) ?? 999) - (rank.get(b.id) ?? 999));
+    let dragIdx = null;
+    let didDrag = false;
+    const draw = () => {
+      host.innerHTML = '';
+      cards.forEach((card, idx) => {
+        const handle = el('span', { class: 'drag-handle tile-drag', draggable: 'true', title: t('dragReorder') }, '⠿');
+        const tile = el('button', { class: 'tile', onclick: () => {
+          if (didDrag) { didDrag = false; return; }
+          card.open();
+        } }, [
+          handle,
+          el('span', { class: 'glyph' }, card.glyph),
+          el('div', {}, [
+            el('div', { class: 't-name' }, card.name),
+            el('div', { class: 't-meta' }, card.meta),
+          ]),
+        ]);
+        handle.addEventListener('click', e => e.stopPropagation());
+        handle.addEventListener('dragstart', e => {
+          dragIdx = idx;
+          didDrag = true;
+          e.dataTransfer.effectAllowed = 'move';
+          e.dataTransfer.setData('text/plain', card.id);
+          tile.classList.add('dragging');
+        });
+        handle.addEventListener('dragend', () => { dragIdx = null; tile.classList.remove('dragging'); });
+        tile.addEventListener('dragover', e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; });
+        tile.addEventListener('drop', e => {
+          e.preventDefault();
+          if (dragIdx === null || dragIdx === idx) return;
+          const [moved] = cards.splice(dragIdx, 1);
+          cards.splice(idx, 0, moved);
+          localStorage.setItem(storageKey, JSON.stringify(cards.map(c => c.id)));
+          dragIdx = null;
+          draw();
+        });
+        host.append(tile);
+      });
+    };
+    draw();
+  }
+
+  async function renderUserKpiDashboard(app) {
+    const periodKey = 'userKpiPeriod';
+    const period = kpiPeriod(periodKey);
+    const { start, end } = periodBounds(period);
+    const periodText = periodLabel(period);
+    const [completed, reports] = await Promise.all([
+      countRows(db.from('checklist_runs').select('id', { count: 'exact', head: true })
+        .eq('user_id', state.profile.id).eq('completed', true).gte('submitted_at', start).lt('submitted_at', end)),
+      countRows(db.from('incidents').select('id', { count: 'exact', head: true })
+        .eq('reporter_id', state.profile.id).gte('created_at', start).lt('created_at', end)),
+    ]);
+    const cards = [
+      { id: 'completed', label: t('checklistsCompletedInPeriod'), value: completed },
+      { id: 'reports', label: t('reportsInPeriod'), value: reports },
+    ];
+    renderKpiToolbar(app, 'userKpiVisible', periodKey, cards, () => go(homeView(), { reset: true }));
+    renderSortableKpiGrid(app, 'userKpiOrder', visibleKpiCards(cards, 'userKpiVisible'), { periodText });
+  }
+
+  async function countRows(query) {
+    const { count, error } = await query;
+    return error ? null : (count || 0);
+  }
+
+  function todayBounds() {
+    const start = new Date();
+    start.setHours(0, 0, 0, 0);
+    const end = new Date(start);
+    end.setDate(end.getDate() + 1);
+    return { start: start.toISOString(), end: end.toISOString() };
+  }
+
+  function localDateString(date = new Date()) {
+    const yyyy = date.getFullYear();
+    const mm = String(date.getMonth() + 1).padStart(2, '0');
+    const dd = String(date.getDate()).padStart(2, '0');
+    return `${yyyy}-${mm}-${dd}`;
+  }
+
+  function kpiPeriod(storageKey) {
+    const today = localDateString();
+    try {
+      const saved = JSON.parse(localStorage.getItem(storageKey) || 'null');
+      if (saved?.from && saved?.until) return saved;
+    } catch (err) {}
+    return { from: today, until: today };
+  }
+
+  function periodBounds(period) {
+    const start = new Date(`${period.from}T00:00:00`);
+    const end = new Date(`${period.until}T00:00:00`);
+    end.setDate(end.getDate() + 1);
+    return { start: start.toISOString(), end: end.toISOString() };
+  }
+
+  function periodLabel(period) {
+    return period.from === period.until ? period.from : `${period.from} - ${period.until}`;
+  }
+
+  function visibleKpiCards(cards, storageKey) {
+    const selected = localStorage.getItem(storageKey) || 'all';
+    return selected === 'all' ? cards : cards.filter(card => card.id === selected);
+  }
+
+  function renderKpiToolbar(host, filterKey, periodKey, cards, refreshHome) {
+    const period = kpiPeriod(periodKey);
+    const filter = el('select', { class: 'kpi-filter', onchange: e => {
+      localStorage.setItem(filterKey, e.target.value);
+      refreshHome();
+    } }, [
+      opt('all', t('showAllKpis')),
+      ...cards.map(card => opt(card.id, card.label)),
+    ]);
+    const selected = localStorage.getItem(filterKey) || 'all';
+    filter.value = cards.some(card => card.id === selected) ? selected : 'all';
+    const from = el('input', { type: 'date', value: period.from });
+    const until = el('input', { type: 'date', value: period.until });
+    const panel = el('div', { class: 'kpi-date-panel hidden' }, [
+      labeled(t('dateFrom'), from),
+      labeled(t('dateUntil'), until),
+      el('div', { class: 'kpi-date-actions' }, [
+        el('button', { class: 'btn btn-ghost', onclick: () => {
+          localStorage.removeItem(periodKey);
+          refreshHome();
+        } }, t('today')),
+        el('button', { class: 'btn btn-primary', onclick: () => saveKpiPeriod(periodKey, from.value, until.value, refreshHome) }, t('apply')),
+      ]),
+    ]);
+    const calendar = el('button', { class: 'iconbtn kpi-calendar-btn', title: t('dashboardPeriod'), onclick: () => {
+      panel.classList.toggle('hidden');
+    } }, '📅');
+    host.append(el('div', { class: 'kpi-control-wrap' }, [
+      el('div', { class: 'kpi-toolbar' }, [
+        el('div', { class: 'kpi-select-wrap' }, filter),
+        el('div', { class: 'kpi-period-chip' }, periodLabel(period)),
+        calendar,
+      ]),
+      panel,
+    ]));
+  }
+
+  function saveKpiPeriod(storageKey, from, until, refreshHome) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(from || '') || !/^\d{4}-\d{2}-\d{2}$/.test(until || '')) {
+      toast(t('invalidPeriod'), 'err');
+      return;
+    }
+    const ordered = from <= until ? { from, until } : { from: until, until: from };
+    localStorage.setItem(storageKey, JSON.stringify(ordered));
+    refreshHome();
+  }
+
+  function changeKpiPeriod(storageKey) {
+    const current = kpiPeriod(storageKey);
+    const raw = prompt(`${t('dashboardPeriod')}\n${t('periodPrompt')}`, `${current.from}..${current.until}`);
+    if (!raw) return;
+    const normalized = raw.trim().replace(/\s+to\s+/i, '..').replace(/\s*,\s*/g, '..');
+    const parts = (normalized.includes('..') ? normalized.split('..') : normalized.split(/\s+/)).map(p => p.trim()).filter(Boolean);
+    const from = parts[0];
+    const until = parts[1] || parts[0];
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(from || '') || !/^\d{4}-\d{2}-\d{2}$/.test(until || '')) {
+      toast(t('invalidPeriod'), 'err');
+      return;
+    }
+    const ordered = from <= until ? { from, until } : { from: until, until: from };
+    localStorage.setItem(storageKey, JSON.stringify(ordered));
+    go(homeView(), { reset: true });
+  }
+
+  function renderSortableKpiGrid(host, storageKey, cards, options = {}) {
+    const saved = JSON.parse(localStorage.getItem(storageKey) || '[]');
+    const rank = new Map(saved.map((id, idx) => [id, idx]));
+    cards.sort((a, b) => (rank.get(a.id) ?? 99) - (rank.get(b.id) ?? 99));
+    const grid = el('div', { class: 'kpi-grid' });
+    let dragIdx = null;
+    let didDrag = false;
+    const draw = () => {
+      grid.innerHTML = '';
+      cards.forEach((card, idx) => {
+        const node = kpiCard(card.label, card.value, options.periodText);
+        node.setAttribute('draggable', 'true');
+        node.addEventListener('dragstart', e => {
+          dragIdx = idx;
+          didDrag = true;
+          e.dataTransfer.effectAllowed = 'move';
+          e.dataTransfer.setData('text/plain', card.id);
+          node.classList.add('dragging');
+        });
+        node.addEventListener('dragend', () => { dragIdx = null; node.classList.remove('dragging'); });
+        node.addEventListener('dragover', e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; });
+        node.addEventListener('drop', e => {
+          e.preventDefault();
+          if (dragIdx === null || dragIdx === idx) return;
+          const [moved] = cards.splice(dragIdx, 1);
+          cards.splice(idx, 0, moved);
+          localStorage.setItem(storageKey, JSON.stringify(cards.map(c => c.id)));
+          dragIdx = null;
+          draw();
+        });
+        node.addEventListener('click', () => {
+          if (didDrag) { didDrag = false; return; }
+          if (options.onCardClick) options.onCardClick(card);
+        });
+        grid.append(node);
+      });
+    };
+    draw();
+    host.append(grid);
+  }
+
+  function kpiCard(label, value, periodText = '') {
+    return el('div', { class: 'kpi-card', title: t('dashboardPeriod') }, [
+      el('span', { class: 'drag-handle kpi-drag', title: t('dragReorder') }, '⠿'),
+      el('div', { class: 'kpi-value' }, value == null ? '-' : String(value)),
+      el('div', { class: 'kpi-label' }, label),
+      periodText ? el('div', { class: 'kpi-period' }, periodText) : null,
+    ]);
+  }
 
   function groupView(g) {
     if (g.kind === 'checklist') return checklistGroupView(g);
@@ -188,7 +426,9 @@
     return {
       title: groupName(g), tab: 'groups',
       async render(app) {
-        const { data } = await db.from('checklists').select('*').eq('group_id', g.id).order('created_at');
+        let q = await db.from('checklists').select('*').eq('group_id', g.id).order('sort_order').order('created_at');
+        if (q.error) q = await db.from('checklists').select('*').eq('group_id', g.id).order('created_at');
+        const data = q.data || [];
         if (!data?.length) return app.append(emptyState(t('noChecklists'), t('noChecklistsHint')));
         for (const c of data)
           app.append(el('div', { class: 'row', onclick: () => go(checklistRun(c)), style: 'cursor:pointer' }, [
@@ -218,17 +458,51 @@
         app.append(progress);
 
         for (const it of items) {
-          const box = el('input', { type: 'checkbox' });
-          box.checked = !!checked[it.id]?.done;
-          const item = el('label', { class: 'check-item' + (box.checked ? ' done' : '') },
-            [box, el('span', {}, it.label)]);
-          box.addEventListener('change', async () => {
-            checked = { ...checked,
-              [it.id]: box.checked ? { done: true, at: new Date().toISOString() } : { done: false } };
-            item.classList.toggle('done', box.checked);
-            drawProgress();
-          });
-          app.append(item);
+          const type = it.type || 'check';
+          const current = checked[it.id]?.value ?? '';
+          const card = el('div', { class: 'card checklist-run-card' });
+          const issueHost = el('div', { class: 'checklist-issue-host' });
+          if (it.image) card.append(el('img', { src: it.image, alt: it.label, class: 'checklist-item-image' }));
+          if (type === 'check') {
+            const box = el('input', { type: 'checkbox' });
+            box.checked = !!checked[it.id]?.done;
+            const item = el('label', { class: 'check-item' + (box.checked ? ' done' : '') },
+              [box, el('span', {}, it.label)]);
+            box.addEventListener('change', () => {
+              const current = checked[it.id] || {};
+              checked = { ...checked,
+                [it.id]: { ...current, done: box.checked, value: box.checked, at: box.checked ? new Date().toISOString() : null } };
+              markChecklistIssue(it);
+              item.classList.toggle('done', box.checked);
+              drawProgress();
+              drawCorrectiveAction(it, issueHost);
+            });
+            card.append(item);
+          } else if (type === 'choice') {
+            const select = el('select', { onchange: e => { setChecklistAnswer(it, e.target.value); drawCorrectiveAction(it, issueHost); } },
+              [opt('', `- ${t('choose')} -`), ...(it.options || []).map(o => opt(o, o))]);
+            select.value = current;
+            card.append(labeled(it.label, select));
+          } else if (type === 'number') {
+            const input = el('input', { type: 'number', value: current, oninput: e => { setChecklistAnswer(it, e.target.value); drawCorrectiveAction(it, issueHost); } });
+            card.append(labeled(it.label, input));
+          } else {
+            const input = el('textarea', { oninput: e => { setChecklistAnswer(it, e.target.value); drawCorrectiveAction(it, issueHost); } });
+            input.value = current;
+            card.append(labeled(it.label, input));
+          }
+          drawCorrectiveAction(it, issueHost);
+          card.append(issueHost);
+          const photoHost = el('div', { class: 'checklist-answer-photo' });
+          drawChecklistAnswerPhoto(it, photoHost);
+          const photoInput = el('input', { type: 'file', accept: 'image/*', onchange: async e => {
+            const file = e.target.files?.[0];
+            if (!file) return;
+            setChecklistPhoto(it, await fileToDataUrl(file));
+            drawChecklistAnswerPhoto(it, photoHost);
+          } });
+          card.append(labeled(t('photosOptional'), photoInput), photoHost);
+          app.append(card);
         }
         app.append(
           labeled(t('notes'), notes),
@@ -236,6 +510,9 @@
         );
 
         async function submitChecklist() {
+          for (const item of items) markChecklistIssue(item);
+          const missingActions = items.filter(i => checked[i.id]?.needs_fix && !(checked[i.id]?.corrective_action || '').trim());
+          if (missingActions.length) return toast(t('correctiveActionRequired'), 'err');
           const completed = items.every(i => checked[i.id]?.done);
           const payload = {
             checklist_id: c.id,
@@ -249,8 +526,103 @@
           // Insert a new row per submission so each run is its own log entry.
           const { error } = await db.from('checklist_runs').insert(payload);
           if (error) return toast(error.message + ' - run the checklist SQL migrations first.', 'err');
+          if (completed) {
+            await db.from('checklist_completions').insert({
+              checklist_id: c.id,
+              user_id: state.profile.id,
+            });
+          }
           toast(t('checklistComplete'));
           back();
+        }
+
+        function setChecklistAnswer(item, value) {
+          const done = String(value ?? '').trim().length > 0;
+          const current = checked[item.id] || {};
+          checked = { ...checked,
+            [item.id]: { ...current, done, value, at: done ? new Date().toISOString() : null } };
+          markChecklistIssue(item);
+          drawProgress();
+        }
+
+        function setCorrectiveAction(item, value) {
+          const current = checked[item.id] || { done: false, value: '' };
+          checked = { ...checked,
+            [item.id]: { ...current, corrective_action: value } };
+        }
+
+        function markChecklistIssue(item) {
+          const current = checked[item.id] || {};
+          const needsFix = answerNeedsFix(item, current);
+          const next = { ...current, needs_fix: needsFix };
+          if (!needsFix) {
+            delete next.corrective_action;
+            delete next.issue_reason;
+          } else {
+            next.issue_reason = t('outsideExpected');
+          }
+          checked = { ...checked, [item.id]: next };
+        }
+
+        function drawCorrectiveAction(item, host) {
+          host.innerHTML = '';
+          const answer = checked[item.id] || {};
+          if (!answerNeedsFix(item, answer)) return;
+          const action = el('textarea', {
+            placeholder: t('correctiveActionPlaceholder'),
+            oninput: e => setCorrectiveAction(item, e.target.value),
+          });
+          action.value = answer.corrective_action || '';
+          host.append(
+            el('div', { class: 'inspection-alert' }, t('outsideExpected')),
+            labeled(t('whatMustBeDone'), action, true),
+          );
+        }
+
+        function answerNeedsFix(item, answer) {
+          const value = answer.value;
+          if (value == null || value === '') return false;
+          if (item.type === 'choice' && item.fixOnNo && isNoAnswer(value)) return true;
+          const rule = item.expected || null;
+          if (!rule) return false;
+          if (item.type === 'number') {
+            const n = Number(value);
+            if (Number.isNaN(n)) return false;
+            if (rule.min != null && n < Number(rule.min)) return true;
+            if (rule.max != null && n > Number(rule.max)) return true;
+            return false;
+          }
+          if (Array.isArray(rule.values) && rule.values.length) {
+            const allowed = rule.values.map(v => String(v).trim().toLowerCase());
+            return !allowed.includes(String(value).trim().toLowerCase());
+          }
+          return false;
+        }
+
+        function isNoAnswer(value) {
+          return ['no', 'nei'].includes(String(value).trim().toLowerCase());
+        }
+
+        function setChecklistPhoto(item, photo) {
+          const current = checked[item.id] || { done: false, value: '' };
+          checked = { ...checked,
+            [item.id]: { ...current, photo, photo_at: new Date().toISOString() } };
+        }
+
+        function drawChecklistAnswerPhoto(item, host) {
+          host.innerHTML = '';
+          const photo = checked[item.id]?.photo;
+          if (!photo) return;
+          host.append(
+            el('img', { src: photo, alt: item.label, class: 'checklist-item-image' }),
+            el('button', { class: 'btn btn-ghost', onclick: () => {
+              const current = { ...(checked[item.id] || {}) };
+              delete current.photo;
+              delete current.photo_at;
+              checked = { ...checked, [item.id]: current };
+              drawChecklistAnswerPhoto(item, host);
+            } }, t('removeImage')),
+          );
         }
       },
     };
@@ -444,6 +816,35 @@
     return paths;
   }
 
+  function fileToDataUrl(file) {
+    return new Promise((resolve, reject) => {
+      if (!file.type?.startsWith('image/')) {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () => reject(reader.error);
+        reader.readAsDataURL(file);
+        return;
+      }
+      const img = new Image();
+      const url = URL.createObjectURL(file);
+      img.onload = () => {
+        URL.revokeObjectURL(url);
+        const maxSide = 1280;
+        const scale = Math.min(1, maxSide / Math.max(img.width, img.height));
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.max(1, Math.round(img.width * scale));
+        canvas.height = Math.max(1, Math.round(img.height * scale));
+        canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+        resolve(canvas.toDataURL('image/jpeg', 0.78));
+      };
+      img.onerror = () => {
+        URL.revokeObjectURL(url);
+        reject(new Error('Could not read image.'));
+      };
+      img.src = url;
+    });
+  }
+
   async function renderIncidentPhotos(host, inc) {
     const paths = inc.photo_paths || [];
     if (!paths.length) return;
@@ -541,7 +942,9 @@
     return {
       title: groupName(g), tab: 'groups',
       async render(app) {
-        const { data } = await db.from('documents').select('*').eq('group_id', g.id).order('created_at', { ascending: false });
+        let q = await db.from('documents').select('*').eq('group_id', g.id).order('sort_order').order('created_at', { ascending: false });
+        if (q.error) q = await db.from('documents').select('*').eq('group_id', g.id).order('created_at', { ascending: false });
+        const data = q.data || [];
         if (!data?.length) return app.append(emptyState(t('noDocuments'), t('noDocumentsHint')));
         for (const d of data)
           app.append(el('div', { class: 'row' }, [
@@ -562,7 +965,9 @@
     return {
       title: groupName(g), tab: 'groups',
       async render(app) {
-        const { data } = await db.from('procedures').select('*').eq('group_id', g.id).eq('is_draft', false).order('created_at');
+        let q = await db.from('procedures').select('*').eq('group_id', g.id).eq('is_draft', false).order('sort_order').order('created_at');
+        if (q.error) q = await db.from('procedures').select('*').eq('group_id', g.id).eq('is_draft', false).order('created_at');
+        const data = q.data || [];
         if (!data?.length) return app.append(emptyState(t('noProcedures'), t('noProceduresHint')));
         for (const p of data)
           app.append(el('div', { class: 'row', onclick: () => go(procedureFill(p)), style: 'cursor:pointer' }, [

@@ -275,39 +275,32 @@
       action: el('button', { class: 'iconbtn', title: t('addGroup'), onclick: addGroupModal }, '+'),
       async render(app) {
         const { data } = await db.from('groups').select('*').order('sort_order');
-        state.groups = data || [];
+        state.groups = visibleGroups(data || []);
         await loadProfiles();
+        await renderAdminKpiDashboard(app);
         const pendingAccounts = state.profiles.filter(p => p.role === 'user' && !p.is_verified).length;
         const pendingChanges = await pendingProfileChangeCount();
         const pending = pendingAccounts + pendingChanges;
         const grid = el('div', { class: 'tile-grid' });
-
-        grid.append(el('button', { class: 'tile', onclick: () => go(usersView()) }, [
-          el('span', { class: 'glyph' }, '👥'),
-          el('div', {}, [
-            el('div', { class: 't-name' }, t('users')),
-            el('div', { class: 't-meta' }, pending ? `${pending} ${t('waitingApproval').toLowerCase()}` : t('accountsAccess')),
-          ]),
-        ]));
-        grid.append(el('button', { class: 'tile', onclick: () => go(logsView()) }, [
-          el('span', { class: 'glyph' }, '☑'),
-          el('div', {}, [
-            el('div', { class: 't-name' }, t('logs')),
-            el('div', { class: 't-meta' }, t('checklistLogsMeta')),
-          ]),
-        ]));
-
-        for (const g of state.groups) {
-          const tile = el('button', { class: 'tile', onclick: () => go(groupView(g)) }, [
-            el('span', { class: 'glyph' }, g.icon || '📁'),
-            el('div', {}, [
-              el('div', { class: 't-name' }, groupName(g)),
-              el('div', { class: 't-meta' }, kindLabel(g.kind)),
-            ]),
-          ]);
-          if (g.kind === 'reports') tile.append(el('span', { class: 'badge reports-badge' }));
-          grid.append(tile);
-        }
+        const cards = [
+          { id: 'fixed:users', glyph: '👥', name: t('users'), meta: pending ? `${pending} ${t('waitingApproval').toLowerCase()}` : t('accountsAccess'), open: () => go(usersView()) },
+          { id: 'fixed:logs', glyph: '☑', name: t('logs'), meta: t('checklistLogsMeta'), open: () => go(logsView()) },
+          ...state.groups.map(g => ({
+            id: `group:${g.id}`,
+            group: g,
+            glyph: g.icon || '📁',
+            name: groupName(g),
+            meta: kindLabel(g.kind),
+            badge: g.kind === 'reports',
+            open: () => go(groupView(g)),
+          })),
+        ];
+        renderSortableHomeTiles(grid, cards, 'adminHomeTileOrder', async ordered => {
+          const orderedGroups = ordered.filter(c => c.group).map(c => c.group);
+          state.groups = orderedGroups;
+          await saveSortOrder('groups', orderedGroups);
+          go(homeView(), { reset: true });
+        });
         grid.append(el('button', { class: 'tile add', onclick: addGroupModal },
           [el('span', { class: 'glyph' }, '+'), el('div', { class: 't-meta' }, t('addGroup'))]));
         app.append(grid);
@@ -318,8 +311,421 @@
   const kindLabel = (k) => ({ checklist: t('checklists'), reports: t('incidentReports'), documents: t('documents'), procedures: t('procedures') }[k] || k);
   const groupName = (g) => {
     const key = (g.name || '').trim().toLowerCase();
-    return ({ checklists: t('checklists'), reports: t('reports'), documents: t('documents'), procedures: t('procedures') }[key] || g.name);
+    return ({ checklists: t('checklists'), reports: t('reports'), documents: t('documents'), documentation: t('documents'), procedures: t('procedures') }[key] || g.name);
   };
+
+  function visibleGroups(groups) {
+    const seenDefaultKinds = new Set();
+    return groups.filter(g => {
+      const key = (g.name || '').trim().toLowerCase();
+      const isDefault = ['checklists', 'reports', 'documents', 'documentation', 'procedures'].includes(key);
+      if (!isDefault) return true;
+      if (seenDefaultKinds.has(g.kind)) return false;
+      seenDefaultKinds.add(g.kind);
+      return true;
+    });
+  }
+
+  const DAYMS = 86400000;
+
+  function previousBounds(period) {
+    const { start, end } = periodBounds(period);
+    const len = new Date(end) - new Date(start);
+    return { start: new Date(new Date(start) - len).toISOString(), end: start };
+  }
+
+  // How many days in [from..until] fall on a counted weekday.
+  function qualifyingDays(period, weekdays) {
+    const set = new Set((weekdays || [0,1,2,3,4,5,6]).map(Number));
+    let n = 0;
+    const d = new Date(period.from + 'T00:00:00');
+    const end = new Date(period.until + 'T00:00:00');
+    for (; d <= end; d.setDate(d.getDate() + 1)) if (set.has(d.getDay())) n++;
+    return n;
+  }
+
+  function pctChange(cur, prev) { return prev > 0 ? Math.round((cur - prev) / prev * 100) : 0; }
+  function isGood(cur, prev, dir) { return dir == null ? null : ((cur >= prev) === (dir === 'up')); }
+
+  function deltaPill(delta, good) {
+    const cls = good == null ? 'neutral' : (good ? 'good' : 'bad');
+    const arrow = delta >= 0 ? '▲' : '▼';
+    return el('span', { class: 'delta-pill delta-' + cls }, `${arrow} ${Math.abs(delta)}%`);
+  }
+
+  // o: { label, value, delta, good, live, hint, onClick }
+  function metricCard(o) {
+    const top = o.live
+      ? el('span', { class: 'kpi-live' }, [el('span', { class: 'kpi-dot' }), 'LIVE'])
+      : (o.delta == null ? null : deltaPill(o.delta, o.good));
+    const card = el('div', { class: 'kpi-card metric-card' + (o.onClick ? ' kpi-clickable' : '') }, [
+      el('div', { class: 'metric-head' }, [el('span', { class: 'kpi-label' }, o.label), top]),
+      el('div', { class: 'kpi-value' }, o.value == null ? '–' : String(o.value)),
+      o.hint ? el('div', { class: 'kpi-period' }, o.hint) : null,
+    ]);
+    if (o.onClick) card.addEventListener('click', o.onClick);
+    return card;
+  }
+
+  function medianDays(rows) {
+    const xs = rows.map(r => (new Date(r.resolved_at) - new Date(r.created_at)) / DAYMS)
+                   .filter(x => x >= 0).sort((a, b) => a - b);
+    if (!xs.length) return null;
+    const m = Math.floor(xs.length / 2);
+    const v = xs.length % 2 ? xs[m] : (xs[m - 1] + xs[m]) / 2;
+    return Math.round(v * 10) / 10;
+  }
+
+  async function renderAdminKpiDashboard(app) {
+    const periodKey = 'adminKpiPeriod', typeKey = 'adminKpiType', filterKey = 'adminKpiChecklist';
+    const period = kpiPeriod(periodKey);
+    const prev = previousBounds(period);
+    const cur = periodBounds(period);
+    const type = localStorage.getItem(typeKey) || 'overview';
+    const refresh = () => go(homeView(), { reset: true });
+
+    // ── toolbar: type (left) · checklist filter · period chip + calendar (right) ──
+    const typeSel = el('select', { class: 'kpi-filter', onchange: e => {
+      localStorage.setItem(typeKey, e.target.value); refresh();
+    } }, [opt('overview', t('kpiOverview')), opt('incidents', t('kpiIncidents')), opt('checklists', t('kpiChecklists'))]);
+    typeSel.value = type;
+
+    // checklists (with quotas) loaded up front; also feeds the filter dropdown
+    let checklists = [];
+    if (type === 'checklists') {
+      const { data } = await db.from('checklists').select('id,title,daily_quota,quota_weekdays');
+      checklists = (data || []).filter(c => c.daily_quota > 0);
+    }
+    const selectedCl = localStorage.getItem(filterKey) || 'all';
+    const clSel = el('select', { class: 'kpi-filter', onchange: e => {
+      localStorage.setItem(filterKey, e.target.value); refresh();
+    } }, [opt('all', t('allChecklists')), ...checklists.map(c => opt(c.id, c.title))]);
+    clSel.value = checklists.some(c => c.id === selectedCl) ? selectedCl : 'all';
+
+    const from = el('input', { type: 'date', value: period.from });
+    const until = el('input', { type: 'date', value: period.until });
+    const panel = el('div', { class: 'kpi-date-panel hidden' }, [
+      labeled(t('dateFrom'), from), labeled(t('dateUntil'), until),
+      el('div', { class: 'kpi-date-actions' }, [
+        el('button', { class: 'btn btn-ghost', onclick: () => { localStorage.removeItem(periodKey); refresh(); } }, t('today')),
+        el('button', { class: 'btn btn-primary', onclick: () => saveKpiPeriod(periodKey, from.value, until.value, refresh) }, t('apply')),
+      ]),
+    ]);
+    const calBtn = el('button', { class: 'iconbtn', title: t('dashboardPeriod'), onclick: () => panel.classList.toggle('hidden') }, '📅');
+
+    app.append(el('div', { class: 'kpi-control-wrap' }, [
+      el('div', { class: 'kpi-toolbar-row' }, [
+        typeSel,
+        el('span', { class: 'spacer' }),
+        type === 'checklists' ? clSel : null,
+        el('div', { class: 'kpi-period-chip' }, periodLabel(period)),
+        calBtn,
+      ]),
+      panel,
+    ]));
+
+    const host = el('div', {});
+    app.append(host);
+
+    if (type === 'overview') await renderOverviewKpi(host, period, cur, prev);
+    else if (type === 'incidents') await renderIncidentsKpi(host, period, cur, prev);
+    else await renderChecklistsKpi(host, period, prev, checklists, selectedCl);
+  }
+
+  // ── OVERVIEW ────────────────────────────────────────────────
+  async function renderOverviewKpi(host, period, cur, prev) {
+    const periodText = periodLabel(period);
+    const seriousIds = await seriousConsequenceIds();
+
+    const [backlog, unassigned, oldestRow] = await Promise.all([
+      countRows(db.from('incidents').select('id', { count: 'exact', head: true }).neq('status', 'resolved')),
+      countRows(db.from('incidents').select('id', { count: 'exact', head: true }).eq('status', 'open').is('assigned_to', null)),
+      db.from('incidents').select('created_at').neq('status', 'resolved').order('created_at', { ascending: true }).limit(1),
+    ]);
+    const oldestDays = oldestRow.data?.[0]
+      ? Math.floor((Date.now() - new Date(oldestRow.data[0].created_at)) / DAYMS) : 0;
+
+    const [serCur, serPrev, resCur, resPrev, repCur, repPrev, medCur, medPrev] = await Promise.all([
+      seriousCount(cur, seriousIds), seriousCount(prev, seriousIds),
+      countRows(db.from('incidents').select('id', { count: 'exact', head: true }).eq('status', 'resolved').gte('resolved_at', cur.start).lt('resolved_at', cur.end)),
+      countRows(db.from('incidents').select('id', { count: 'exact', head: true }).eq('status', 'resolved').gte('resolved_at', prev.start).lt('resolved_at', prev.end)),
+      countRows(db.from('incidents').select('id', { count: 'exact', head: true }).gte('created_at', cur.start).lt('created_at', cur.end)),
+      countRows(db.from('incidents').select('id', { count: 'exact', head: true }).gte('created_at', prev.start).lt('created_at', prev.end)),
+      resolveTimes(cur), resolveTimes(prev),
+    ]);
+    const rateCur = repCur ? Math.round(resCur / repCur * 100) : 0;
+    const ratePrev = repPrev ? Math.round(resPrev / repPrev * 100) : 0;
+    const medC = medianDays(medCur), medP = medianDays(medPrev);
+
+    const grid = el('div', { class: 'kpi-grid' }, [
+      metricCard({ label: t('reportsInPeriod'), value: backlog, live: true, hint: 'Open backlog' }),
+      metricCard({ label: t('unassigned'), value: unassigned, live: true }),
+      metricCard({ label: 'Oldest open', value: oldestDays + 'd', live: true }),
+      metricCard({ label: 'Serious', value: serCur, delta: pctChange(serCur, serPrev), good: isGood(serCur, serPrev, 'down'), hint: periodText }),
+      metricCard({ label: 'Resolution rate', value: rateCur + '%', delta: pctChange(rateCur, ratePrev), good: isGood(rateCur, ratePrev, 'up'), hint: periodText }),
+      metricCard({ label: 'Median resolve', value: medC == null ? '–' : medC + 'd', delta: medP ? pctChange(medC, medP) : null, good: isGood(medC || 0, medP || 0, 'down'), hint: periodText }),
+    ]);
+    host.append(grid);
+  }
+
+  // ── INCIDENTS ───────────────────────────────────────────────
+  async function renderIncidentsKpi(host, period, cur, prev) {
+    const periodText = periodLabel(period);
+    const { data: cats } = await db.from('incident_categories').select('id,name').eq('kind', 'consequence');
+    const seriousNames = ['Death', 'Injury or sick leave', 'Environmental impact'];
+    const seriousIds = (cats || []).filter(c => seriousNames.includes(c.name)).map(c => c.id);
+
+    const { data: rows = [] } = await db.from('incidents')
+      .select('id,consequence_ids,is_anonymous').gte('created_at', cur.start).lt('created_at', cur.end);
+    const { data: prevRows = [] } = await db.from('incidents')
+      .select('id,consequence_ids,is_anonymous').gte('created_at', prev.start).lt('created_at', prev.end);
+
+    const inSet = (ids, set) => (ids || []).some(id => set.includes(id));
+    const repCur = rows.length, repPrev = prevRows.length;
+    const serCur = rows.filter(r => inSet(r.consequence_ids, seriousIds)).length;
+    const serPrev = prevRows.filter(r => inSet(r.consequence_ids, seriousIds)).length;
+    const anonCur = repCur ? Math.round(rows.filter(r => r.is_anonymous).length / repCur * 100) : 0;
+    const anonPrev = repPrev ? Math.round(prevRows.filter(r => r.is_anonymous).length / repPrev * 100) : 0;
+
+    const [resCur, resPrev] = await Promise.all([
+      countRows(db.from('incidents').select('id', { count: 'exact', head: true }).eq('status', 'resolved').gte('resolved_at', cur.start).lt('resolved_at', cur.end)),
+      countRows(db.from('incidents').select('id', { count: 'exact', head: true }).eq('status', 'resolved').gte('resolved_at', prev.start).lt('resolved_at', prev.end)),
+    ]);
+
+    host.append(el('div', { class: 'kpi-grid' }, [
+      metricCard({ label: 'Reported', value: repCur, delta: pctChange(repCur, repPrev), good: isGood(repCur, repPrev, 'down'), hint: periodText }),
+      metricCard({ label: 'Resolved', value: resCur, delta: pctChange(resCur, resPrev), good: isGood(resCur, resPrev, 'up'), hint: periodText }),
+      metricCard({ label: 'Serious', value: serCur, delta: pctChange(serCur, serPrev), good: isGood(serCur, serPrev, 'down'), hint: periodText }),
+      metricCard({ label: 'Anonymous', value: anonCur + '%', delta: pctChange(anonCur, anonPrev), good: null, hint: periodText }),
+    ]));
+
+    // severity strip
+    const palette = { 'Operational disruption': '#888780', 'Financial loss': '#BA7517',
+      'Environmental impact': '#1D9E75', 'Injury or sick leave': '#D85A30', 'Death': '#A32D2D' };
+    const counts = (cats || []).map(c => ({
+      name: c.name, color: palette[c.name] || '#888780',
+      n: rows.filter(r => (r.consequence_ids || []).includes(c.id)).length,
+    })).filter(c => c.n > 0).sort((a, b) => b.n - a.n);
+    const total = counts.reduce((a, c) => a + c.n, 0) || 1;
+    const bar = el('div', { class: 'sev-bar' }, counts.map(c =>
+      el('div', { style: `width:${c.n / total * 100}%;background:${c.color}`, title: `${c.name}: ${c.n}` })));
+    const legend = el('div', { class: 'sev-legend' }, counts.map(c =>
+      el('span', {}, [el('i', { style: `background:${c.color}` }), `${c.name} ${c.n}`])));
+    host.append(el('div', { class: 'kpi-card', style: 'margin-top:14px' }, [
+      el('div', { class: 'kpi-label', style: 'margin-bottom:10px' }, 'Reports by worst consequence'), bar, legend,
+    ]));
+  }
+
+  // ── CHECKLISTS (quota model) ────────────────────────────────
+  async function renderChecklistsKpi(host, period, prev, checklists, selectedCl) {
+    const periodText = periodLabel(period);
+    const cur = periodBounds(period);
+    const scope = selectedCl === 'all' ? checklists : checklists.filter(c => c.id === selectedCl);
+    const scopeIds = scope.map(c => c.id);
+
+    // expected = Σ quota × qualifying days
+    const expected = scope.reduce((sum, c) => sum + c.daily_quota * qualifyingDays(period, c.quota_weekdays), 0);
+
+    // pull completion events for the range, current and previous
+    const fetchEvents = (b) => db.from('checklist_completions')
+      .select('checklist_id,completed_on')
+      .gte('completed_on', b.start.slice(0, 10)).lt('completed_on', b.end.slice(0, 10))
+      .in('checklist_id', scopeIds.length ? scopeIds : ['00000000-0000-0000-0000-000000000000']);
+    const [{ data: ev = [] }, { data: evPrev = [] }] = await Promise.all([fetchEvents(cur), fetchEvents(prev)]);
+
+    const completions = ev.length;
+    const prevPeriod = { from: prev.start.slice(0, 10), until: new Date(new Date(prev.end) - DAYMS).toISOString().slice(0, 10) };
+    const expectedPrev = scope.reduce((sum, c) => sum + c.daily_quota * qualifyingDays(prevPeriod, c.quota_weekdays), 0);
+    const rateCur = expected ? Math.round(completions / expected * 100) : 0;
+    const ratePrev = expectedPrev ? Math.round(evPrev.length / expectedPrev * 100) : 0;
+
+    // per checklist, per day → shortfalls
+    const got = {}; // got[checklistId][YYYY-MM-DD] = count
+    ev.forEach(e => { (got[e.checklist_id] ||= {})[e.completed_on] = ((got[e.checklist_id]?.[e.completed_on]) || 0) + 1; });
+    const shortfalls = [];
+    scope.forEach(c => {
+      const set = new Set((c.quota_weekdays || [0,1,2,3,4,5,6]).map(Number));
+      const d = new Date(period.from + 'T00:00:00'); const end = new Date(period.until + 'T00:00:00');
+      for (; d <= end; d.setDate(d.getDate() + 1)) {
+        if (!set.has(d.getDay())) continue;
+        const key = d.toISOString().slice(0, 10);
+        const n = got[c.id]?.[key] || 0;
+        if (n < c.daily_quota) shortfalls.push({ title: c.title, date: new Date(d), exp: c.daily_quota, got: n, short: c.daily_quota - n });
+      }
+    });
+    const missed = shortfalls.reduce((a, s) => a + s.short, 0);
+
+    const drillHost = el('div', { style: 'margin-top:12px' });
+    let open = false;
+    const drawDrill = () => {
+      drillHost.innerHTML = '';
+      if (!open) return;
+      if (!missed) { drillHost.append(el('div', { class: 'kpi-card' }, '✓ Every checklist hit its daily quota in this range.')); return; }
+      const card = el('div', { class: 'kpi-card' }, [
+        el('div', { class: 'kpi-label' }, `${missed} below quota across ${shortfalls.length} checklist-days`),
+      ]);
+      shortfalls.slice(0, 12).forEach(s => card.append(el('div', { class: 'miss-row' }, [
+        el('div', { class: 'miss-top' }, [
+          el('span', { style: 'flex:1' }, s.title),
+          el('span', { class: 'miss-pill' }, `short ${s.short}`),
+        ]),
+        el('p', { class: 'miss-sub' }, `${s.date.getDate()} ${s.date.toLocaleString('en', { month: 'short' })} · expected ${s.exp}, got ${s.got}`),
+      ])));
+      if (shortfalls.length > 12) card.append(el('p', { class: 'miss-sub', style: 'padding-top:10px' }, `+ ${shortfalls.length - 12} more`));
+      card.append(el('p', { class: 'miss-sub', style: 'padding-top:10px' }, t('expectedNote')));
+      drillHost.append(card);
+    };
+
+    host.append(el('div', { class: 'kpi-grid' }, [
+      metricCard({ label: t('checklistsCompletedInPeriod'), value: completions, delta: pctChange(completions, evPrev.length), good: isGood(completions, evPrev.length, 'up'), hint: periodText }),
+      metricCard({ label: 'Completion rate', value: rateCur + '%', delta: pctChange(rateCur, ratePrev), good: isGood(rateCur, ratePrev, 'up'), hint: periodText }),
+      metricCard({ label: 'Missed', value: missed, delta: pctChange(missed, 0), good: isGood(missed, 0, 'down'), hint: t('seeWhich') + ' ▾', onClick: () => { open = !open; drawDrill(); } }),
+    ]));
+    host.append(drillHost);
+  }
+
+  // ── shared incident helpers ─────────────────────────────────
+  async function seriousConsequenceIds() {
+    const { data: cats } = await db.from('incident_categories').select('id,name').eq('kind', 'consequence');
+    const names = ['Death', 'Injury or sick leave', 'Environmental impact'];
+    return (cats || []).filter(c => names.includes(c.name)).map(c => c.id);
+  }
+  async function seriousCount(bounds, seriousIds) {
+    if (!seriousIds.length) return 0;
+    const { data = [] } = await db.from('incidents').select('consequence_ids').gte('created_at', bounds.start).lt('created_at', bounds.end);
+    return data.filter(r => (r.consequence_ids || []).some(id => seriousIds.includes(id))).length;
+  }
+  async function resolveTimes(bounds) {
+    const { data = [] } = await db.from('incidents').select('created_at,resolved_at')
+      .eq('status', 'resolved').gte('resolved_at', bounds.start).lt('resolved_at', bounds.end);
+    return data;
+  }
+
+  async function countRows(query) {
+    const { count, error } = await query;
+    return error ? null : (count || 0);
+  }
+
+  async function saveSortOrder(table, rows) {
+    for (const [idx, row] of rows.entries()) {
+      const { error } = await db.from(table).update({ sort_order: (idx + 1) * 10 }).eq('id', row.id);
+      if (error) {
+        toast(error.message + ' - run migration_reorderable_content.sql if this list cannot save order.', 'err');
+        return false;
+      }
+    }
+    return true;
+  }
+
+  function renderSortableHomeTiles(host, cards, storageKey, onPersist = null) {
+    const saved = JSON.parse(localStorage.getItem(storageKey) || '[]');
+    const rank = new Map(saved.map((id, idx) => [id, idx]));
+    cards.sort((a, b) => (rank.get(a.id) ?? 999) - (rank.get(b.id) ?? 999));
+    let dragIdx = null;
+    let didDrag = false;
+    const draw = () => {
+      host.innerHTML = '';
+      cards.forEach((card, idx) => {
+        const handle = el('span', { class: 'drag-handle tile-drag', draggable: 'true', title: t('dragReorder') }, '⠿');
+        const tile = el('button', { class: 'tile', onclick: () => {
+          if (didDrag) { didDrag = false; return; }
+          card.open();
+        } }, [
+          handle,
+          el('span', { class: 'glyph' }, card.glyph),
+          el('div', {}, [
+            el('div', { class: 't-name' }, card.name),
+            el('div', { class: 't-meta' }, card.meta),
+          ]),
+        ]);
+        if (card.badge) tile.append(el('span', { class: 'badge reports-badge' }));
+        handle.addEventListener('click', e => e.stopPropagation());
+        handle.addEventListener('dragstart', e => {
+          dragIdx = idx;
+          didDrag = true;
+          e.dataTransfer.effectAllowed = 'move';
+          e.dataTransfer.setData('text/plain', card.id);
+          tile.classList.add('dragging');
+        });
+        handle.addEventListener('dragend', () => { dragIdx = null; tile.classList.remove('dragging'); });
+        tile.addEventListener('dragover', e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; });
+        tile.addEventListener('drop', async e => {
+          e.preventDefault();
+          if (dragIdx === null || dragIdx === idx) return;
+          const [moved] = cards.splice(dragIdx, 1);
+          cards.splice(idx, 0, moved);
+          localStorage.setItem(storageKey, JSON.stringify(cards.map(c => c.id)));
+          dragIdx = null;
+          draw();
+          if (onPersist) await onPersist(cards);
+        });
+        host.append(tile);
+      });
+    };
+    draw();
+  }
+
+  function todayBounds() {
+    const start = new Date();
+    start.setHours(0, 0, 0, 0);
+    const end = new Date(start);
+    end.setDate(end.getDate() + 1);
+    return { start: start.toISOString(), end: end.toISOString() };
+  }
+
+  function localDateString(date = new Date()) {
+    const yyyy = date.getFullYear();
+    const mm = String(date.getMonth() + 1).padStart(2, '0');
+    const dd = String(date.getDate()).padStart(2, '0');
+    return `${yyyy}-${mm}-${dd}`;
+  }
+
+  function kpiPeriod(storageKey) {
+    const today = localDateString();
+    try {
+      const saved = JSON.parse(localStorage.getItem(storageKey) || 'null');
+      if (saved?.from && saved?.until) return saved;
+    } catch (err) {}
+    return { from: today, until: today };
+  }
+
+  function periodBounds(period) {
+    const start = new Date(`${period.from}T00:00:00`);
+    const end = new Date(`${period.until}T00:00:00`);
+    end.setDate(end.getDate() + 1);
+    return { start: start.toISOString(), end: end.toISOString() };
+  }
+
+  function periodLabel(period) {
+    return period.from === period.until ? period.from : `${period.from} - ${period.until}`;
+  }
+
+  function saveKpiPeriod(storageKey, from, until, refreshHome) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(from || '') || !/^\d{4}-\d{2}-\d{2}$/.test(until || '')) {
+      toast(t('invalidPeriod'), 'err');
+      return;
+    }
+    const ordered = from <= until ? { from, until } : { from: until, until: from };
+    localStorage.setItem(storageKey, JSON.stringify(ordered));
+    refreshHome();
+  }
+
+  function changeKpiPeriod(storageKey) {
+    const current = kpiPeriod(storageKey);
+    const raw = prompt(`${t('dashboardPeriod')}\n${t('periodPrompt')}`, `${current.from}..${current.until}`);
+    if (!raw) return;
+    const normalized = raw.trim().replace(/\s+to\s+/i, '..').replace(/\s*,\s*/g, '..');
+    const parts = (normalized.includes('..') ? normalized.split('..') : normalized.split(/\s+/)).map(p => p.trim()).filter(Boolean);
+    const from = parts[0];
+    const until = parts[1] || parts[0];
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(from || '') || !/^\d{4}-\d{2}-\d{2}$/.test(until || '')) {
+      toast(t('invalidPeriod'), 'err');
+      return;
+    }
+    const ordered = from <= until ? { from, until } : { from: until, until: from };
+    localStorage.setItem(storageKey, JSON.stringify(ordered));
+    go(homeView(), { reset: true });
+  }
 
   // Inclusive date-range test against an ISO timestamp; bounds are YYYY-MM-DD strings.
   function inDateRange(iso, fromStr, untilStr) {
@@ -464,9 +870,14 @@
             const checklist = byChecklist.get(run.checklist_id);
             const items = checklist?.items || [];
             const missing = items.filter(i => !run.checked?.[i.id]?.done);
+            const issues = items.filter(i => run.checked?.[i.id]?.needs_fix);
             const hasNotes = !!(run.notes || '').trim();
-            const needsReview = missing.length > 0 || hasNotes;
-            const card = el('div', { class: 'card log-card' + (needsReview ? ' log-warning' : '') }, [
+            const needsReview = missing.length > 0 || issues.length > 0 || hasNotes;
+            const card = el('div', {
+              class: 'card log-card' + (needsReview ? ' log-warning' : ''),
+              style: 'cursor:pointer',
+              onclick: () => go(checklistLogDetailView(run, checklist)),
+            }, [
               el('div', { class: 'section-head' }, [
                 el('div', {}, [
                   el('h3', {}, checklist?.title || t('checklist')),
@@ -476,12 +887,15 @@
                   el('span', { class: 'pill', style: needsReview ? 'background:#f2c94c;color:#17212b;border-color:#f2c94c' : '' },
                     needsReview ? t('checklistLogNeedsAttention') : t('completed')),
                   isSuper ? el('button', { class: 'btn btn-danger', title: t('deleteLog'),
-                    onclick: () => deleteChecklistLog(run) }, '🗑') : null,
+                    onclick: e => { e.stopPropagation(); deleteChecklistLog(run); } }, '🗑') : null,
                 ]),
               ]),
-              el('div', { class: 'sub' }, missing.length ? t('missingItems', { count: missing.length }) : t('completed')),
+              el('div', { class: 'sub' }, missing.length || issues.length
+                ? [missing.length ? t('missingItems', { count: missing.length }) : '', issues.length ? t('needsActionCount', { count: issues.length }) : ''].filter(Boolean).join(' - ')
+                : t('completed')),
             ]);
             if (missing.length) card.append(el('ul', { class: 'log-missing' }, missing.map(i => el('li', {}, i.label))));
+            if (issues.length) card.append(el('ul', { class: 'log-missing' }, issues.map(i => el('li', {}, `${i.label}: ${t('outsideExpected')}`))));
             if (hasNotes) card.append(el('div', { class: 'log-notes' }, [
               el('strong', {}, `${t('notes')}: `),
               document.createTextNode(run.notes.trim()),
@@ -501,6 +915,92 @@
         }
       },
     };
+  }
+
+  function checklistLogDetailView(run, checklist) {
+    return {
+      title: checklist?.title || t('checklist'), tab: 'groups',
+      render(app) {
+        const items = checklist?.items || [];
+        const answers = run.checked || {};
+        app.append(el('div', { class: 'card' }, [
+          el('div', { class: 'section-head' }, [
+            el('h3', {}, t('submittedAnswers')),
+            el('button', { class: 'btn btn-ghost print-hide', onclick: () => window.print() }, t('printInspectionReport')),
+          ]),
+          el('div', { class: 'sub' }, `${nameOf(run.user_id)} - ${fmt(run.submitted_at || run.updated_at)}`),
+          run.completed ? el('span', { class: 'pill', style: 'margin-top:10px' }, t('completed'))
+            : el('span', { class: 'pill', style: 'margin-top:10px;background:#f2c94c;color:#17212b;border-color:#f2c94c' }, t('checklistLogNeedsAttention')),
+        ]));
+        if (!items.length) {
+          app.append(emptyState(t('noChecklists'), t('noChecklistLogs')));
+          return;
+        }
+        for (const item of items) {
+          const answer = answers[item.id] || {};
+          const complete = !!answer.done;
+          const needsFix = !!answer.needs_fix;
+          const type = item.type || 'check';
+          const statusClass = !complete ? 'inspection-missing' : needsFix ? 'inspection-bad' : 'inspection-ok';
+          const card = el('div', { class: `card checklist-answer-card inspection-row ${statusClass}` }, [
+            el('div', { class: 'section-head' }, [
+              el('h3', {}, item.label || t('checklist')),
+              el('span', { class: 'pill inspection-status-pill' },
+                !complete ? t('missing') : needsFix ? t('outsideExpected') : t('withinExpected')),
+            ]),
+            el('div', { class: 'sub' }, `${t('type')}: ${checklistItemTypeLabel(type)}`),
+            expectedText(item) ? el('div', { class: 'sub' }, `${t('expected')}: ${expectedText(item)}`) : null,
+            el('p', { class: 'checklist-answer-value' }, answerValueText(type, answer)),
+            answer.corrective_action ? el('div', { class: 'inspection-action' }, [
+              el('strong', {}, `${t('whatMustBeDone')}: `),
+              document.createTextNode(answer.corrective_action),
+            ]) : null,
+            el('div', { class: 'print-fixed-boxes' }, [
+              el('span', {}, t('fixed')),
+              el('label', {}, [el('input', { type: 'checkbox' }), ` ${t('yesLabel')}`]),
+              el('label', {}, [el('input', { type: 'checkbox' }), ` ${t('noLabel')}`]),
+            ]),
+          ]);
+          if (item.image) card.append(el('div', { class: 'sub' }, t('questionImage')),
+            el('img', { src: item.image, alt: item.label, class: 'checklist-item-image' }));
+          if (answer.photo) card.append(el('div', { class: 'sub' }, t('submittedPhoto')),
+            el('img', { src: answer.photo, alt: item.label, class: 'checklist-item-image' }));
+          app.append(card);
+        }
+        if ((run.notes || '').trim()) {
+          app.append(el('div', { class: 'card log-card log-warning' }, [
+            el('h3', {}, t('notes')),
+            el('p', {}, run.notes.trim()),
+          ]));
+        }
+      },
+    };
+  }
+
+  function checklistItemTypeLabel(type) {
+    return ({
+      check: t('checklistTypeCheck'),
+      choice: t('checklistTypeChoice'),
+      number: t('selectTypeNumber'),
+      text: t('checklistTypeText'),
+    })[type] || type || t('checklistTypeCheck');
+  }
+
+  function answerValueText(type, answer) {
+    if (type === 'check') return answer.value || answer.done ? t('completed') : '-';
+    const value = answer.value;
+    return value == null || value === '' ? '-' : String(value);
+  }
+
+  function expectedText(item) {
+    const rule = item.expected || null;
+    if (!rule && !item.fixOnNo) return '';
+    const parts = [];
+    if (Array.isArray(rule?.values) && rule.values.length) parts.push(rule.values.join(', '));
+    if (rule?.min != null) parts.push(`${t('expectedMin')}: ${rule.min}`);
+    if (rule?.max != null) parts.push(`${t('expectedMax')}: ${rule.max}`);
+    if (item.fixOnNo) parts.push(t('fixOnNo'));
+    return parts.join(' - ');
   }
 
   function addGroupModal() {
@@ -530,6 +1030,15 @@
   }
   const opt = (v, t) => el('option', { value: v }, t);
 
+  function fileToDataUrl(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(file);
+    });
+  }
+
   // ════════════════════════════════════════════════════════
   //  GROUP — routes by kind
   // ════════════════════════════════════════════════════════
@@ -541,20 +1050,55 @@
   }
 
   // ─── CHECKLISTS ─────────────────────────────────────────
+  const CHECKLIST_ITEM_TYPES = [
+    ['check', 'checklistTypeCheck'],
+    ['choice', 'checklistTypeChoice'],
+    ['number', 'selectTypeNumber'],
+    ['text', 'checklistTypeText'],
+  ];
   function checklistGroupView(g) {
     return {
       title: groupName(g), tab: 'groups',
       action: el('button', { class: 'iconbtn', title: t('newChecklist'), onclick: () => go(checklistEdit(g, null)) }, '+'),
       async render(app) {
-        const { data } = await db.from('checklists').select('*').eq('group_id', g.id).order('created_at');
+        let q = await db.from('checklists').select('*').eq('group_id', g.id).order('sort_order').order('created_at');
+        if (q.error) q = await db.from('checklists').select('*').eq('group_id', g.id).order('created_at');
+        const data = q.data || [];
         if (!data?.length) return app.append(emptyState('No checklists yet', 'Tap + to build one.'));
-        for (const c of data) {
-          app.append(el('div', { class: 'row' }, [
-            el('div', { class: 'grow' }, [el('div', {}, c.title),
-              el('div', { class: 'sub' }, `${(c.items || []).length} items`)]),
-            el('button', { class: 'btn btn-ghost', onclick: () => go(checklistEdit(g, c)) }, 'Edit'),
-          ]));
-        }
+        let rows = data.slice();
+        let dragIdx = null;
+        const list = el('div', {});
+        const draw = () => {
+          list.innerHTML = '';
+          rows.forEach((c, idx) => {
+            const handle = el('span', { class: 'drag-handle', draggable: 'true', title: t('dragReorder') }, '⠿');
+            const row = el('div', { class: 'row' }, [
+              handle,
+              el('div', { class: 'grow' }, [el('div', {}, c.title),
+                el('div', { class: 'sub' }, `${(c.items || []).length} items`)]),
+              el('button', { class: 'btn btn-ghost', onclick: () => go(checklistEdit(g, c)) }, 'Edit'),
+            ]);
+            handle.addEventListener('dragstart', e => {
+              dragIdx = idx;
+              e.dataTransfer.effectAllowed = 'move';
+              row.classList.add('dragging');
+            });
+            handle.addEventListener('dragend', () => { dragIdx = null; row.classList.remove('dragging'); });
+            row.addEventListener('dragover', e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; });
+            row.addEventListener('drop', async e => {
+              e.preventDefault();
+              if (dragIdx === null || dragIdx === idx) return;
+              const [moved] = rows.splice(dragIdx, 1);
+              rows.splice(idx, 0, moved);
+              dragIdx = null;
+              draw();
+              await saveSortOrder('checklists', rows);
+            });
+            list.append(row);
+          });
+        };
+        draw();
+        app.append(list);
       },
     };
   }
@@ -565,29 +1109,96 @@
       render(app) {
         const title = el('input', { type: 'text', value: existing?.title || '', placeholder: 'Checklist title' });
         let items = (existing?.items || []).map(i => ({ ...i }));
+        const quota = el('input', { type: 'number', min: '0', step: '1',
+          value: existing?.daily_quota ?? 0, placeholder: '0' });
+
+        const WEEKDAYS = [['1','Mon'],['2','Tue'],['3','Wed'],['4','Thu'],['5','Fri'],['6','Sat'],['0','Sun']];
+        const quotaDays = new Set((existing?.quota_weekdays ?? [0,1,2,3,4,5,6]).map(Number));
+        const dayRow = el('div', { class: 'weekday-row' }, WEEKDAYS.map(([v, lbl]) => {
+          const n = Number(v);
+          const b = el('button', { type: 'button', class: 'btn btn-ghost weekday-btn', onclick: () => {
+            quotaDays.has(n) ? quotaDays.delete(n) : quotaDays.add(n);
+            b.classList.toggle('active');
+          } }, lbl);
+          if (quotaDays.has(n)) b.classList.add('active');
+          return b;
+        }));
         let dragIdx = null;
         const list = el('div', {});
         const draw = () => {
           list.innerHTML = '';
           items.forEach((it, idx) => {
+            if (!it.type) it.type = 'check';
+            if (!it.options) it.options = [];
+            if (it.fixOnNo == null && it.type === 'choice' && hasNoOption(it.options)) it.fixOnNo = true;
             const inp = el('input', { type: 'text', value: it.label, placeholder: `Item ${idx + 1}`,
               oninput: e => it.label = e.target.value });
+            const typeSel = el('select', { onchange: e => { it.type = e.target.value; draw(); } },
+              CHECKLIST_ITEM_TYPES.map(([v, key]) => opt(v, t(key))));
+            typeSel.value = it.type;
             const handle = el('span', { class: 'drag-handle', draggable: 'true', title: t('dragReorder') }, '⠿');
-            const row = el('div', { class: 'row' }, [
-              handle,
-              el('div', { class: 'grow' }, inp),
-              el('button', { class: 'btn btn-danger', onclick: () => { items.splice(idx, 1); draw(); } }, '✕'),
+            const imageInput = el('input', { type: 'file', accept: 'image/*', onchange: async e => {
+              const file = e.target.files?.[0];
+              if (!file) return;
+              it.image = await fileToDataUrl(file);
+              draw();
+            } });
+            const card = el('div', { class: 'card checklist-builder-card' }, [
+              el('div', { class: 'section-head' }, [
+                el('div', { style: 'display:flex;align-items:center;gap:8px;min-width:0' }, [
+                  handle, el('strong', {}, `${t('checklist')} ${idx + 1}`),
+                ]),
+                el('button', { class: 'btn btn-danger', onclick: () => { items.splice(idx, 1); draw(); } }, '×'),
+              ]),
+              labeled(t('label'), inp),
+              labeled(t('type'), typeSel),
+              labeled(t('itemImage'), imageInput),
             ]);
+            if (it.image) {
+              card.append(el('div', { class: 'checklist-image-preview' }, [
+                el('img', { src: it.image, alt: it.label || t('itemImage'), class: 'incident-photo' }),
+                el('button', { class: 'btn btn-danger', onclick: () => { delete it.image; draw(); } }, t('removeImage')),
+              ]));
+            }
+            if (it.type === 'choice') {
+              const optsInp = el('input', { type: 'text', value: (it.options || []).join(', '),
+                placeholder: 'Option A, Option B, Option C',
+                oninput: e => it.options = e.target.value.split(',').map(s => s.trim()).filter(Boolean) });
+              card.append(labeled(t('optionsComma'), optsInp));
+              const expectedInp = el('input', { type: 'text', value: (it.expectedValues || it.expected?.values || []).join(', '),
+                placeholder: 'Yes, OK, Passed',
+                oninput: e => it.expectedValues = e.target.value.split(',').map(s => s.trim()).filter(Boolean) });
+              const fixOnNo = el('input', { type: 'checkbox', onchange: e => it.fixOnNo = e.target.checked });
+              fixOnNo.checked = !!it.fixOnNo;
+              card.append(
+                labeled(t('expectedValues'), expectedInp),
+                labeled(t('fixOnNo'), fixOnNo),
+              );
+            } else if (it.type === 'number') {
+              const minInp = el('input', { type: 'number', value: it.expectedMin ?? it.expected?.min ?? '',
+                oninput: e => it.expectedMin = e.target.value });
+              const maxInp = el('input', { type: 'number', value: it.expectedMax ?? it.expected?.max ?? '',
+                oninput: e => it.expectedMax = e.target.value });
+              card.append(el('div', { class: 'expected-grid' }, [
+                labeled(t('expectedMin'), minInp),
+                labeled(t('expectedMax'), maxInp),
+              ]));
+            } else if (it.type === 'text') {
+              const expectedInp = el('input', { type: 'text', value: (it.expectedValues || it.expected?.values || []).join(', '),
+                placeholder: 'OK, Clean, Complete',
+                oninput: e => it.expectedValues = e.target.value.split(',').map(s => s.trim()).filter(Boolean) });
+              card.append(labeled(t('expectedValues'), expectedInp));
+            }
             handle.addEventListener('dragstart', e => {
               dragIdx = idx;
               e.dataTransfer.effectAllowed = 'move';
               e.dataTransfer.setData('text/plain', String(idx));
-              try { e.dataTransfer.setDragImage(row, 20, 20); } catch (_) {}
-              row.classList.add('dragging');
+              try { e.dataTransfer.setDragImage(card, 20, 20); } catch (_) {}
+              card.classList.add('dragging');
             });
-            handle.addEventListener('dragend', () => { row.classList.remove('dragging'); dragIdx = null; });
-            row.addEventListener('dragover', e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; });
-            row.addEventListener('drop', e => {
+            handle.addEventListener('dragend', () => { card.classList.remove('dragging'); dragIdx = null; });
+            card.addEventListener('dragover', e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; });
+            card.addEventListener('drop', e => {
               e.preventDefault();
               if (dragIdx === null || dragIdx === idx) return;
               const [moved] = items.splice(dragIdx, 1);
@@ -595,21 +1206,38 @@
               dragIdx = null;
               draw();
             });
-            list.append(row);
+            list.append(card);
           });
         };
         draw();
         app.append(
-          labeled(t('title'), title, true), list,
+          labeled(t('title'), title, true),
+          labeled(t('dailyQuota'), quota),
+          labeled(t('quotaDays'), dayRow),
+          list,
           el('button', { class: 'btn btn-ghost btn-block', style: 'margin-bottom:16px',
             onclick: () => { items.push({ id: crypto.randomUUID(), label: '' }); draw(); } }, t('addItem')),
           el('button', { class: 'btn btn-primary btn-block', onclick: save }, t('saveChecklist')),
           existing ? el('button', { class: 'btn btn-danger btn-block', style: 'margin-top:10px', onclick: del }, t('deleteChecklist')) : null,
         );
         async function save() {
-          const clean = items.filter(i => i.label.trim());
+          const clean = items.filter(i => i.label.trim()).map(i => ({
+            id: i.id || crypto.randomUUID(),
+            label: i.label.trim(),
+            type: i.type || 'check',
+            options: i.type === 'choice' ? (i.options || []).filter(Boolean) : [],
+            expected: expectedRule(i),
+            fixOnNo: i.type === 'choice' ? (i.fixOnNo ?? hasNoOption(i.options || [])) : false,
+            image: i.image || null,
+          }));
           if (!title.value.trim() || !clean.length) return toast('Add a title and at least one item.', 'err');
-          const payload = { group_id: g.id, title: title.value.trim(), items: clean };
+          const payload = {
+            group_id: g.id,
+            title: title.value.trim(),
+            items: clean,
+            daily_quota: Math.max(0, parseInt(quota.value, 10) || 0),
+            quota_weekdays: [...quotaDays].sort((a, b) => a - b),
+          };
           const q = existing ? db.from('checklists').update(payload).eq('id', existing.id)
                              : db.from('checklists').insert(payload);
           const { error } = await q;
@@ -623,6 +1251,26 @@
         }
       },
     };
+  }
+
+  function hasNoOption(options) {
+    return (options || []).some(o => ['no', 'nei'].includes(String(o).trim().toLowerCase()));
+  }
+
+  function expectedRule(item) {
+    if (item.type === 'number') {
+      const min = item.expectedMin ?? item.expected?.min;
+      const max = item.expectedMax ?? item.expected?.max;
+      const rule = {};
+      if (min !== '' && min != null && !Number.isNaN(Number(min))) rule.min = Number(min);
+      if (max !== '' && max != null && !Number.isNaN(Number(max))) rule.max = Number(max);
+      return Object.keys(rule).length ? rule : null;
+    }
+    if (['choice', 'text'].includes(item.type)) {
+      const values = (item.expectedValues || item.expected?.values || []).map(v => String(v).trim()).filter(Boolean);
+      return values.length ? { values } : null;
+    }
+    return null;
   }
 
   // ─── REPORTS / INCIDENTS ────────────────────────────────
@@ -950,15 +1598,42 @@
             el('button', { class: 'btn btn-ghost', onclick: () => add(kind) }, '+ ' + t('add')),
           ]);
           app.append(head);
-          for (const c of (data || []).filter(x => x.kind === kind)) {
-            app.append(el('div', { class: 'row' }, [
-              el('div', { class: 'grow' }, c.name),
-              el('button', { class: 'btn btn-danger', onclick: async () => {
-                if (!confirm(`Delete "${c.name}"?`)) return;
-                await db.from('incident_categories').delete().eq('id', c.id); refresh();
-              } }, '✕'),
-            ]));
-          }
+          const rows = (data || []).filter(x => x.kind === kind);
+          let dragIdx = null;
+          const list = el('div', {});
+          const draw = () => {
+            list.innerHTML = '';
+            rows.forEach((c, idx) => {
+              const handle = el('span', { class: 'drag-handle', draggable: 'true', title: t('dragReorder') }, '⠿');
+              const row = el('div', { class: 'row' }, [
+                handle,
+                el('div', { class: 'grow' }, c.name),
+                el('button', { class: 'btn btn-danger', onclick: async () => {
+                  if (!confirm(`Delete "${c.name}"?`)) return;
+                  await db.from('incident_categories').delete().eq('id', c.id); refresh();
+                } }, '×'),
+              ]);
+              handle.addEventListener('dragstart', e => {
+                dragIdx = idx;
+                e.dataTransfer.effectAllowed = 'move';
+                row.classList.add('dragging');
+              });
+              handle.addEventListener('dragend', () => { dragIdx = null; row.classList.remove('dragging'); });
+              row.addEventListener('dragover', e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; });
+              row.addEventListener('drop', async e => {
+                e.preventDefault();
+                if (dragIdx === null || dragIdx === idx) return;
+                const [moved] = rows.splice(dragIdx, 1);
+                rows.splice(idx, 0, moved);
+                dragIdx = null;
+                draw();
+                await saveSortOrder('incident_categories', rows);
+              });
+              list.append(row);
+            });
+          };
+          draw();
+          app.append(list);
         }
         async function add(kind) {
           const name = prompt(`New ${kind === 'root_cause' ? 'root cause' : 'consequence'} category:`);
@@ -986,16 +1661,42 @@
 
         async function loadDocs() {
           listHost.innerHTML = '';
-          const { data } = await db.from('documents').select('*').eq('group_id', g.id).order('created_at', { ascending: false });
-          if (!data?.length) { listHost.append(emptyState(t('noDocuments'), t('noDocumentsHint'))); return; }
-          for (const d of data) {
-            listHost.append(el('div', { class: 'row' }, [
-              el('div', { class: 'grow' }, [el('div', {}, d.name),
-                el('div', { class: 'sub' }, `${(d.size_bytes / 1024 | 0)} KB · ${fmt(d.created_at)}`)]),
-              el('button', { class: 'btn btn-ghost', onclick: () => openDoc(d) }, t('open')),
-              el('button', { class: 'btn btn-danger', onclick: () => removeDoc(d) }, '✕'),
-            ]));
-          }
+          let q = await db.from('documents').select('*').eq('group_id', g.id).order('sort_order').order('created_at', { ascending: false });
+          if (q.error) q = await db.from('documents').select('*').eq('group_id', g.id).order('created_at', { ascending: false });
+          let rows = q.data || [];
+          if (!rows.length) { listHost.append(emptyState(t('noDocuments'), t('noDocumentsHint'))); return; }
+          let dragIdx = null;
+          const draw = () => {
+            listHost.innerHTML = '';
+            rows.forEach((d, idx) => {
+              const handle = el('span', { class: 'drag-handle', draggable: 'true', title: t('dragReorder') }, '⠿');
+              const row = el('div', { class: 'row' }, [
+                handle,
+                el('div', { class: 'grow' }, [el('div', {}, d.name),
+                  el('div', { class: 'sub' }, `${(d.size_bytes / 1024 | 0)} KB - ${fmt(d.created_at)}`)]),
+                el('button', { class: 'btn btn-ghost', onclick: () => openDoc(d) }, t('open')),
+                el('button', { class: 'btn btn-danger', onclick: () => removeDoc(d) }, '×'),
+              ]);
+              handle.addEventListener('dragstart', e => {
+                dragIdx = idx;
+                e.dataTransfer.effectAllowed = 'move';
+                row.classList.add('dragging');
+              });
+              handle.addEventListener('dragend', () => { dragIdx = null; row.classList.remove('dragging'); });
+              row.addEventListener('dragover', e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; });
+              row.addEventListener('drop', async e => {
+                e.preventDefault();
+                if (dragIdx === null || dragIdx === idx) return;
+                const [moved] = rows.splice(dragIdx, 1);
+                rows.splice(idx, 0, moved);
+                dragIdx = null;
+                draw();
+                await saveSortOrder('documents', rows);
+              });
+              listHost.append(row);
+            });
+          };
+          draw();
         }
         async function upload() {
           const f = file.files[0];
@@ -1035,16 +1736,45 @@
       title: groupName(g), tab: 'groups',
       action: el('button', { class: 'iconbtn', title: t('newProcedure'), onclick: () => go(procedureBuild(g, null)) }, '+'),
       async render(app) {
-        const { data } = await db.from('procedures').select('*').eq('group_id', g.id).order('created_at');
+        let q = await db.from('procedures').select('*').eq('group_id', g.id).order('sort_order').order('created_at');
+        if (q.error) q = await db.from('procedures').select('*').eq('group_id', g.id).order('created_at');
+        const data = q.data || [];
         if (!data?.length) return app.append(emptyState(t('noProcedures'), t('noProceduresHint')));
-        for (const p of data) {
-          app.append(el('div', { class: 'row' }, [
-            el('div', { class: 'grow' }, [el('div', {}, p.title),
-              el('div', { class: 'sub' }, `${(p.fields || []).length} ${t('fields')} - ${p.is_draft ? t('draft') : t('published')}`)]),
-            el('button', { class: 'btn btn-ghost', onclick: () => go(submissionsView(p)) }, t('entries')),
-            el('button', { class: 'btn btn-ghost', onclick: () => go(procedureBuild(g, p)) }, t('edit')),
-          ]));
-        }
+        let rows = data.slice();
+        let dragIdx = null;
+        const list = el('div', {});
+        const draw = () => {
+          list.innerHTML = '';
+          rows.forEach((p, idx) => {
+            const handle = el('span', { class: 'drag-handle', draggable: 'true', title: t('dragReorder') }, '⠿');
+            const row = el('div', { class: 'row' }, [
+              handle,
+              el('div', { class: 'grow' }, [el('div', {}, p.title),
+                el('div', { class: 'sub' }, `${(p.fields || []).length} ${t('fields')} - ${p.is_draft ? t('draft') : t('published')}`)]),
+              el('button', { class: 'btn btn-ghost', onclick: () => go(submissionsView(p)) }, t('entries')),
+              el('button', { class: 'btn btn-ghost', onclick: () => go(procedureBuild(g, p)) }, t('edit')),
+            ]);
+            handle.addEventListener('dragstart', e => {
+              dragIdx = idx;
+              e.dataTransfer.effectAllowed = 'move';
+              row.classList.add('dragging');
+            });
+            handle.addEventListener('dragend', () => { dragIdx = null; row.classList.remove('dragging'); });
+            row.addEventListener('dragover', e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; });
+            row.addEventListener('drop', async e => {
+              e.preventDefault();
+              if (dragIdx === null || dragIdx === idx) return;
+              const [moved] = rows.splice(dragIdx, 1);
+              rows.splice(idx, 0, moved);
+              dragIdx = null;
+              draw();
+              await saveSortOrder('procedures', rows);
+            });
+            list.append(row);
+          });
+        };
+        draw();
+        app.append(list);
       },
     };
   }
