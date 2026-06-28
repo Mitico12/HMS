@@ -799,6 +799,15 @@
             el('button', { class: 'btn btn-ghost', onclick: () => importInput.click() }, t('importExcel')),
           ]),
         ]));
+        const reportTypeCounts = new Map();
+        archived.forEach(r => reportTypeCounts.set(r.report_type || 'incident', (reportTypeCounts.get(r.report_type || 'incident') || 0) + 1));
+        const topType = [...reportTypeCounts.entries()].sort((a, b) => b[1] - a[1])[0];
+        app.append(el('div', { class: 'kpi-grid', style: 'margin-bottom:14px' }, [
+          metricCard({ label: 'Archived reports', value: archived.length }),
+          metricCard({ label: 'Suggestions', value: archived.filter(r => (r.report_type || 'incident') === 'suggestion').length }),
+          metricCard({ label: 'Anonymous', value: archived.length ? Math.round(archived.filter(r => r.is_anonymous).length / archived.length * 100) + '%' : '0%' }),
+          metricCard({ label: 'Top type', value: topType ? typeLabel(topType[0]) : '—', hint: topType ? `${topType[1]} total` : '' }),
+        ]));
 
         const rFilters = { from: '', until: '', type: 'all', admin: 'all', user: 'all' };
         const rFrom = el('input', { type: 'date', onchange: e => { rFilters.from = e.target.value; drawReports(); } });
@@ -897,6 +906,19 @@
           app.append(emptyState(t('noChecklistLogs'), 'Run migration_incident_photos_checklist_logs.sql first.'));
           return;
         }
+        const reviewCount = runs.filter(run => {
+          const checklist = byChecklist.get(run.checklist_id);
+          const items = checklist?.items || [];
+          const missing = items.filter(i => !run.checked?.[i.id]?.done);
+          const issues = items.filter(i => run.checked?.[i.id]?.needs_fix);
+          return missing.length > 0 || issues.length > 0 || !!(run.notes || '').trim();
+        }).length;
+        app.append(el('div', { class: 'kpi-grid', style: 'margin-bottom:14px' }, [
+          metricCard({ label: 'Checklist logs', value: runs.length }),
+          metricCard({ label: t('checklistLogNeedsAttention'), value: reviewCount }),
+          metricCard({ label: 'Unique users', value: new Set(runs.map(r => r.user_id).filter(Boolean)).size }),
+          metricCard({ label: 'Checklist types', value: new Set(runs.map(r => r.checklist_id).filter(Boolean)).size }),
+        ]));
 
         const cFilters = { from: '', until: '', user: 'all', checklist: 'all' };
         const cFrom = el('input', { type: 'date', onchange: e => { cFilters.from = e.target.value; drawChecklists(); } });
@@ -998,6 +1020,13 @@
         const byCourse = new Map(courses.map(c => [c.id, c]));
 
         app.append(el('h2', { class: 'display', style: 'font-size:1.15rem;margin:0 0 10px' }, t('completedCourses')));
+        const avgScore = submissions.length ? Math.round(submissions.reduce((sum, s) => sum + (Number(s.score) || 0), 0) / submissions.length) : 0;
+        app.append(el('div', { class: 'kpi-grid', style: 'margin-bottom:14px' }, [
+          metricCard({ label: t('completedCourses'), value: submissions.length }),
+          metricCard({ label: 'Unique users', value: new Set(submissions.map(s => s.user_id).filter(Boolean)).size }),
+          metricCard({ label: t('courses'), value: courseIds.length }),
+          metricCard({ label: 'Average score', value: submissions.length ? `${avgScore}%` : '—' }),
+        ]));
         const filters = { from: '', until: '', user: 'all', course: 'all' };
         const from = el('input', { type: 'date', onchange: e => { filters.from = e.target.value; drawCourses(); } });
         const until = el('input', { type: 'date', onchange: e => { filters.until = e.target.value; drawCourses(); } });
@@ -2565,6 +2594,7 @@
         const pending = await loadProfileChangeRequests(id, true);
         const allRequests = await loadProfileChangeRequests(id, false);
         const logs = await loadEmailLog(id);
+        const courseStatus = await loadUserCourseStatus(id);
 
         app.append(el('div', { class: 'card' }, [
           el('div', { class: 'section-head' }, [el('h3', {}, labelOf(p)), ...accessControls(p)]),
@@ -2576,6 +2606,8 @@
             kv('Access', `${roleName(p.role)}${p.role === 'user' ? (p.is_verified ? ' · approved' : ' · awaiting approval') : ''}`),
           ]),
         ]));
+
+        app.append(userCoursesCard(p, courseStatus));
 
         app.append(el('div', { class: 'card' }, [
           el('h3', {}, 'Pending profile changes'),
@@ -2599,6 +2631,82 @@
         ]));
       },
     };
+  }
+
+  async function loadUserCourseStatus(userId) {
+    const { data: courses = [] } = await db.from('courses').select('*').order('title');
+    const { data: submissions = [] } = await db.from('course_submissions')
+      .select('*').eq('user_id', userId).order('created_at', { ascending: false });
+    let assignments = [];
+    const assignQ = await db.from('course_assignments').select('*').eq('user_id', userId).order('assigned_at', { ascending: false });
+    if (!assignQ.error) assignments = assignQ.data || [];
+    return { courses: courses || [], submissions: submissions || [], assignments };
+  }
+
+  function latestSubmissionByCourse(submissions) {
+    const map = new Map();
+    submissions.forEach(s => { if (!map.has(s.course_id)) map.set(s.course_id, s); });
+    return map;
+  }
+
+  function userCoursesCard(user, status) {
+    const { courses, submissions, assignments } = status;
+    const latest = latestSubmissionByCourse(submissions);
+    const assignedIds = new Set(assignments.map(a => a.course_id));
+    const completed = submissions.filter(s => s.passed);
+    const unassigned = courses.filter(c => !assignedIds.has(c.id));
+    const select = el('select', {}, [
+      opt('', courses.length ? 'Choose course' : 'No courses available'),
+      ...unassigned.map(c => opt(c.id, c.title)),
+    ]);
+    const rows = courses.map(c => {
+      const sub = latest.get(c.id);
+      const assigned = assignments.find(a => a.course_id === c.id);
+      return el('div', { class: 'row' }, [
+        el('div', { class: 'grow' }, [
+          el('div', {}, c.title),
+          el('div', { class: 'sub' }, [
+            assigned ? `Assigned ${fmt(assigned.assigned_at)}` : 'Not assigned',
+            sub ? `Latest: ${sub.score}% ${sub.passed ? 'passed' : 'failed'} · ${fmt(sub.created_at)}` : 'No attempts',
+          ].join(' - ')),
+        ]),
+        sub?.passed ? el('span', { class: 'pill', style: 'background:#2f9e5b;color:#fff;border-color:#2f9e5b' }, 'Completed') : null,
+        assigned ? el('button', { class: 'btn btn-ghost', onclick: () => unassignCourse(user.id, assigned.id) }, 'Unassign') : null,
+      ]);
+    });
+    return el('div', { class: 'card' }, [
+      el('div', { class: 'section-head' }, [
+        el('h3', {}, 'Courses'),
+        el('span', { class: 'muted' }, `${completed.length} completed`),
+      ]),
+      el('div', { class: 'kpi-grid', style: 'margin-bottom:12px' }, [
+        metricCard({ label: 'Assigned', value: assignments.length }),
+        metricCard({ label: t('completedCourses'), value: new Set(completed.map(s => s.course_id)).size }),
+        metricCard({ label: 'Attempts', value: submissions.length }),
+        metricCard({ label: t('courses'), value: courses.length }),
+      ]),
+      el('div', { style: 'display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px' }, [
+        el('div', { style: 'flex:1;min-width:180px' }, labeled('Assign course', select)),
+        el('button', { class: 'btn btn-primary', onclick: () => assignCourse(user.id, select.value) }, 'Assign'),
+      ]),
+      rows.length ? el('div', {}, rows) : el('p', { class: 'muted' }, 'No courses found.'),
+    ]);
+  }
+
+  async function assignCourse(userId, courseId) {
+    if (!courseId) return toast('Choose a course first.', 'err');
+    const { error } = await db.from('course_assignments').insert({ user_id: userId, course_id: courseId, assigned_by: state.profile.id });
+    if (error) return toast(error.message + ' - run migration_course_assignments.sql first.', 'err');
+    toast('Course assigned.');
+    refresh();
+  }
+
+  async function unassignCourse(userId, assignmentId) {
+    if (!confirm('Remove this course assignment?')) return;
+    const { error } = await db.from('course_assignments').delete().eq('id', assignmentId);
+    if (error) return toast(error.message, 'err');
+    toast('Assignment removed.');
+    refresh();
   }
 
   function kv(k, v) {
