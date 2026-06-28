@@ -46,10 +46,29 @@ create index if not exists course_submissions_lookup
   on course_submissions (course_id, user_id, created_at desc);
 
 -- ------------------------------------------------------------
+--  COURSE ASSIGNMENTS  (optional admin-to-user assignment)
+-- ------------------------------------------------------------
+create table if not exists course_assignments (
+  id          uuid primary key default gen_random_uuid(),
+  course_id   uuid not null references courses (id) on delete cascade,
+  user_id     uuid not null references profiles (id) on delete cascade,
+  assigned_by uuid references profiles (id),
+  assigned_at timestamptz not null default now(),
+  due_at      timestamptz,
+  status      text not null default 'assigned',
+  unique (course_id, user_id)
+);
+create index if not exists course_assignments_user_idx
+  on course_assignments (user_id, assigned_at desc);
+create index if not exists course_assignments_course_idx
+  on course_assignments (course_id, assigned_at desc);
+
+-- ------------------------------------------------------------
 --  ROW LEVEL SECURITY
 -- ------------------------------------------------------------
 alter table courses            enable row level security;
 alter table course_submissions enable row level security;
+alter table course_assignments enable row level security;
 
 -- courses: any signed-in user can read (the UI hides drafts); admins write
 drop policy if exists courses_read on courses;
@@ -63,6 +82,12 @@ create policy csub_own on course_submissions for all
   using (user_id = auth.uid()) with check (user_id = auth.uid());
 drop policy if exists csub_admin_read on course_submissions;
 create policy csub_admin_read on course_submissions for select using (is_admin());
+
+-- assignments: users read their own; admins manage all
+drop policy if exists course_assignments_own_read on course_assignments;
+create policy course_assignments_own_read on course_assignments for select using (user_id = auth.uid());
+drop policy if exists course_assignments_admin_all on course_assignments;
+create policy course_assignments_admin_all on course_assignments for all using (is_admin()) with check (is_admin());
 
 -- ------------------------------------------------------------
 --  Optional: create the Courses group now, or add it from the

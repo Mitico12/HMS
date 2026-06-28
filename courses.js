@@ -57,7 +57,11 @@ function ensureStyles() {
     .c-badge { font-size: .74rem; font-weight: 700; padding: 3px 9px; border-radius: 20px; white-space: nowrap; }
     .c-badge.pass { background: color-mix(in srgb, #2f9e5b 16%, transparent); color: #2f9e5b; }
     .c-badge.todo { background: var(--line, #eee); color: var(--steel, #6b7780); }
-    .c-badge.draft { background: color-mix(in srgb, #BA7517 16%, transparent); color: #BA7517; }`;
+    .c-badge.draft { background: color-mix(in srgb, #BA7517 16%, transparent); color: #BA7517; }
+    .course-insights { display: grid; gap: 10px; margin-bottom: 14px; }
+    .wrong-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+    .wrong-tag { font-size: .74rem; font-weight: 700; padding: 3px 9px; border-radius: 20px; background: color-mix(in srgb, #d43c32 12%, transparent); color: #d43c32; }
+    .course-stat { padding: 12px; border: 1px solid var(--line, rgba(26,47,54,.12)); border-radius: 14px; background: var(--paper, #fffaf0); }`;
   document.head.append(el('style', {}, css));
 }
 
@@ -101,6 +105,14 @@ function renderContent(text) {
   const blocks = String(text || '').split(/\n{2,}|\r\n{2,}/).map(s => s.trim()).filter(Boolean);
   if (!blocks.length) return el('p', { class: 'c-meta' }, 'No reading material.');
   return el('div', { class: 'course-content' }, blocks.map(b => el('p', {}, b)));
+}
+
+function answerLabel(ans) {
+  if (ans === true) return 'Checked';
+  if (ans === false) return 'Unchecked';
+  if (Array.isArray(ans)) return ans.length ? ans.join(', ') : 'Blank';
+  if (ans == null || ans === '') return 'Blank';
+  return String(ans);
 }
 
 /* ============================================================
@@ -319,13 +331,40 @@ export function courseResults(course, ctx) {
     title: course.title, tab: 'groups',
     async render(app) {
       const { data: subs = [], error } = await db.from('course_submissions')
-        .select('user_id,score,passed,created_at').eq('course_id', course.id).order('created_at', { ascending: false });
+        .select('user_id,score,passed,answers,created_at').eq('course_id', course.id).order('created_at', { ascending: false });
       if (error) return app.append(el('p', { class: 'c-meta' }, error.message));
       if (!subs.length) return app.append(el('p', { class: 'c-meta' }, 'No attempts yet.'));
       const nameOf = id => {
         const p = (ctx.state.profiles || []).find(x => x.id === id);
         return p?.full_name || p?.email || 'Unknown';
       };
+      const qs = course.questions || [];
+      const passCount = subs.filter(s => s.passed).length;
+      const avgScore = Math.round(subs.reduce((sum, s) => sum + (Number(s.score) || 0), 0) / subs.length);
+      const stats = qs.map(q => {
+        const wrong = subs.filter(s => !isCorrect(q, (s.answers || {})[q.id]));
+        const tags = new Map();
+        wrong.forEach(s => {
+          const label = answerLabel((s.answers || {})[q.id]);
+          tags.set(label, (tags.get(label) || 0) + 1);
+        });
+        return { q, wrong, tags: [...tags.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5) };
+      }).sort((a, b) => b.wrong.length - a.wrong.length);
+      app.append(el('div', { class: 'course-insights' }, [
+        el('div', { class: 'course-row' }, [
+          el('div', {}, [
+            el('div', { class: 'c-title' }, 'Course summary'),
+            el('div', { class: 'c-meta' }, `${subs.length} attempt${subs.length === 1 ? '' : 's'} · ${passCount} passed · average ${avgScore}%`),
+          ]),
+          el('span', { class: 'c-badge ' + (passCount ? 'pass' : 'todo') }, `${Math.round(passCount / subs.length * 100)}% pass`),
+        ]),
+        ...stats.filter(s => s.wrong.length).slice(0, 5).map(s => el('div', { class: 'course-stat' }, [
+          el('div', { class: 'c-title' }, s.q.prompt),
+          el('div', { class: 'c-meta' }, `${s.wrong.length} wrong of ${subs.length} attempts`),
+          el('div', { class: 'wrong-tags' }, s.tags.map(([label, count]) =>
+            el('span', { class: 'wrong-tag' }, `${label}: ${count}`))),
+        ])),
+      ]));
       subs.forEach(s => {
         app.append(el('div', { class: 'course-row' }, [
           el('div', {}, [
@@ -359,16 +398,26 @@ export function courseListView(g, ctx) {
       const { data: subs = [] } = await db.from('course_submissions')
         .select('course_id,passed').eq('user_id', ctx.state.profile.id).in('course_id', ids);
       const passedIds = new Set(subs.filter(s => s.passed).map(s => s.course_id));
+      let assignedIds = new Set();
+      if (ids.length) {
+        const assignQ = await db.from('course_assignments')
+          .select('course_id').eq('user_id', ctx.state.profile.id).in('course_id', ids);
+        if (!assignQ.error) assignedIds = new Set((assignQ.data || []).map(a => a.course_id));
+      }
 
       rows.forEach(c => {
         const done = passedIds.has(c.id);
+        const assigned = assignedIds.has(c.id);
         const qn = (c.questions || []).length;
         app.append(el('div', { class: 'course-row', style: 'cursor:pointer', onclick: () => ctx.go(courseTake(c, ctx)) }, [
           el('div', { style: 'min-width:0' }, [
             el('div', { class: 'c-title' }, c.title),
-            el('div', { class: 'c-meta' }, `${qn} question${qn === 1 ? '' : 's'}`),
+            el('div', { class: 'c-meta' }, `${qn} question${qn === 1 ? '' : 's'}${assigned ? ' · assigned' : ''}`),
           ]),
-          el('span', { class: 'c-badge ' + (done ? 'pass' : 'todo') }, done ? 'Passed ✓' : 'Start'),
+          el('div', { style: 'display:flex;gap:8px;align-items:center' }, [
+            assigned && !done ? el('span', { class: 'c-badge draft' }, 'Assigned') : null,
+            el('span', { class: 'c-badge ' + (done ? 'pass' : 'todo') }, done ? 'Passed ✓' : 'Start'),
+          ]),
         ]));
       });
     },
