@@ -285,7 +285,7 @@
         const grid = el('div', { class: 'tile-grid' });
         const cards = [
           { id: 'fixed:users', glyph: '👥', name: t('users'), meta: pending ? `${pending} ${t('waitingApproval').toLowerCase()}` : t('accountsAccess'), open: () => go(usersView()) },
-          { id: 'fixed:logs', glyph: '☑', name: t('logs'), meta: t('checklistLogsMeta'), open: () => go(logsView()) },
+          { id: 'fixed:logs', glyph: '☑', name: t('logs'), meta: t('logsMeta'), open: () => go(logsView()) },
           ...state.groups.map(g => ({
             id: `group:${g.id}`,
             group: g,
@@ -742,32 +742,53 @@
     return {
       title: t('logs'), tab: 'groups',
       async render(app) {
+        const grid = el('div', { class: 'tile-grid' });
+        renderLogTiles(grid, [
+          { glyph: 'R', name: t('reports'), meta: t('reportLogsMeta'), open: () => go(reportLogsView()) },
+          { glyph: 'CL', name: t('checklistLogs'), meta: t('checklistLogsMeta'), open: () => go(checklistLogsView()) },
+          { glyph: 'CR', name: t('completedCourses'), meta: t('completedCoursesMeta'), open: () => go(completedCourseLogsView()) },
+        ]);
+        app.append(grid);
+      },
+    };
+  }
+
+  function renderLogTiles(host, cards) {
+    host.innerHTML = '';
+    cards.forEach(card => {
+      host.append(el('button', { class: 'tile', onclick: card.open }, [
+        el('span', { class: 'glyph' }, card.glyph),
+        el('div', {}, [
+          el('div', { class: 't-name' }, card.name),
+          el('div', { class: 't-meta' }, card.meta),
+        ]),
+      ]));
+    });
+  }
+
+  function reportLogsView() {
+    return {
+      title: t('archivedReports'), tab: 'groups',
+      async render(app) {
         await loadProfiles();
         const isSuper = state.profile.role === 'super_admin';
         const archived = await fetchArchivedReports();
-        const runsQ = await db.from('checklist_runs').select('*').not('submitted_at', 'is', null).order('submitted_at', { ascending: false });
-        const runs = runsQ.error ? [] : (runsQ.data || []);
-        const { data: checklists } = await db.from('checklists').select('*');
-        const byChecklist = new Map((checklists || []).map(c => [c.id, c]));
 
-        // ════════ REPORTS ════════
         app.append(el('div', { class: 'section-head', style: 'margin-bottom:10px' }, [
           el('h2', { class: 'display', style: 'font-size:1.15rem;margin:0' }, t('archivedReports')),
           archived.length ? el('button', { class: 'btn btn-ghost', onclick: () =>
-            exportReportsExcel(rFiltered(), 'archived-reports.xlsx') }, `⬇  ${t('exportExcel')}`) : null,
+            exportReportsExcel(rFiltered(), 'archived-reports.xlsx') }, t('exportExcel')) : null,
         ]));
 
         const rFilters = { from: '', until: '', admin: 'all', user: 'all' };
         const rFrom = el('input', { type: 'date', onchange: e => { rFilters.from = e.target.value; drawReports(); } });
         const rUntil = el('input', { type: 'date', onchange: e => { rFilters.until = e.target.value; drawReports(); } });
-
         const adminIds = [...new Set(archived.map(r => r.assigned_to).filter(Boolean))];
         const rAdmin = el('select', { onchange: e => { rFilters.admin = e.target.value; drawReports(); } }, [
           opt('all', t('anyAssignee')),
           opt('unassigned', t('unassigned')),
           ...adminIds.map(id => opt(id, labelOf(state.profiles.find(p => p.id === id)))),
         ]);
-        // Privacy-safe: anonymous reporters are never listed by name, only as one bucket.
         const namedReporterIds = [...new Set(archived.filter(r => !r.is_anonymous).map(r => r.reporter_id).filter(Boolean))];
         const hasAnon = archived.some(r => r.is_anonymous);
         const rUser = el('select', { onchange: e => { rFilters.user = e.target.value; drawReports(); } }, [
@@ -806,12 +827,12 @@
               const cells = [
                 el('div', { class: 'grow' }, [
                   el('div', {}, truncate(i.what_happened, 70)),
-                  el('div', { class: 'sub' }, `${reporterOf(i)} · ${fmt(i.created_at)}`),
+                  el('div', { class: 'sub' }, `${reporterOf(i)} - ${fmt(i.created_at)}`),
                 ]),
                 el('span', { class: `pill ${incidentStatusClass(i)}`, style: incidentStatusStyle(i) }, statusLabel(i.status)),
               ];
               if (isSuper) cells.push(el('button', { class: 'btn btn-danger', title: t('deleteLog'),
-                onclick: e => { e.stopPropagation(); deleteReportLog(i); } }, '🗑'));
+                onclick: e => { e.stopPropagation(); deleteReportLog(i); } }, 'X'));
               reportsHost.append(el('div', { class: 'row', onclick: () => go(incidentView(i.id)), style: 'cursor:pointer' }, cells));
             }
           }
@@ -821,7 +842,7 @@
         async function deleteReportLog(i) {
           if (!confirm('Delete this report log permanently? This cannot be undone.')) return;
           if ((i.photo_paths || []).length) {
-            await db.storage.from('incident-photos').remove(i.photo_paths); // best effort
+            await db.storage.from('incident-photos').remove(i.photo_paths);
           }
           const { error } = await db.rpc('delete_report', { p_id: i.id });
           if (error) return toast(error.message, 'err');
@@ -829,9 +850,22 @@
           if (idx > -1) archived.splice(idx, 1);
           toast('Log deleted.'); drawReports();
         }
+      },
+    };
+  }
 
-        // ════════ CHECKLISTS ════════
-        app.append(el('h2', { class: 'display', style: 'font-size:1.15rem;margin:24px 0 10px' }, t('checklistLogs')));
+  function checklistLogsView() {
+    return {
+      title: t('checklistLogs'), tab: 'groups',
+      async render(app) {
+        await loadProfiles();
+        const isSuper = state.profile.role === 'super_admin';
+        const runsQ = await db.from('checklist_runs').select('*').not('submitted_at', 'is', null).order('submitted_at', { ascending: false });
+        const runs = runsQ.error ? [] : (runsQ.data || []);
+        const { data: checklists } = await db.from('checklists').select('*');
+        const byChecklist = new Map((checklists || []).map(c => [c.id, c]));
+
+        app.append(el('h2', { class: 'display', style: 'font-size:1.15rem;margin:0 0 10px' }, t('checklistLogs')));
         if (runsQ.error) {
           app.append(emptyState(t('noChecklistLogs'), 'Run migration_incident_photos_checklist_logs.sql first.'));
           return;
@@ -845,7 +879,6 @@
           opt('all', t('anyReporter')),
           ...runUserIds.map(id => opt(id, labelOf(state.profiles.find(p => p.id === id)))),
         ]);
-        // Checklist-type options pulled from the checklists that actually appear in the runs.
         const runChecklistIds = [...new Set(runs.map(r => r.checklist_id).filter(Boolean))];
         const cType = el('select', { onchange: e => { cFilters.checklist = e.target.value; drawChecklists(); } }, [
           opt('all', t('allChecklists')),
@@ -888,7 +921,7 @@
                   el('span', { class: 'pill', style: needsReview ? 'background:#f2c94c;color:#17212b;border-color:#f2c94c' : '' },
                     needsReview ? t('checklistLogNeedsAttention') : t('completed')),
                   isSuper ? el('button', { class: 'btn btn-danger', title: t('deleteLog'),
-                    onclick: e => { e.stopPropagation(); deleteChecklistLog(run); } }, '🗑') : null,
+                    onclick: e => { e.stopPropagation(); deleteChecklistLog(run); } }, 'X') : null,
                 ]),
               ]),
               el('div', { class: 'sub' }, missing.length || issues.length
@@ -914,6 +947,72 @@
           if (idx > -1) runs.splice(idx, 1);
           toast('Log deleted.'); drawChecklists();
         }
+      },
+    };
+  }
+
+  function completedCourseLogsView() {
+    return {
+      title: t('completedCourses'), tab: 'groups',
+      async render(app) {
+        await loadProfiles();
+        const subsQ = await db.from('course_submissions').select('*').eq('passed', true).order('created_at', { ascending: false });
+        if (subsQ.error) {
+          app.append(emptyState(t('noCompletedCourses'), 'Run migration_courses.sql first.'));
+          return;
+        }
+        const submissions = subsQ.data || [];
+        const courseIds = [...new Set(submissions.map(s => s.course_id).filter(Boolean))];
+        let courses = [];
+        if (courseIds.length) {
+          const coursesQ = await db.from('courses').select('*').in('id', courseIds);
+          courses = coursesQ.error ? [] : (coursesQ.data || []);
+        }
+        const byCourse = new Map(courses.map(c => [c.id, c]));
+
+        app.append(el('h2', { class: 'display', style: 'font-size:1.15rem;margin:0 0 10px' }, t('completedCourses')));
+        const filters = { from: '', until: '', user: 'all', course: 'all' };
+        const from = el('input', { type: 'date', onchange: e => { filters.from = e.target.value; drawCourses(); } });
+        const until = el('input', { type: 'date', onchange: e => { filters.until = e.target.value; drawCourses(); } });
+        const userIds = [...new Set(submissions.map(s => s.user_id).filter(Boolean))];
+        const user = el('select', { onchange: e => { filters.user = e.target.value; drawCourses(); } }, [
+          opt('all', t('anyReporter')),
+          ...userIds.map(id => opt(id, labelOf(state.profiles.find(p => p.id === id)))),
+        ]);
+        const course = el('select', { onchange: e => { filters.course = e.target.value; drawCourses(); } }, [
+          opt('all', t('anyCourse')),
+          ...courseIds.map(id => opt(id, byCourse.get(id)?.title || t('courses'))),
+        ]);
+        app.append(el('div', { style: 'display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px' }, [
+          el('div', { style: 'flex:1;min-width:130px' }, labeled(t('dateFrom'), from)),
+          el('div', { style: 'flex:1;min-width:130px' }, labeled(t('dateUntil'), until)),
+          el('div', { style: 'flex:1;min-width:150px' }, labeled(t('courses'), course)),
+          el('div', { style: 'flex:1;min-width:150px' }, labeled(t('filterByUser'), user)),
+        ]));
+
+        const host = el('div', {});
+        app.append(host);
+
+        function drawCourses() {
+          host.innerHTML = '';
+          const rows = submissions.filter(s =>
+            inDateRange(s.created_at, filters.from, filters.until) &&
+            (filters.user === 'all' || s.user_id === filters.user) &&
+            (filters.course === 'all' || s.course_id === filters.course));
+          if (!rows.length) { host.append(el('p', { class: 'muted' }, submissions.length ? 'No completed courses match these filters.' : t('noCompletedCourses'))); return; }
+          for (const s of rows) {
+            const c = byCourse.get(s.course_id);
+            const qn = (c?.questions || []).length;
+            host.append(el('div', { class: 'row' }, [
+              el('div', { class: 'grow' }, [
+                el('div', {}, c?.title || t('courses')),
+                el('div', { class: 'sub' }, `${labelOf(state.profiles.find(p => p.id === s.user_id))} - ${fmt(s.created_at)}${qn ? ` - ${qn} ${t('questions')}` : ''}`),
+              ]),
+              el('span', { class: 'pill', style: 'background:#2f9e5b;color:#fff;border-color:#2f9e5b' }, `${t('score')}: ${s.score}%`),
+            ]));
+          }
+        }
+        drawCourses();
       },
     };
   }
