@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <script>try{document.documentElement.dataset.theme=localStorage.getItem('theme')||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light')}catch(e){}</script>
   <title>Nicosoft HMS manager</title>
-  <link rel="stylesheet" href="./styles.css?v=sidebar-20260628">
+  <link rel="stylesheet" href="./styles.css">
   <style>
     .settings-card { display: grid; gap: 12px; }
     .settings-current { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
@@ -170,9 +170,10 @@
       { id: 'groups', ic: '▦', label: t('groups'), open: () => go(homeView(), { reset: true }) },
       { id: 'reports', ic: '⚠', label: t('myReports'), open: () => go(myReportsView(), { reset: true }) },
       ...state.groups.map(g => ({ id: `group:${g.id}`, ic: g.icon || '•', label: groupName(g), open: () => go(groupView(g)) })),
+      { id: 'settings', ic: '⚙', label: t('settings'), open: () => go(settingsView(), { reset: true }) },
     ];
     for (const item of items) nav.append(sidebarButton(item, active));
-    side.append(nav, el('button', { class: `sidebar-footer ${active === 'settings' ? 'active' : ''}`, title: t('settings'), onclick: () => go(settingsView(), { reset: true }) }, [
+    side.append(nav, el('div', { class: 'sidebar-footer' }, [
       el('div', { class: 'sidebar-avatar' }, userInitial),
       el('div', { class: 'sidebar-user' }, [
         el('div', { class: 'sidebar-user-name' }, userName),
@@ -1166,7 +1167,7 @@
   // ── helpers ────────────────────────────────────────────
   function settingsView() {
     return {
-      title: t('settings'), tab: 'settings', side: 'settings',
+      title: t('settings'), tab: 'settings',
       async render(app) {
         const fresh = await reloadMyProfile();
         if (fresh) state.profile = fresh;
