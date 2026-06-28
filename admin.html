@@ -388,17 +388,20 @@
   }
 
   async function renderAdminKpiDashboard(app) {
-    const periodKey = 'adminKpiPeriod', typeKey = 'adminKpiType', filterKey = 'adminKpiChecklist';
+    const periodKey = 'adminKpiPeriod', typeKey = 'adminKpiType', filterKey = 'adminKpiChecklist', adminKey = 'adminKpiAdmin';
     const period = kpiPeriod(periodKey);
     const prev = previousBounds(period);
     const cur = periodBounds(period);
-    const type = localStorage.getItem(typeKey) || 'overview';
+    let type = localStorage.getItem(typeKey) || 'overview';
+    if (type === 'admin_performance' && state.profile.role !== 'super_admin') type = 'overview';
     const refresh = () => go(homeView(), { reset: true });
 
     // ── toolbar: type (left) · checklist filter · period chip + calendar (right) ──
+    const typeOptions = [opt('overview', t('kpiOverview')), opt('incidents', t('kpiIncidents')), opt('checklists', t('kpiChecklists'))];
+    if (state.profile.role === 'super_admin') typeOptions.push(opt('admin_performance', t('kpiAdminPerformance')));
     const typeSel = el('select', { class: 'kpi-filter', onchange: e => {
       localStorage.setItem(typeKey, e.target.value); refresh();
-    } }, [opt('overview', t('kpiOverview')), opt('incidents', t('kpiIncidents')), opt('checklists', t('kpiChecklists'))]);
+    } }, typeOptions);
     typeSel.value = type;
 
     // checklists (with quotas) loaded up front; also feeds the filter dropdown
@@ -412,6 +415,13 @@
       localStorage.setItem(filterKey, e.target.value); refresh();
     } }, [opt('all', t('allChecklists')), ...checklists.map(c => opt(c.id, c.title))]);
     clSel.value = checklists.some(c => c.id === selectedCl) ? selectedCl : 'all';
+
+    const admins = state.profiles.filter(p => ['admin', 'super_admin'].includes(p.role));
+    const selectedAdmin = localStorage.getItem(adminKey) || admins[0]?.id || '';
+    const adminSel = el('select', { class: 'kpi-filter', onchange: e => {
+      localStorage.setItem(adminKey, e.target.value); refresh();
+    } }, admins.map(p => opt(p.id, labelOf(p))));
+    adminSel.value = admins.some(p => p.id === selectedAdmin) ? selectedAdmin : (admins[0]?.id || '');
 
     const from = el('input', { type: 'date', value: period.from });
     const until = el('input', { type: 'date', value: period.until });
@@ -429,8 +439,9 @@
         typeSel,
         el('span', { class: 'spacer' }),
         type === 'checklists' ? clSel : null,
-        el('div', { class: 'kpi-period-chip' }, periodLabel(period)),
-        calBtn,
+        type === 'admin_performance' ? adminSel : null,
+        type !== 'admin_performance' ? el('div', { class: 'kpi-period-chip' }, periodLabel(period)) : null,
+        type !== 'admin_performance' ? calBtn : null,
       ]),
       panel,
     ]));
@@ -440,12 +451,12 @@
 
     if (type === 'overview') await renderOverviewKpi(host, period, cur, prev);
     else if (type === 'incidents') await renderIncidentsKpi(host, period, cur, prev);
-    else await renderChecklistsKpi(host, period, prev, checklists, selectedCl);
+    else if (type === 'checklists') await renderChecklistsKpi(host, period, prev, checklists, selectedCl);
+    else await renderAdminPerformanceKpi(host, adminSel.value);
   }
 
   // ── OVERVIEW ────────────────────────────────────────────────
   async function renderOverviewKpi(host, period, cur, prev) {
-    const periodText = periodLabel(period);
     const seriousIds = await seriousConsequenceIds();
 
     const [backlog, unassigned, oldestRow] = await Promise.all([
@@ -472,16 +483,15 @@
       metricCard({ label: t('reportsInPeriod'), value: backlog, live: true, hint: 'Open backlog' }),
       metricCard({ label: t('unassigned'), value: unassigned, live: true }),
       metricCard({ label: 'Oldest open', value: oldestDays + 'd', live: true }),
-      metricCard({ label: 'Serious', value: serCur, delta: pctChange(serCur, serPrev), good: isGood(serCur, serPrev, 'down'), hint: periodText }),
-      metricCard({ label: 'Resolution rate', value: rateCur + '%', delta: pctChange(rateCur, ratePrev), good: isGood(rateCur, ratePrev, 'up'), hint: periodText }),
-      metricCard({ label: 'Median resolve', value: medC == null ? '–' : medC + 'd', delta: medP ? pctChange(medC, medP) : null, good: isGood(medC || 0, medP || 0, 'down'), hint: periodText }),
+      metricCard({ label: 'Serious', value: serCur, delta: pctChange(serCur, serPrev), good: isGood(serCur, serPrev, 'down') }),
+      metricCard({ label: 'Resolution rate', value: rateCur + '%', delta: pctChange(rateCur, ratePrev), good: isGood(rateCur, ratePrev, 'up') }),
+      metricCard({ label: 'Median resolve', value: medC == null ? '–' : medC + 'd', delta: medP ? pctChange(medC, medP) : null, good: isGood(medC || 0, medP || 0, 'down') }),
     ]);
     host.append(grid);
   }
 
   // ── INCIDENTS ───────────────────────────────────────────────
   async function renderIncidentsKpi(host, period, cur, prev) {
-    const periodText = periodLabel(period);
     const { data: cats } = await db.from('incident_categories').select('id,name').eq('kind', 'consequence');
     const seriousNames = ['Death', 'Injury or sick leave', 'Environmental impact'];
     const seriousIds = (cats || []).filter(c => seriousNames.includes(c.name)).map(c => c.id);
@@ -504,10 +514,10 @@
     ]);
 
     host.append(el('div', { class: 'kpi-grid' }, [
-      metricCard({ label: 'Reported', value: repCur, delta: pctChange(repCur, repPrev), good: isGood(repCur, repPrev, 'down'), hint: periodText }),
-      metricCard({ label: 'Resolved', value: resCur, delta: pctChange(resCur, resPrev), good: isGood(resCur, resPrev, 'up'), hint: periodText }),
-      metricCard({ label: 'Serious', value: serCur, delta: pctChange(serCur, serPrev), good: isGood(serCur, serPrev, 'down'), hint: periodText }),
-      metricCard({ label: 'Anonymous', value: anonCur + '%', delta: pctChange(anonCur, anonPrev), good: null, hint: periodText }),
+      metricCard({ label: 'Reported', value: repCur, delta: pctChange(repCur, repPrev), good: isGood(repCur, repPrev, 'down') }),
+      metricCard({ label: 'Resolved', value: resCur, delta: pctChange(resCur, resPrev), good: isGood(resCur, resPrev, 'up') }),
+      metricCard({ label: 'Serious', value: serCur, delta: pctChange(serCur, serPrev), good: isGood(serCur, serPrev, 'down') }),
+      metricCard({ label: 'Anonymous', value: anonCur + '%', delta: pctChange(anonCur, anonPrev), good: null }),
     ]));
 
     // severity strip
@@ -529,7 +539,6 @@
 
   // ── CHECKLISTS (quota model) ────────────────────────────────
   async function renderChecklistsKpi(host, period, prev, checklists, selectedCl) {
-    const periodText = periodLabel(period);
     const cur = periodBounds(period);
     const scope = selectedCl === 'all' ? checklists : checklists.filter(c => c.id === selectedCl);
     const scopeIds = scope.map(c => c.id);
@@ -588,11 +597,31 @@
     };
 
     host.append(el('div', { class: 'kpi-grid' }, [
-      metricCard({ label: t('checklistsCompletedInPeriod'), value: completions, delta: pctChange(completions, evPrev.length), good: isGood(completions, evPrev.length, 'up'), hint: periodText }),
-      metricCard({ label: 'Completion rate', value: rateCur + '%', delta: pctChange(rateCur, ratePrev), good: isGood(rateCur, ratePrev, 'up'), hint: periodText }),
+      metricCard({ label: t('checklistsCompletedInPeriod'), value: completions, delta: pctChange(completions, evPrev.length), good: isGood(completions, evPrev.length, 'up') }),
+      metricCard({ label: 'Completion rate', value: rateCur + '%', delta: pctChange(rateCur, ratePrev), good: isGood(rateCur, ratePrev, 'up') }),
       metricCard({ label: 'Missed', value: missed, delta: pctChange(missed, 0), good: isGood(missed, 0, 'down'), hint: t('seeWhich') + ' ▾', onClick: () => { open = !open; drawDrill(); } }),
     ]));
     host.append(drillHost);
+  }
+
+  async function renderAdminPerformanceKpi(host, adminId) {
+    if (!adminId) {
+      host.append(emptyState(t('noAdminsFound'), t('createOrPromoteAdmin')));
+      return;
+    }
+    const today = todayBounds();
+    const [assigned, completed, completedToday] = await Promise.all([
+      countRows(db.from('incidents').select('id', { count: 'exact', head: true }).eq('assigned_to', adminId)),
+      countRows(db.from('incidents').select('id', { count: 'exact', head: true }).eq('assigned_to', adminId).eq('status', 'resolved')),
+      countRows(db.from('incidents').select('id', { count: 'exact', head: true }).eq('assigned_to', adminId).eq('status', 'resolved').gte('resolved_at', today.start).lt('resolved_at', today.end)),
+    ]);
+    const completionRate = assigned ? Math.round(completed / assigned * 100) : 0;
+    host.append(el('div', { class: 'kpi-grid' }, [
+      metricCard({ label: t('assignedReports'), value: assigned }),
+      metricCard({ label: t('completedTotal'), value: completed }),
+      metricCard({ label: t('completionRate'), value: completionRate + '%' }),
+      metricCard({ label: t('completedToday'), value: completedToday }),
+    ]));
   }
 
   // ── shared incident helpers ─────────────────────────────────
