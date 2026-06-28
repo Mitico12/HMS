@@ -723,61 +723,78 @@
     ]));
     host.append(drillHost);
 
-    // ── recent submissions (with filing times) for this range ──
-    const runQ = db.from('checklist_runs')
-      .select('checklist_id,user_id,submitted_at,completed')
-      .not('submitted_at', 'is', null)
-      .gte('submitted_at', cur.start).lt('submitted_at', cur.end)
-      .order('submitted_at', { ascending: false });
-    const { data: runs = [] } = await (scopeIds.length
-      ? runQ.in('checklist_id', scopeIds)
-      : runQ.eq('checklist_id', '00000000-0000-0000-0000-000000000000'));
     const titleOf = (id) => (checklists.find(c => c.id === id)?.title) || t('checklist');
     const userName = (id) => { const p = state.profiles.find(u => u.id === id); return p ? labelOf(p) : '—'; };
 
-    // ── Expected vs received window — click to reveal when each was filed ──
-    const dailyExpected = scope.reduce((s, c) => s + c.daily_quota, 0);
-    const filedRuns = runs.filter(r => r.completed);
-    const filedHost = el('div', { style: 'margin-top:12px' });
-    let filedOpen = false;
-    const drawFiled = () => {
-      filedHost.innerHTML = '';
-      if (!filedOpen) return;
-      const card = el('div', { class: 'kpi-card' });
-      card.append(el('div', { class: 'kpi-label', style: 'margin-bottom:6px' }, t('whenFiled')));
-      if (!filedRuns.length) { card.append(el('p', { class: 'miss-sub' }, t('noRecentChecklists'))); filedHost.append(card); return; }
-      filedRuns.slice(0, 30).forEach(r => card.append(el('div', { class: 'miss-row' }, [
-        el('div', { class: 'miss-top' }, [
-          el('span', { style: 'flex:1' }, titleOf(r.checklist_id)),
-          el('span', { class: 'time-pill' }, fmt(r.submitted_at)),
-        ]),
-        el('p', { class: 'miss-sub' }, userName(r.user_id)),
-      ])));
-      if (filedRuns.length > 30) card.append(el('p', { class: 'miss-sub', style: 'padding-top:10px' }, `+ ${filedRuns.length - 30} more`));
-      filedHost.append(card);
-    };
-    host.append(el('div', { class: 'kpi-grid', style: 'margin-top:14px' }, [
-      metricCard({
-        label: t('expectedVsReceived'),
-        value: `${completions} / ${expected}`,
-        hint: `${t('dailyExpected')} ${dailyExpected} · ${t('tapToSeeFiled')}`,
-        onClick: () => { filedOpen = !filedOpen; drawFiled(); },
-      }),
-    ]));
-    host.append(filedHost);
+    // Last three submissions entered anywhere in the system (ignores date range + filter).
+    const { data: latestRuns = [] } = await db.from('checklist_runs')
+      .select('checklist_id,user_id,submitted_at,completed')
+      .not('submitted_at', 'is', null)
+      .order('submitted_at', { ascending: false })
+      .limit(3);
 
-    // ── Latest checklists — most recent submissions in this range ──
-    const latestCard = el('div', { class: 'kpi-card', style: 'margin-top:14px' });
+    // Completed submissions in this range/scope — feeds per-checklist "when filed".
+    const periodRunQ = db.from('checklist_runs')
+      .select('checklist_id,user_id,submitted_at,completed')
+      .not('submitted_at', 'is', null).eq('completed', true)
+      .gte('submitted_at', cur.start).lt('submitted_at', cur.end)
+      .order('submitted_at', { ascending: false });
+    const { data: periodRuns = [] } = await (scopeIds.length
+      ? periodRunQ.in('checklist_id', scopeIds)
+      : periodRunQ.eq('checklist_id', '00000000-0000-0000-0000-000000000000'));
+    const filedByChecklist = {};
+    periodRuns.forEach(r => (filedByChecklist[r.checklist_id] ||= []).push(r));
+
+    // received per checklist over the range (from checklist_completions)
+    const receivedByChecklist = {};
+    ev.forEach(e => { receivedByChecklist[e.checklist_id] = (receivedByChecklist[e.checklist_id] || 0) + 1; });
+
+    const split = el('div', { class: 'cl-split' });
+
+    // ── Latest checklists — last three entered in the system ──
+    const latestCard = el('div', { class: 'kpi-card cl-latest' });
     latestCard.append(el('div', { class: 'kpi-label', style: 'margin-bottom:8px' }, t('latestChecklists')));
-    if (!runs.length) latestCard.append(el('p', { class: 'miss-sub' }, t('noRecentChecklists')));
-    else runs.slice(0, 8).forEach(r => latestCard.append(el('div', { class: 'miss-row' }, [
+    if (!latestRuns.length) latestCard.append(el('p', { class: 'miss-sub' }, t('noRecentChecklists')));
+    else latestRuns.forEach(r => latestCard.append(el('div', { class: 'miss-row' }, [
       el('div', { class: 'miss-top' }, [
         el('span', { style: 'flex:1' }, titleOf(r.checklist_id)),
-        el('span', { class: 'miss-pill' }, fmt(r.submitted_at)),
+        el('span', { class: 'time-pill' }, fmt(r.submitted_at)),
       ]),
       el('p', { class: 'miss-sub' }, `${userName(r.user_id)}${r.completed ? ' · ✓' : ''}`),
     ])));
-    host.append(latestCard);
+
+    // ── Expected vs received — one row per checklist that has a daily quota ──
+    const expCard = el('div', { class: 'kpi-card cl-expected' });
+    expCard.append(el('div', { class: 'kpi-label', style: 'margin-bottom:8px' }, t('expectedVsReceived')));
+    if (!scope.length) expCard.append(el('p', { class: 'miss-sub' }, t('noRecentChecklists')));
+    else scope.slice().sort((a, b) => a.title.localeCompare(b.title)).forEach(c => {
+      const got = receivedByChecklist[c.id] || 0;
+      const filed = filedByChecklist[c.id] || [];
+      const drill = el('div', { class: 'cl-filed hidden' });
+      const drawDrill = () => {
+        drill.innerHTML = '';
+        if (!filed.length) { drill.append(el('p', { class: 'miss-sub' }, t('noRecentChecklists'))); return; }
+        filed.slice(0, 20).forEach(r => drill.append(el('div', { class: 'cl-filed-row' }, [
+          el('span', { class: 'miss-sub', style: 'flex:1' }, userName(r.user_id)),
+          el('span', { class: 'time-pill' }, fmt(r.submitted_at)),
+        ])));
+        if (filed.length > 20) drill.append(el('p', { class: 'miss-sub', style: 'padding-top:6px' }, `+ ${filed.length - 20} more`));
+      };
+      const row = el('div', { class: 'exp-row', title: t('whenFiled'), onclick: () => {
+        if (drill.classList.toggle('hidden') === false && !drill.childElementCount) drawDrill();
+      } }, [
+        el('div', { class: 'exp-head' }, [
+          el('span', { class: 'exp-name' }, c.title),
+          el('span', { class: 'exp-got', title: t('receivedLabel') }, String(got)),
+          el('span', { class: 'exp-quota', title: t('dailyExpected') }, `· ${c.daily_quota}/${t('perDayShort')}`),
+        ]),
+        drill,
+      ]);
+      expCard.append(row);
+    });
+
+    split.append(latestCard, expCard);
+    host.append(split);
   }
 
   async function renderAdminPerformanceKpi(host, adminId) {
