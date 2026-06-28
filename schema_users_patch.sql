@@ -22,6 +22,8 @@ create table if not exists public.profile_change_requests (
   requested_username text,
   current_email text,
   requested_email text,
+  current_mobile_number text,
+  requested_mobile_number text,
   status text not null default 'pending'
     check (status in ('pending', 'approved', 'rejected')),
   requested_at timestamptz not null default now(),
@@ -34,6 +36,9 @@ create index if not exists profile_change_requests_user_idx
   on public.profile_change_requests(user_id, requested_at desc);
 create index if not exists profile_change_requests_status_idx
   on public.profile_change_requests(status, requested_at desc);
+
+alter table public.profile_change_requests add column if not exists current_mobile_number text;
+alter table public.profile_change_requests add column if not exists requested_mobile_number text;
 
 create table if not exists public.profile_email_log (
   id uuid primary key default gen_random_uuid(),
@@ -116,10 +121,12 @@ as $$
   );
 $$;
 
+drop function if exists public.request_profile_change(text, text, text);
 create or replace function public.request_profile_change(
   p_full_name text,
   p_username text,
-  p_email text
+  p_email text,
+  p_mobile_number text default null
 )
 returns uuid
 language plpgsql
@@ -161,12 +168,14 @@ begin
     user_id,
     current_full_name, requested_full_name,
     current_username, requested_username,
-    current_email, requested_email
+    current_email, requested_email,
+    current_mobile_number, requested_mobile_number
   ) values (
     v_profile.id,
     v_profile.full_name, nullif(trim(p_full_name), ''),
     v_profile.username, trim(p_username),
-    v_profile.email, trim(p_email)
+    v_profile.email, trim(p_email),
+    v_profile.mobile_number, nullif(trim(p_mobile_number), '')
   ) returning id into v_id;
 
   return v_id;
@@ -207,7 +216,8 @@ begin
   update public.profiles
   set full_name = v_req.requested_full_name,
       username = v_req.requested_username,
-      email = v_req.requested_email
+      email = v_req.requested_email,
+      mobile_number = v_req.requested_mobile_number
   where id = v_req.user_id;
 
   if coalesce(v_req.current_email, '') <> coalesce(v_req.requested_email, '') then
@@ -219,7 +229,7 @@ begin
     update auth.users
     set email = v_req.requested_email,
         raw_user_meta_data = coalesce(raw_user_meta_data, '{}'::jsonb)
-          || jsonb_build_object('email', v_req.requested_email, 'username', v_req.requested_username, 'full_name', v_req.requested_full_name),
+          || jsonb_build_object('email', v_req.requested_email, 'username', v_req.requested_username, 'full_name', v_req.requested_full_name, 'mobile_number', v_req.requested_mobile_number),
         updated_at = now()
     where id = v_req.user_id;
 

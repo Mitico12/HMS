@@ -8,7 +8,7 @@
   <link rel="stylesheet" href="./styles.css">
   <style>
     .settings-card { display: grid; gap: 12px; }
-    .settings-current { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+    .settings-current { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
     .kv { padding: 12px; border: 1px solid rgba(26,47,54,.10); border-radius: 14px; background: rgba(255,255,255,.45); }
     .kv .k { color: var(--steel, #6b7780); font-size: .78rem; text-transform: uppercase; letter-spacing: .04em; }
     .kv .v { font-weight: 650; margin-top: 3px; overflow-wrap: anywhere; }
@@ -640,6 +640,8 @@
             onclick: () => go(reportForm()) }, `!  ${t('reportIncident')}`),
           el('button', { class: 'btn btn-lg btn-block',
             onclick: () => go(hazardForm()) }, `⚠  ${t('reportHazard')}`),
+          el('button', { class: 'btn btn-lg btn-block',
+            onclick: () => go(suggestionForm()) }, `+  ${t('reportSuggestion')}`),
         ]));
         app.append(el('h2', { class: 'display', style: 'font-size:1.1rem' }, t('yourRecentReports')));
         const { data } = await db.from('incidents').select('*')
@@ -657,7 +659,7 @@
       el('span', { class: `pill ${incidentStatusClass(i)}`, style: incidentStatusStyle(i) }, statusLabel(i.status)),
     ]);
   }
-  const typeLabel = (k) => ({ incident: t('incident'), hazard: t('hazard') }[k] || k || t('incident'));
+  const typeLabel = (k) => ({ incident: t('incident'), hazard: t('hazard'), suggestion: t('suggestion') }[k] || k || t('incident'));
   const statusLabel = (s) => ({ open: t('open'), in_progress: t('inProgress'), resolved: t('resolved') }[s] || s);
   function incidentStatusClass(inc) {
     const hasConsequences = (inc.consequence_ids || []).length > 0 || !!inc.consequence_other;
@@ -791,6 +793,48 @@
             consequence_other: consBlock.getOther() || null,
             occurred_at: when.value ? new Date(when.value).toISOString() : null,
             location: where.value.trim() || null,
+            is_anonymous: anonBox.checked,
+            photo_paths: photoPaths,
+          });
+          if (error) return toast(error.message, 'err');
+          toast(t('submitted')); back();
+        }
+      },
+    };
+  }
+
+  function suggestionForm() {
+    return {
+      title: t('reportSuggestion'), tab: 'groups',
+      render(app) {
+        const what = el('textarea', { placeholder: t('suggestionText'), style: 'min-height:180px' });
+        const photos = el('input', { type: 'file', accept: 'image/*', multiple: 'multiple' });
+        const anonBox = el('input', { type: 'checkbox' });
+        anonBox.addEventListener('change', () => {
+          if (anonBox.checked && !confirm('Are you sure you want to stay anonymous? Admins will not see who filed this report.'))
+            anonBox.checked = false;
+        });
+        const anonRow = el('label', { class: 'check-item' }, [anonBox, el('span', {}, t('reportAnonymously'))]);
+
+        app.append(
+          labeled(t('suggestionText'), what, true),
+          labeled(t('photosOptional'), photos),
+          anonRow,
+          el('button', { class: 'btn btn-primary btn-block btn-lg', style: 'margin-top:8px', onclick: submit }, t('submitReport')),
+        );
+
+        async function submit() {
+          if (!what.value.trim()) return toast(t('suggestionText'), 'err');
+          const incidentId = crypto.randomUUID();
+          const photoPaths = await uploadIncidentPhotos(incidentId, photos.files);
+          if (photoPaths === null) return;
+          const { error } = await db.from('incidents').insert({
+            id: incidentId,
+            reporter_id: state.profile.id,
+            report_type: 'suggestion',
+            what_happened: what.value.trim(),
+            root_cause_ids: [],
+            consequence_ids: [],
             is_anonymous: anonBox.checked,
             photo_paths: photoPaths,
           });
@@ -1076,6 +1120,8 @@
         username.value = p.username || '';
         const email = el('input', { type: 'email', autocomplete: 'email' });
         email.value = p.email || '';
+        const mobile = el('input', { type: 'tel', autocomplete: 'tel' });
+        mobile.value = p.mobile_number || '';
 
         app.append(el('div', { class: 'card settings-card' }, [
           el('h3', {}, t('yourDetails')),
@@ -1084,11 +1130,13 @@
             kv('Name', p.full_name || '-'),
             kv('Username', p.username ? `@${p.username}` : '-'),
             kv('Email', p.email || '-'),
+            kv('Mobile', p.mobile_number || '-'),
           ]),
           el('hr', { class: 'soft' }),
           labeled('Name', fullName),
           labeled('Username', username),
           labeled('Email', email),
+          labeled('Mobile number', mobile),
           hasPending ? el('p', { class: 'muted' }, 'You already have a pending profile change. Wait for an admin to approve or reject it before sending another one.') : null,
           el('button', { class: 'btn btn-primary btn-block', onclick: submitChange, disabled: hasPending ? 'disabled' : null }, 'Request change'),
           el('p', { class: 'muted', style: 'font-size:.82rem' }, 'Changes are sent to admins for approval, like account verification.'),
@@ -1105,12 +1153,14 @@
             full_name: fullName.value.trim(),
             username: username.value.trim(),
             email: email.value.trim(),
+            mobile_number: mobile.value.trim(),
           };
           if (!next.username || !next.email) return toast('Username and email are required.', 'err');
           const unchanged =
             (p.full_name || '') === next.full_name &&
             (p.username || '') === next.username &&
-            (p.email || '') === next.email;
+            (p.email || '') === next.email &&
+            (p.mobile_number || '') === next.mobile_number;
           if (unchanged) return toast('Nothing changed.', 'err');
 
           if ((p.username || '') !== next.username) {
@@ -1122,6 +1172,7 @@
             p_full_name: next.full_name || null,
             p_username: next.username,
             p_email: next.email,
+            p_mobile_number: next.mobile_number || null,
           });
           if (rpc.error && !missingOptionalRpc(rpc.error)) return toast(rpc.error.message, 'err');
           if (rpc.error) {
@@ -1133,6 +1184,8 @@
               requested_username: next.username,
               current_email: p.email || null,
               requested_email: next.email,
+              current_mobile_number: p.mobile_number || null,
+              requested_mobile_number: next.mobile_number || null,
               status: 'pending',
             });
             if (error) return toast(error.message + ' - the SQL patch for profile change requests is probably missing.', 'err');
@@ -1188,6 +1241,7 @@
       ['Name', r.current_full_name, r.requested_full_name],
       ['Username', r.current_username, r.requested_username],
       ['Email', r.current_email, r.requested_email],
+      ['Mobile', r.current_mobile_number, r.requested_mobile_number],
     ];
     const lines = pairs
       .filter(([, a, b]) => (a || '') !== (b || ''))
