@@ -697,6 +697,7 @@
 
     const drillHost = el('div', { style: 'margin-top:12px' });
     let open = false;
+    let showAllMissed = false;
     const drawDrill = () => {
       drillHost.innerHTML = '';
       if (!open) return;
@@ -704,14 +705,19 @@
       const card = el('div', { class: 'kpi-card' }, [
         el('div', { class: 'kpi-label' }, `${missed} below quota across ${shortfalls.length} checklist-days`),
       ]);
-      shortfalls.slice(0, 12).forEach(s => card.append(el('div', { class: 'miss-row' }, [
+      const limit = showAllMissed ? shortfalls.length : 12;
+      shortfalls.slice(0, limit).forEach(s => card.append(el('div', { class: 'miss-row' }, [
         el('div', { class: 'miss-top' }, [
           el('span', { style: 'flex:1' }, s.title),
           el('span', { class: 'miss-pill' }, `short ${s.short}`),
         ]),
         el('p', { class: 'miss-sub' }, `${s.date.getDate()} ${s.date.toLocaleString('en', { month: 'short' })} · expected ${s.exp}, got ${s.got}`),
       ])));
-      if (shortfalls.length > 12) card.append(el('p', { class: 'miss-sub', style: 'padding-top:10px' }, `+ ${shortfalls.length - 12} more`));
+      if (shortfalls.length > 12) {
+        card.append(showAllMissed
+          ? el('button', { class: 'miss-more', onclick: () => { showAllMissed = false; drawDrill(); } }, t('showLess'))
+          : el('button', { class: 'miss-more', onclick: () => { showAllMissed = true; drawDrill(); } }, `+ ${shortfalls.length - 12} ${t('more')}`));
+      }
       card.append(el('p', { class: 'miss-sub', style: 'padding-top:10px' }, t('expectedNote')));
       drillHost.append(card);
     };
@@ -745,10 +751,6 @@
     const filedByChecklist = {};
     periodRuns.forEach(r => (filedByChecklist[r.checklist_id] ||= []).push(r));
 
-    // received per checklist over the range (from checklist_completions)
-    const receivedByChecklist = {};
-    ev.forEach(e => { receivedByChecklist[e.checklist_id] = (receivedByChecklist[e.checklist_id] || 0) + 1; });
-
     const split = el('div', { class: 'cl-split' });
 
     // ── Latest checklists — last three entered in the system ──
@@ -768,8 +770,8 @@
     expCard.append(el('div', { class: 'kpi-label', style: 'margin-bottom:8px' }, t('expectedVsReceived')));
     if (!scope.length) expCard.append(el('p', { class: 'miss-sub' }, t('noRecentChecklists')));
     else scope.slice().sort((a, b) => a.title.localeCompare(b.title)).forEach(c => {
-      const got = receivedByChecklist[c.id] || 0;
       const filed = filedByChecklist[c.id] || [];
+      const got = filed.length;
       const drill = el('div', { class: 'cl-filed hidden' });
       const drawDrill = () => {
         drill.innerHTML = '';
@@ -786,7 +788,7 @@
         el('div', { class: 'exp-head' }, [
           el('span', { class: 'exp-name' }, c.title),
           el('span', { class: 'exp-got', title: t('receivedLabel') }, String(got)),
-          el('span', { class: 'exp-quota', title: t('dailyExpected') }, `· ${c.daily_quota}/${t('perDayShort')}`),
+          el('span', { class: 'exp-quota', title: t('dailyExpected') }, `/${c.daily_quota}`),
         ]),
         drill,
       ]);

@@ -1241,6 +1241,9 @@ input[type="checkbox"], input[type="radio"] {
 .miss-pill { font-size: .72rem; font-weight: 700; padding: 2px 7px; border-radius: 20px;
   background: color-mix(in srgb, #d43c32 16%, transparent); color: #d43c32; }
 .miss-sub { font-size: .8rem; color: var(--steel); margin: 2px 0 0 0; }
+.miss-more { display: inline-block; margin-top: 10px; padding: 0; border: 0; background: none;
+  font-size: .8rem; font-weight: 650; color: var(--primary); cursor: pointer; }
+.miss-more:hover { text-decoration: underline; }
 .time-pill { font-size: .72rem; font-weight: 650; padding: 2px 7px; border-radius: 20px; white-space: nowrap;
   background: color-mix(in srgb, var(--primary) 13%, transparent); color: var(--primary); }
 
