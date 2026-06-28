@@ -526,6 +526,12 @@
           // Insert a new row per submission so each run is its own log entry.
           const { error } = await db.from('checklist_runs').insert(payload);
           if (error) return toast(error.message + ' - run the checklist SQL migrations first.', 'err');
+          if (completed) {
+            await db.from('checklist_completions').insert({
+              checklist_id: c.id,
+              user_id: state.profile.id,
+            });
+          }
           toast(t('checklistComplete'));
           back();
         }

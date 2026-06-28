@@ -293,6 +293,13 @@ const TEXT = {
     yourRecentReports: 'Your recent reports',
     yourReport: 'Your report',
     yourDetails: 'Your details',
+    dailyQuota: 'Daily quota',
+    quotaDays: 'Counts on',
+    kpiOverview: 'Overview — triage',
+    kpiIncidents: 'Incidents',
+    kpiChecklists: 'Checklists',
+    seeWhich: 'See which',
+    expectedNote: 'Expected = daily quota × qualifying days. Match a gap to whoever was on shift.',
   },
   no: {
     access: 'Tilgang',
@@ -501,6 +508,13 @@ const TEXT = {
     yourRecentReports: 'Dine siste rapporter',
     yourReport: 'Din rapport',
     yourDetails: 'Dine detaljer',
+    dailyQuota: 'Dagskvote',
+    quotaDays: 'Telles pa',
+    kpiOverview: 'Oversikt — triage',
+    kpiIncidents: 'Hendelser',
+    kpiChecklists: 'Sjekklister',
+    seeWhich: 'Se hvilke',
+    expectedNote: 'Forventet = dagskvote × kvalifiserende dager. Match et gap mot hvem som hadde skift.',
   },
 };
 

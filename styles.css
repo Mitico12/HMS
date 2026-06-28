@@ -829,3 +829,32 @@ input[type="checkbox"], input[type="radio"] {
     height: 16px;
   }
 }
+
+.weekday-row { display: flex; flex-wrap: wrap; gap: 6px; }
+.weekday-btn { min-height: 36px; padding: 6px 12px; }
+.weekday-btn.active { border-color: var(--primary); background: var(--primary); color: var(--primary-ink); }
+
+.metric-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 6px; }
+.kpi-clickable { cursor: pointer; }
+.kpi-clickable:hover { border-color: color-mix(in srgb, var(--primary) 48%, var(--line)); }
+
+.delta-pill { font-size: .72rem; font-weight: 700; padding: 2px 7px; border-radius: 20px; white-space: nowrap; }
+.delta-good { background: color-mix(in srgb, #2f9e5b 16%, transparent); color: #2f9e5b; }
+.delta-bad  { background: color-mix(in srgb, #d43c32 16%, transparent); color: #d43c32; }
+.delta-neutral { background: var(--line); color: var(--steel); }
+
+.kpi-live { display: inline-flex; align-items: center; gap: 4px; font-size: .68rem; font-weight: 700; color: var(--steel); }
+.kpi-dot { width: 6px; height: 6px; border-radius: 50%; background: #2f9e5b; }
+
+.kpi-toolbar-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
+.kpi-toolbar-row .spacer { flex: 1; }
+
+.sev-bar { display: flex; height: 14px; border-radius: 7px; overflow: hidden; gap: 2px; }
+.sev-legend { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 12px; font-size: .8rem; color: var(--steel); }
+.sev-legend i { width: 9px; height: 9px; border-radius: 2px; display: inline-block; margin-right: 5px; }
+
+.miss-row { padding: 10px 0; border-top: 1px solid var(--line); }
+.miss-top { display: flex; align-items: center; gap: 10px; }
+.miss-pill { font-size: .72rem; font-weight: 700; padding: 2px 7px; border-radius: 20px;
+  background: color-mix(in srgb, #d43c32 16%, transparent); color: #d43c32; }
+.miss-sub { font-size: .8rem; color: var(--steel); margin: 2px 0 0 0; }

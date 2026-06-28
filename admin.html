@@ -326,29 +326,279 @@
     });
   }
 
-  async function renderAdminKpiDashboard(app) {
-    const periodKey = 'adminKpiPeriod';
-    const period = kpiPeriod(periodKey);
+  const DAYMS = 86400000;
+
+  function previousBounds(period) {
     const { start, end } = periodBounds(period);
-    const periodText = periodLabel(period);
-    const [completed, reports, closed, assigned] = await Promise.all([
-      countRows(db.from('checklist_runs').select('id', { count: 'exact', head: true })
-        .eq('completed', true).gte('submitted_at', start).lt('submitted_at', end)),
-      countRows(db.from('incidents').select('id', { count: 'exact', head: true })
-        .gte('created_at', start).lt('created_at', end)),
-      countRows(db.from('incidents').select('id', { count: 'exact', head: true })
-        .eq('status', 'resolved').gte('resolved_at', start).lt('resolved_at', end)),
-      countRows(db.from('incidents').select('id', { count: 'exact', head: true })
-        .eq('status', 'in_progress').eq('assigned_to', state.profile.id)),
+    const len = new Date(end) - new Date(start);
+    return { start: new Date(new Date(start) - len).toISOString(), end: start };
+  }
+
+  // How many days in [from..until] fall on a counted weekday.
+  function qualifyingDays(period, weekdays) {
+    const set = new Set((weekdays || [0,1,2,3,4,5,6]).map(Number));
+    let n = 0;
+    const d = new Date(period.from + 'T00:00:00');
+    const end = new Date(period.until + 'T00:00:00');
+    for (; d <= end; d.setDate(d.getDate() + 1)) if (set.has(d.getDay())) n++;
+    return n;
+  }
+
+  function pctChange(cur, prev) { return prev > 0 ? Math.round((cur - prev) / prev * 100) : 0; }
+  function isGood(cur, prev, dir) { return dir == null ? null : ((cur >= prev) === (dir === 'up')); }
+
+  function deltaPill(delta, good) {
+    const cls = good == null ? 'neutral' : (good ? 'good' : 'bad');
+    const arrow = delta >= 0 ? '▲' : '▼';
+    return el('span', { class: 'delta-pill delta-' + cls }, `${arrow} ${Math.abs(delta)}%`);
+  }
+
+  // o: { label, value, delta, good, live, hint, onClick }
+  function metricCard(o) {
+    const top = o.live
+      ? el('span', { class: 'kpi-live' }, [el('span', { class: 'kpi-dot' }), 'LIVE'])
+      : (o.delta == null ? null : deltaPill(o.delta, o.good));
+    const card = el('div', { class: 'kpi-card metric-card' + (o.onClick ? ' kpi-clickable' : '') }, [
+      el('div', { class: 'metric-head' }, [el('span', { class: 'kpi-label' }, o.label), top]),
+      el('div', { class: 'kpi-value' }, o.value == null ? '–' : String(o.value)),
+      o.hint ? el('div', { class: 'kpi-period' }, o.hint) : null,
     ]);
-    const cards = [
-      { id: 'completed', label: t('checklistsCompletedInPeriod'), value: completed },
-      { id: 'reports', label: t('reportsInPeriod'), value: reports },
-      { id: 'closed', label: t('reportsClosedInPeriod'), value: closed },
-      { id: 'assigned', label: t('inProgressAssignedToYou'), value: assigned },
-    ];
-    renderKpiToolbar(app, 'adminKpiVisible', periodKey, cards, () => go(homeView(), { reset: true }));
-    renderSortableKpiGrid(app, 'adminKpiOrder', visibleKpiCards(cards, 'adminKpiVisible'), { periodText });
+    if (o.onClick) card.addEventListener('click', o.onClick);
+    return card;
+  }
+
+  function medianDays(rows) {
+    const xs = rows.map(r => (new Date(r.resolved_at) - new Date(r.created_at)) / DAYMS)
+                   .filter(x => x >= 0).sort((a, b) => a - b);
+    if (!xs.length) return null;
+    const m = Math.floor(xs.length / 2);
+    const v = xs.length % 2 ? xs[m] : (xs[m - 1] + xs[m]) / 2;
+    return Math.round(v * 10) / 10;
+  }
+
+  async function renderAdminKpiDashboard(app) {
+    const periodKey = 'adminKpiPeriod', typeKey = 'adminKpiType', filterKey = 'adminKpiChecklist';
+    const period = kpiPeriod(periodKey);
+    const prev = previousBounds(period);
+    const cur = periodBounds(period);
+    const type = localStorage.getItem(typeKey) || 'overview';
+    const refresh = () => go(homeView(), { reset: true });
+
+    // ── toolbar: type (left) · checklist filter · period chip + calendar (right) ──
+    const typeSel = el('select', { class: 'kpi-filter', onchange: e => {
+      localStorage.setItem(typeKey, e.target.value); refresh();
+    } }, [opt('overview', t('kpiOverview')), opt('incidents', t('kpiIncidents')), opt('checklists', t('kpiChecklists'))]);
+    typeSel.value = type;
+
+    // checklists (with quotas) loaded up front; also feeds the filter dropdown
+    let checklists = [];
+    if (type === 'checklists') {
+      const { data } = await db.from('checklists').select('id,title,daily_quota,quota_weekdays');
+      checklists = (data || []).filter(c => c.daily_quota > 0);
+    }
+    const selectedCl = localStorage.getItem(filterKey) || 'all';
+    const clSel = el('select', { class: 'kpi-filter', onchange: e => {
+      localStorage.setItem(filterKey, e.target.value); refresh();
+    } }, [opt('all', t('allChecklists')), ...checklists.map(c => opt(c.id, c.title))]);
+    clSel.value = checklists.some(c => c.id === selectedCl) ? selectedCl : 'all';
+
+    const from = el('input', { type: 'date', value: period.from });
+    const until = el('input', { type: 'date', value: period.until });
+    const panel = el('div', { class: 'kpi-date-panel hidden' }, [
+      labeled(t('dateFrom'), from), labeled(t('dateUntil'), until),
+      el('div', { class: 'kpi-date-actions' }, [
+        el('button', { class: 'btn btn-ghost', onclick: () => { localStorage.removeItem(periodKey); refresh(); } }, t('today')),
+        el('button', { class: 'btn btn-primary', onclick: () => saveKpiPeriod(periodKey, from.value, until.value, refresh) }, t('apply')),
+      ]),
+    ]);
+    const calBtn = el('button', { class: 'iconbtn', title: t('dashboardPeriod'), onclick: () => panel.classList.toggle('hidden') }, '📅');
+
+    app.append(el('div', { class: 'kpi-control-wrap' }, [
+      el('div', { class: 'kpi-toolbar-row' }, [
+        typeSel,
+        el('span', { class: 'spacer' }),
+        type === 'checklists' ? clSel : null,
+        el('div', { class: 'kpi-period-chip' }, periodLabel(period)),
+        calBtn,
+      ]),
+      panel,
+    ]));
+
+    const host = el('div', {});
+    app.append(host);
+
+    if (type === 'overview') await renderOverviewKpi(host, period, cur, prev);
+    else if (type === 'incidents') await renderIncidentsKpi(host, period, cur, prev);
+    else await renderChecklistsKpi(host, period, prev, checklists, selectedCl);
+  }
+
+  // ── OVERVIEW ────────────────────────────────────────────────
+  async function renderOverviewKpi(host, period, cur, prev) {
+    const periodText = periodLabel(period);
+    const seriousIds = await seriousConsequenceIds();
+
+    const [backlog, unassigned, oldestRow] = await Promise.all([
+      countRows(db.from('incidents').select('id', { count: 'exact', head: true }).neq('status', 'resolved')),
+      countRows(db.from('incidents').select('id', { count: 'exact', head: true }).eq('status', 'open').is('assigned_to', null)),
+      db.from('incidents').select('created_at').neq('status', 'resolved').order('created_at', { ascending: true }).limit(1),
+    ]);
+    const oldestDays = oldestRow.data?.[0]
+      ? Math.floor((Date.now() - new Date(oldestRow.data[0].created_at)) / DAYMS) : 0;
+
+    const [serCur, serPrev, resCur, resPrev, repCur, repPrev, medCur, medPrev] = await Promise.all([
+      seriousCount(cur, seriousIds), seriousCount(prev, seriousIds),
+      countRows(db.from('incidents').select('id', { count: 'exact', head: true }).eq('status', 'resolved').gte('resolved_at', cur.start).lt('resolved_at', cur.end)),
+      countRows(db.from('incidents').select('id', { count: 'exact', head: true }).eq('status', 'resolved').gte('resolved_at', prev.start).lt('resolved_at', prev.end)),
+      countRows(db.from('incidents').select('id', { count: 'exact', head: true }).gte('created_at', cur.start).lt('created_at', cur.end)),
+      countRows(db.from('incidents').select('id', { count: 'exact', head: true }).gte('created_at', prev.start).lt('created_at', prev.end)),
+      resolveTimes(cur), resolveTimes(prev),
+    ]);
+    const rateCur = repCur ? Math.round(resCur / repCur * 100) : 0;
+    const ratePrev = repPrev ? Math.round(resPrev / repPrev * 100) : 0;
+    const medC = medianDays(medCur), medP = medianDays(medPrev);
+
+    const grid = el('div', { class: 'kpi-grid' }, [
+      metricCard({ label: t('reportsInPeriod'), value: backlog, live: true, hint: 'Open backlog' }),
+      metricCard({ label: t('unassigned'), value: unassigned, live: true }),
+      metricCard({ label: 'Oldest open', value: oldestDays + 'd', live: true }),
+      metricCard({ label: 'Serious', value: serCur, delta: pctChange(serCur, serPrev), good: isGood(serCur, serPrev, 'down'), hint: periodText }),
+      metricCard({ label: 'Resolution rate', value: rateCur + '%', delta: pctChange(rateCur, ratePrev), good: isGood(rateCur, ratePrev, 'up'), hint: periodText }),
+      metricCard({ label: 'Median resolve', value: medC == null ? '–' : medC + 'd', delta: medP ? pctChange(medC, medP) : null, good: isGood(medC || 0, medP || 0, 'down'), hint: periodText }),
+    ]);
+    host.append(grid);
+  }
+
+  // ── INCIDENTS ───────────────────────────────────────────────
+  async function renderIncidentsKpi(host, period, cur, prev) {
+    const periodText = periodLabel(period);
+    const { data: cats } = await db.from('incident_categories').select('id,name').eq('kind', 'consequence');
+    const seriousNames = ['Death', 'Injury or sick leave', 'Environmental impact'];
+    const seriousIds = (cats || []).filter(c => seriousNames.includes(c.name)).map(c => c.id);
+
+    const { data: rows = [] } = await db.from('incidents')
+      .select('id,consequence_ids,is_anonymous').gte('created_at', cur.start).lt('created_at', cur.end);
+    const { data: prevRows = [] } = await db.from('incidents')
+      .select('id,consequence_ids,is_anonymous').gte('created_at', prev.start).lt('created_at', prev.end);
+
+    const inSet = (ids, set) => (ids || []).some(id => set.includes(id));
+    const repCur = rows.length, repPrev = prevRows.length;
+    const serCur = rows.filter(r => inSet(r.consequence_ids, seriousIds)).length;
+    const serPrev = prevRows.filter(r => inSet(r.consequence_ids, seriousIds)).length;
+    const anonCur = repCur ? Math.round(rows.filter(r => r.is_anonymous).length / repCur * 100) : 0;
+    const anonPrev = repPrev ? Math.round(prevRows.filter(r => r.is_anonymous).length / repPrev * 100) : 0;
+
+    const [resCur, resPrev] = await Promise.all([
+      countRows(db.from('incidents').select('id', { count: 'exact', head: true }).eq('status', 'resolved').gte('resolved_at', cur.start).lt('resolved_at', cur.end)),
+      countRows(db.from('incidents').select('id', { count: 'exact', head: true }).eq('status', 'resolved').gte('resolved_at', prev.start).lt('resolved_at', prev.end)),
+    ]);
+
+    host.append(el('div', { class: 'kpi-grid' }, [
+      metricCard({ label: 'Reported', value: repCur, delta: pctChange(repCur, repPrev), good: isGood(repCur, repPrev, 'down'), hint: periodText }),
+      metricCard({ label: 'Resolved', value: resCur, delta: pctChange(resCur, resPrev), good: isGood(resCur, resPrev, 'up'), hint: periodText }),
+      metricCard({ label: 'Serious', value: serCur, delta: pctChange(serCur, serPrev), good: isGood(serCur, serPrev, 'down'), hint: periodText }),
+      metricCard({ label: 'Anonymous', value: anonCur + '%', delta: pctChange(anonCur, anonPrev), good: null, hint: periodText }),
+    ]));
+
+    // severity strip
+    const palette = { 'Operational disruption': '#888780', 'Financial loss': '#BA7517',
+      'Environmental impact': '#1D9E75', 'Injury or sick leave': '#D85A30', 'Death': '#A32D2D' };
+    const counts = (cats || []).map(c => ({
+      name: c.name, color: palette[c.name] || '#888780',
+      n: rows.filter(r => (r.consequence_ids || []).includes(c.id)).length,
+    })).filter(c => c.n > 0).sort((a, b) => b.n - a.n);
+    const total = counts.reduce((a, c) => a + c.n, 0) || 1;
+    const bar = el('div', { class: 'sev-bar' }, counts.map(c =>
+      el('div', { style: `width:${c.n / total * 100}%;background:${c.color}`, title: `${c.name}: ${c.n}` })));
+    const legend = el('div', { class: 'sev-legend' }, counts.map(c =>
+      el('span', {}, [el('i', { style: `background:${c.color}` }), `${c.name} ${c.n}`])));
+    host.append(el('div', { class: 'kpi-card', style: 'margin-top:14px' }, [
+      el('div', { class: 'kpi-label', style: 'margin-bottom:10px' }, 'Reports by worst consequence'), bar, legend,
+    ]));
+  }
+
+  // ── CHECKLISTS (quota model) ────────────────────────────────
+  async function renderChecklistsKpi(host, period, prev, checklists, selectedCl) {
+    const periodText = periodLabel(period);
+    const cur = periodBounds(period);
+    const scope = selectedCl === 'all' ? checklists : checklists.filter(c => c.id === selectedCl);
+    const scopeIds = scope.map(c => c.id);
+
+    // expected = Σ quota × qualifying days
+    const expected = scope.reduce((sum, c) => sum + c.daily_quota * qualifyingDays(period, c.quota_weekdays), 0);
+
+    // pull completion events for the range, current and previous
+    const fetchEvents = (b) => db.from('checklist_completions')
+      .select('checklist_id,completed_on')
+      .gte('completed_on', b.start.slice(0, 10)).lt('completed_on', b.end.slice(0, 10))
+      .in('checklist_id', scopeIds.length ? scopeIds : ['00000000-0000-0000-0000-000000000000']);
+    const [{ data: ev = [] }, { data: evPrev = [] }] = await Promise.all([fetchEvents(cur), fetchEvents(prev)]);
+
+    const completions = ev.length;
+    const prevPeriod = { from: prev.start.slice(0, 10), until: new Date(new Date(prev.end) - DAYMS).toISOString().slice(0, 10) };
+    const expectedPrev = scope.reduce((sum, c) => sum + c.daily_quota * qualifyingDays(prevPeriod, c.quota_weekdays), 0);
+    const rateCur = expected ? Math.round(completions / expected * 100) : 0;
+    const ratePrev = expectedPrev ? Math.round(evPrev.length / expectedPrev * 100) : 0;
+
+    // per checklist, per day → shortfalls
+    const got = {}; // got[checklistId][YYYY-MM-DD] = count
+    ev.forEach(e => { (got[e.checklist_id] ||= {})[e.completed_on] = ((got[e.checklist_id]?.[e.completed_on]) || 0) + 1; });
+    const shortfalls = [];
+    scope.forEach(c => {
+      const set = new Set((c.quota_weekdays || [0,1,2,3,4,5,6]).map(Number));
+      const d = new Date(period.from + 'T00:00:00'); const end = new Date(period.until + 'T00:00:00');
+      for (; d <= end; d.setDate(d.getDate() + 1)) {
+        if (!set.has(d.getDay())) continue;
+        const key = d.toISOString().slice(0, 10);
+        const n = got[c.id]?.[key] || 0;
+        if (n < c.daily_quota) shortfalls.push({ title: c.title, date: new Date(d), exp: c.daily_quota, got: n, short: c.daily_quota - n });
+      }
+    });
+    const missed = shortfalls.reduce((a, s) => a + s.short, 0);
+
+    const drillHost = el('div', { style: 'margin-top:12px' });
+    let open = false;
+    const drawDrill = () => {
+      drillHost.innerHTML = '';
+      if (!open) return;
+      if (!missed) { drillHost.append(el('div', { class: 'kpi-card' }, '✓ Every checklist hit its daily quota in this range.')); return; }
+      const card = el('div', { class: 'kpi-card' }, [
+        el('div', { class: 'kpi-label' }, `${missed} below quota across ${shortfalls.length} checklist-days`),
+      ]);
+      shortfalls.slice(0, 12).forEach(s => card.append(el('div', { class: 'miss-row' }, [
+        el('div', { class: 'miss-top' }, [
+          el('span', { style: 'flex:1' }, s.title),
+          el('span', { class: 'miss-pill' }, `short ${s.short}`),
+        ]),
+        el('p', { class: 'miss-sub' }, `${s.date.getDate()} ${s.date.toLocaleString('en', { month: 'short' })} · expected ${s.exp}, got ${s.got}`),
+      ])));
+      if (shortfalls.length > 12) card.append(el('p', { class: 'miss-sub', style: 'padding-top:10px' }, `+ ${shortfalls.length - 12} more`));
+      card.append(el('p', { class: 'miss-sub', style: 'padding-top:10px' }, t('expectedNote')));
+      drillHost.append(card);
+    };
+
+    host.append(el('div', { class: 'kpi-grid' }, [
+      metricCard({ label: t('checklistsCompletedInPeriod'), value: completions, delta: pctChange(completions, evPrev.length), good: isGood(completions, evPrev.length, 'up'), hint: periodText }),
+      metricCard({ label: 'Completion rate', value: rateCur + '%', delta: pctChange(rateCur, ratePrev), good: isGood(rateCur, ratePrev, 'up'), hint: periodText }),
+      metricCard({ label: 'Missed', value: missed, delta: pctChange(missed, 0), good: isGood(missed, 0, 'down'), hint: t('seeWhich') + ' ▾', onClick: () => { open = !open; drawDrill(); } }),
+    ]));
+    host.append(drillHost);
+  }
+
+  // ── shared incident helpers ─────────────────────────────────
+  async function seriousConsequenceIds() {
+    const { data: cats } = await db.from('incident_categories').select('id,name').eq('kind', 'consequence');
+    const names = ['Death', 'Injury or sick leave', 'Environmental impact'];
+    return (cats || []).filter(c => names.includes(c.name)).map(c => c.id);
+  }
+  async function seriousCount(bounds, seriousIds) {
+    if (!seriousIds.length) return 0;
+    const { data = [] } = await db.from('incidents').select('consequence_ids').gte('created_at', bounds.start).lt('created_at', bounds.end);
+    return data.filter(r => (r.consequence_ids || []).some(id => seriousIds.includes(id))).length;
+  }
+  async function resolveTimes(bounds) {
+    const { data = [] } = await db.from('incidents').select('created_at,resolved_at')
+      .eq('status', 'resolved').gte('resolved_at', bounds.start).lt('resolved_at', bounds.end);
+    return data;
   }
 
   async function countRows(query) {
@@ -450,48 +700,6 @@
     return period.from === period.until ? period.from : `${period.from} - ${period.until}`;
   }
 
-  function visibleKpiCards(cards, storageKey) {
-    const selected = localStorage.getItem(storageKey) || 'all';
-    return selected === 'all' ? cards : cards.filter(card => card.id === selected);
-  }
-
-  function renderKpiToolbar(host, filterKey, periodKey, cards, refreshHome) {
-    const period = kpiPeriod(periodKey);
-    const filter = el('select', { class: 'kpi-filter', onchange: e => {
-      localStorage.setItem(filterKey, e.target.value);
-      refreshHome();
-    } }, [
-      opt('all', t('showAllKpis')),
-      ...cards.map(card => opt(card.id, card.label)),
-    ]);
-    const selected = localStorage.getItem(filterKey) || 'all';
-    filter.value = cards.some(card => card.id === selected) ? selected : 'all';
-    const from = el('input', { type: 'date', value: period.from });
-    const until = el('input', { type: 'date', value: period.until });
-    const panel = el('div', { class: 'kpi-date-panel hidden' }, [
-      labeled(t('dateFrom'), from),
-      labeled(t('dateUntil'), until),
-      el('div', { class: 'kpi-date-actions' }, [
-        el('button', { class: 'btn btn-ghost', onclick: () => {
-          localStorage.removeItem(periodKey);
-          refreshHome();
-        } }, t('today')),
-        el('button', { class: 'btn btn-primary', onclick: () => saveKpiPeriod(periodKey, from.value, until.value, refreshHome) }, t('apply')),
-      ]),
-    ]);
-    const calendar = el('button', { class: 'iconbtn kpi-calendar-btn', title: t('dashboardPeriod'), onclick: () => {
-      panel.classList.toggle('hidden');
-    } }, '📅');
-    host.append(el('div', { class: 'kpi-control-wrap' }, [
-      el('div', { class: 'kpi-toolbar' }, [
-        el('div', { class: 'kpi-select-wrap' }, filter),
-        el('div', { class: 'kpi-period-chip' }, periodLabel(period)),
-        calendar,
-      ]),
-      panel,
-    ]));
-  }
-
   function saveKpiPeriod(storageKey, from, until, refreshHome) {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(from || '') || !/^\d{4}-\d{2}-\d{2}$/.test(until || '')) {
       toast(t('invalidPeriod'), 'err');
@@ -517,56 +725,6 @@
     const ordered = from <= until ? { from, until } : { from: until, until: from };
     localStorage.setItem(storageKey, JSON.stringify(ordered));
     go(homeView(), { reset: true });
-  }
-
-  function renderSortableKpiGrid(host, storageKey, cards, options = {}) {
-    const saved = JSON.parse(localStorage.getItem(storageKey) || '[]');
-    const rank = new Map(saved.map((id, idx) => [id, idx]));
-    cards.sort((a, b) => (rank.get(a.id) ?? 99) - (rank.get(b.id) ?? 99));
-    const grid = el('div', { class: 'kpi-grid admin-kpi-grid' });
-    let dragIdx = null;
-    let didDrag = false;
-    const draw = () => {
-      grid.innerHTML = '';
-      cards.forEach((card, idx) => {
-        const node = kpiCard(card.label, card.value, options.periodText);
-        node.setAttribute('draggable', 'true');
-        node.addEventListener('dragstart', e => {
-          dragIdx = idx;
-          didDrag = true;
-          e.dataTransfer.effectAllowed = 'move';
-          e.dataTransfer.setData('text/plain', card.id);
-          node.classList.add('dragging');
-        });
-        node.addEventListener('dragend', () => { dragIdx = null; node.classList.remove('dragging'); });
-        node.addEventListener('dragover', e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; });
-        node.addEventListener('drop', e => {
-          e.preventDefault();
-          if (dragIdx === null || dragIdx === idx) return;
-          const [moved] = cards.splice(dragIdx, 1);
-          cards.splice(idx, 0, moved);
-          localStorage.setItem(storageKey, JSON.stringify(cards.map(c => c.id)));
-          dragIdx = null;
-          draw();
-        });
-        node.addEventListener('click', () => {
-          if (didDrag) { didDrag = false; return; }
-          if (options.onCardClick) options.onCardClick(card);
-        });
-        grid.append(node);
-      });
-    };
-    draw();
-    host.append(grid);
-  }
-
-  function kpiCard(label, value, periodText = '') {
-    return el('div', { class: 'kpi-card', title: t('dashboardPeriod') }, [
-      el('span', { class: 'drag-handle kpi-drag', title: t('dragReorder') }, '⠿'),
-      el('div', { class: 'kpi-value' }, value == null ? '-' : String(value)),
-      el('div', { class: 'kpi-label' }, label),
-      periodText ? el('div', { class: 'kpi-period' }, periodText) : null,
-    ]);
   }
 
   // Inclusive date-range test against an ISO timestamp; bounds are YYYY-MM-DD strings.
@@ -951,6 +1109,20 @@
       render(app) {
         const title = el('input', { type: 'text', value: existing?.title || '', placeholder: 'Checklist title' });
         let items = (existing?.items || []).map(i => ({ ...i }));
+        const quota = el('input', { type: 'number', min: '0', step: '1',
+          value: existing?.daily_quota ?? 0, placeholder: '0' });
+
+        const WEEKDAYS = [['1','Mon'],['2','Tue'],['3','Wed'],['4','Thu'],['5','Fri'],['6','Sat'],['0','Sun']];
+        const quotaDays = new Set((existing?.quota_weekdays ?? [0,1,2,3,4,5,6]).map(Number));
+        const dayRow = el('div', { class: 'weekday-row' }, WEEKDAYS.map(([v, lbl]) => {
+          const n = Number(v);
+          const b = el('button', { type: 'button', class: 'btn btn-ghost weekday-btn', onclick: () => {
+            quotaDays.has(n) ? quotaDays.delete(n) : quotaDays.add(n);
+            b.classList.toggle('active');
+          } }, lbl);
+          if (quotaDays.has(n)) b.classList.add('active');
+          return b;
+        }));
         let dragIdx = null;
         const list = el('div', {});
         const draw = () => {
@@ -1039,7 +1211,10 @@
         };
         draw();
         app.append(
-          labeled(t('title'), title, true), list,
+          labeled(t('title'), title, true),
+          labeled(t('dailyQuota'), quota),
+          labeled(t('quotaDays'), dayRow),
+          list,
           el('button', { class: 'btn btn-ghost btn-block', style: 'margin-bottom:16px',
             onclick: () => { items.push({ id: crypto.randomUUID(), label: '' }); draw(); } }, t('addItem')),
           el('button', { class: 'btn btn-primary btn-block', onclick: save }, t('saveChecklist')),
@@ -1056,7 +1231,13 @@
             image: i.image || null,
           }));
           if (!title.value.trim() || !clean.length) return toast('Add a title and at least one item.', 'err');
-          const payload = { group_id: g.id, title: title.value.trim(), items: clean };
+          const payload = {
+            group_id: g.id,
+            title: title.value.trim(),
+            items: clean,
+            daily_quota: Math.max(0, parseInt(quota.value, 10) || 0),
+            quota_weekdays: [...quotaDays].sort((a, b) => a - b),
+          };
           const q = existing ? db.from('checklists').update(payload).eq('id', existing.id)
                              : db.from('checklists').insert(payload);
           const { error } = await q;
