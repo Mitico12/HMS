@@ -1,0 +1,800 @@
+// config.js — shared Supabase client + helpers for both admin.html and user.html.
+// Imported as an ES module: <script type="module"> import { db, ... } from './config.js'
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+
+// ─── FILL THESE IN ───────────────────────────────────────────
+// Project settings → API. The anon key is safe to ship client-side;
+// Row Level Security in schema.sql is what actually protects the data.
+const SUPABASE_URL = 'https://vtiobzmsalsvwocvlotm.supabase.co';
+const SUPABASE_ANON_KEY = 'sb_publishable_BfCizLoxWkUk2L9sUXzv9w_M5TdA3uD';
+// ─────────────────────────────────────────────────────────────
+
+export const db = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+// A throwaway auth client used by admins when creating accounts.
+// It prevents the admin's own browser session from being replaced by the new user session.
+export function newAuthClient() {
+  return createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+    auth: {
+      persistSession: false,
+      autoRefreshToken: false,
+      detectSessionInUrl: false,
+    },
+  });
+}
+
+// Return the signed-in user's profile (with role), or null.
+export async function currentProfile() {
+  const { data: { user } } = await db.auth.getUser();
+  if (!user) return null;
+  const { data } = await db.from('profiles').select('*').eq('id', user.id).single();
+  return data;
+}
+
+// ── Role hierarchy ─────────────────────────────────────────────
+//   sysadmin > superuser > admin > verneombud > user
+//   'super_admin' is the legacy value (pre-migration) and ranks as sysadmin
+//   so the new client never locks the top tier out before the SQL migration runs.
+export const ROLE_RANK = { user: 0, verneombud: 1, admin: 2, superuser: 3, sysadmin: 4, super_admin: 4 };
+export const roleRank = (p) => ROLE_RANK[typeof p === 'string' ? p : p?.role] ?? 0;
+export const isSysadmin   = (p) => roleRank(p) >= 4;            // programmers; hidden top tier
+export const isSuperPlus  = (p) => roleRank(p) >= 3;            // superuser & sysadmin — full power
+export const isAdminPlus  = (p) => roleRank(p) >= 2;            // admin and above
+export const canViewChecklistLogs = (p) => roleRank(p) >= 1;   // verneombud and above
+export const canAccessVarsling = (p) => isAdminPlus(p) && !!(typeof p === 'object' && p?.can_access_varsling);
+export const isSuspended = (p) => !!(typeof p === 'object' && p?.is_suspended);
+
+// Guard a page: ensure someone is signed in and meets a minimum rank.
+//   admin.html passes { admin: true } → verneombud (rank 1) or above may enter;
+//   the admin UI then restricts each tier to what it may see.
+export async function requireSession({ admin = false, minRank = 0 } = {}) {
+  const profile = await currentProfile();
+  if (!profile) return { ok: false, reason: 'no-session' };
+  const required = admin ? 1 : minRank;
+  if (roleRank(profile) < required) return { ok: false, reason: 'not-admin', profile };
+  return { ok: true, profile };
+}
+
+// Tiny DOM helper: el('div', { class: 'x' }, [children]) or el('div', 'text').
+export function el(tag, props = {}, kids = []) {
+  const node = document.createElement(tag);
+  if (typeof props === 'string') { node.textContent = props; return node; }
+  for (const [k, v] of Object.entries(props)) {
+    if (k === 'class') node.className = v;
+    else if (k === 'html') node.innerHTML = v;
+    else if (k.startsWith('on') && typeof v === 'function') node.addEventListener(k.slice(2), v);
+    else if (v != null) node.setAttribute(k, v);
+  }
+  for (const kid of [].concat(kids)) {
+    if (kid == null) continue;
+    node.appendChild(typeof kid === 'string' ? document.createTextNode(kid) : kid);
+  }
+  return node;
+}
+
+export const $ = (sel, root = document) => root.querySelector(sel);
+
+// <option> shorthand and a labelled form field — shared by the group modules.
+export const opt = (v, label) => el('option', { value: v }, label);
+export function labeled(text, inputEl, required = false) {
+  return el('label', { class: 'field' },
+    [el('span', {}, [text, required ? el('span', { class: 'req' }, ' *') : null]), inputEl]);
+}
+
+export function initTheme() {
+  const saved = localStorage.getItem('theme');
+  const prefersDark = window.matchMedia?.('(prefers-color-scheme: dark)')?.matches;
+  document.documentElement.dataset.theme = saved || (prefersDark ? 'dark' : 'light');
+}
+
+export function themeToggleButton() {
+  initTheme();
+  const btn = el('button', { class: 'iconbtn theme-toggle', title: t('toggleDarkMode'), onclick: toggleTheme }, themeIcon());
+  function toggleTheme() {
+    const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+    document.documentElement.dataset.theme = next;
+    localStorage.setItem('theme', next);
+    btn.textContent = themeIcon();
+  }
+  return btn;
+}
+
+function themeIcon() {
+  return document.documentElement.dataset.theme === 'dark' ? '☀' : '◐';
+}
+
+const LANG_KEY = 'language';
+const DEFAULT_LANG = 'en';
+
+const TEXT = {
+  en: {
+    access: 'Access',
+    accountsAccess: 'Accounts & access',
+    actionLog: 'Action log',
+    add: 'Add',
+    addActionNote: 'Add action / note',
+    addField: '+ Add field',
+    addGroup: 'Add group',
+    addItem: '+ Add item',
+    addToLog: 'Add to log',
+    addUser: '+ Add user',
+    adminConsole: 'Admin console',
+    adminConsoleMeta: 'Manage groups, incidents, and access',
+    all: 'All',
+    allChecklists: 'All checklists',
+    apply: 'Apply',
+    allTypes: 'All types',
+    anonymous: 'Anonymous',
+    admins: 'Admins',
+    archive: 'Archive',
+    archived: 'Archived',
+    archivedReports: 'Archived reports',
+    checklistLogs: 'Checklist logs',
+    dateFrom: 'From',
+    dateUntil: 'Until',
+    dashboardPeriod: 'Dashboard period',
+    periodPrompt: 'Use YYYY-MM-DD or YYYY-MM-DD..YYYY-MM-DD.',
+    invalidPeriod: 'Use YYYY-MM-DD or YYYY-MM-DD..YYYY-MM-DD.',
+    exportExcel: 'Export to Excel',
+    importExcel: 'Import Excel',
+    expected: 'Expected',
+    expectedMax: 'Expected max',
+    expectedMin: 'Expected min',
+    expectedValues: 'Expected values',
+    filterByType: 'Report type',
+    filterByUser: 'User',
+    hazard: 'Hazard',
+    hazardConsequences: 'What could it lead to?',
+    notifications: 'Notifications',
+    notifyAll: 'Every report',
+    notifyOff: 'Off',
+    notifyRed: 'Emergencies only',
+    reportHazard: 'Report hazard',
+    roundNearest: 'Nearest',
+    roundUp: 'Round up',
+    sliderRound: 'Display',
+    unarchive: 'Unarchive',
+    whatHazard: 'What is the hazard?',
+    whenSpotted: 'When did you notice it?',
+    anyAssignee: 'Any assignee',
+    anyCourse: 'Any course',
+    anyReporter: 'Anyone',
+    filterByAssignee: 'Assigned admin',
+    filterByReporter: 'Reported by',
+    inProgressAssignedToYou: 'In progress assigned to you',
+    unassigned: 'Unassigned',
+    assignedTo: 'Assigned to',
+    attachments: 'Pictures',
+    changeRequests: 'Change requests',
+    checklist: 'Checklist',
+    checklistComplete: 'Checklist submitted.',
+    checklistTypeCheck: 'Check',
+    checklistTypeChoice: 'Multiple choice',
+    checklistTypeText: 'Text',
+    checklistsCompletedInPeriod: 'Completed checklists',
+    checklistsCompletedToday: 'Completed checklists today',
+    checklistLogNeedsAttention: 'Needs review',
+    checklistLogsMeta: 'Completed checklist history',
+    checklistNotesPlaceholder: 'Write any notes before submitting.',
+    checklistProgress: '{done} of {total} complete',
+    checklists: 'Checklists',
+    courses: 'Courses',
+    choose: 'Choose',
+    closeCase: 'Close case',
+    completeChecklist: 'Complete checklist',
+    completed: 'Completed',
+    completedCourses: 'Completed courses',
+    completedCoursesMeta: 'Passed course history',
+    consequence: 'Consequence',
+    correctiveActionPlaceholder: 'Describe what must be done to fix this.',
+    correctiveActionRequired: 'Add what must be done for every item outside expected values.',
+    createAccount: 'Create account',
+    createOne: 'Create one',
+    deleteChecklist: 'Delete checklist',
+    deleteLog: 'Delete log',
+    deleteProcedure: 'Delete procedure',
+    description: 'Description',
+    documents: 'Documents',
+    dragReorder: 'Drag to reorder',
+    draft: 'draft',
+    draftSaved: 'Draft saved.',
+    edit: 'Edit',
+    editChecklist: 'Edit checklist',
+    editProcedure: 'Edit procedure',
+    email: 'Email',
+    enterLogin: 'Enter your username or email and password.',
+    entries: 'Entries',
+    field: 'Field {n}',
+    fields: 'fields',
+    finalReport: 'Final report',
+    fixed: 'Fixed',
+    fixOnNo: 'No requires corrective action',
+    groups: 'Groups',
+    haveAccount: 'Have an account? Sign in',
+    incident: 'Incident',
+    incidentCategories: 'Incident categories',
+    incidentReports: 'Incident reports',
+    suggestion: 'Suggestion',
+    inProgress: 'In progress',
+    items: '{count} items',
+    language: 'Language',
+    languageSaved: 'Language updated.',
+    label: 'Label',
+    itemImage: 'Image',
+    locationOptional: 'Location (optional)',
+    logs: 'Logs',
+    logsMeta: 'Reports, checklists, and courses',
+    missingItems: '{count} missing',
+    missing: 'Missing',
+    myReports: 'My reports',
+    name: 'Name',
+    needAccount: 'Need an account? ',
+    newChecklist: 'New checklist',
+    newGroup: 'New group',
+    newProcedure: 'New procedure',
+    noChecklistLogs: 'No checklist logs yet.',
+    noChecklists: 'No checklists yet',
+    noCompletedCourses: 'No completed courses yet.',
+    noChecklistsHint: 'Tap + to build one.',
+    noDocuments: 'No documents',
+    noDocumentsHint: 'Nothing shared here yet.',
+    noEntries: 'No entries yet',
+    noEntriesHint: 'Submissions from users appear here.',
+    noIncidents: 'No incidents reported',
+    noIncidentsHint: 'Reports submitted by users land here.',
+    noProcedures: 'No procedures yet',
+    noProceduresHint: 'Build a form users can fill in.',
+    noReports: 'No reports',
+    noReportsHint: 'Incidents you report will appear here.',
+    noLabel: 'No',
+    notes: 'Notes',
+    open: 'Open',
+    openWithConsequences: 'Open with consequences',
+    optionsComma: 'Options (comma-separated)',
+    other: 'Other',
+    outsideExpected: 'Needs action',
+    removeImage: 'Remove image',
+    password: 'Password',
+    photosOptional: 'Pictures (optional)',
+    printInspectionReport: 'Print inspection report',
+    processing: 'Processing',
+    procedures: 'Procedures',
+    questions: 'questions',
+    published: 'published',
+    publish: 'Publish',
+    reportAnonymously: 'Report anonymously',
+    reportIncident: 'Report incident',
+    reports: 'Reports',
+    reportLogsMeta: 'Archived reports, hazards, and suggestions',
+    reportTypeHazards: 'Hazards',
+    reportTypeIncidents: 'Incidents',
+    reportTypeSuggestions: 'Suggestions',
+    reportSuggestion: 'Send suggestion',
+    reportsClosedInPeriod: 'Reports closed',
+    reportsClosedToday: 'Reports closed today',
+    reportsInPeriod: 'Reported incidents',
+    reportsToday: 'Reports today',
+    requestChange: 'Request change',
+    required: 'Required',
+    resolved: 'Resolved',
+    returnStart: 'Return to start',
+    rootCause: 'Root cause',
+    saveAssignment: 'Save assignment',
+    saveChecklist: 'Save checklist',
+    saveDraft: 'Save draft',
+    saveFinalReport: 'Save final report',
+    score: 'Score',
+    searchUsers: 'Search users',
+    selectTypeCheckbox: 'Checkbox',
+    selectTypeCheckboxes: 'Checkboxes (multiple)',
+    selectTypeDropdown: 'Dropdown',
+    selectTypeLong: 'Long text',
+    selectTypeNumber: 'Number',
+    selectTypeShort: 'Short text',
+    selectTypeSlider: 'Slider',
+    sliderLeft: 'Left label',
+    sliderMax: 'Max',
+    sliderMin: 'Min',
+    sliderRight: 'Right label',
+    settings: 'Settings',
+    showAllKpis: 'Show all KPIs',
+    signIn: 'Sign in',
+    signInContinue: 'Sign in to continue.',
+    signInTools: 'Sign in to your workplace tools.',
+    signOut: 'Sign out',
+    signedInAs: 'Signed in as {name}.',
+    submit: 'Submit',
+    submitReport: 'Submit report',
+    submitted: 'Submitted',
+    submittedAnswers: 'Submitted answers',
+    submittedPhoto: 'Submitted picture',
+    suggestionText: 'What would you like to suggest?',
+    superAdmins: 'Super admins',
+    roleUser: 'User',
+    roleVerneombud: 'Safety rep',
+    roleAdmin: 'Admin',
+    roleSuperuser: 'Superuser',
+    roleSysadmin: 'Sys-admin',
+    safetyReps: 'Safety reps',
+    superusers: 'Superusers',
+    sysadmins: 'Sys-admins',
+    varsling: 'Varsling',
+    varslingDesc: 'Confidential report for serious matters. Handled by a few selected people.',
+    fileVarsling: 'File a varsling',
+    varslingTitle: 'What is this about?',
+    varslingDetails: 'Describe what happened',
+    varslingSubmitted: 'Varsling submitted. It will be handled confidentially.',
+    varslingAccess: 'Varsling access',
+    varslingAccessGranted: 'Varsling access granted.',
+    varslingAccessRevoked: 'Varsling access revoked.',
+    noVarslinger: 'No varslinger.',
+    confidential: 'Confidential',
+    submitAnonymously: 'Submit anonymously',
+    assigned: 'Assigned',
+    assignedToComplete: 'Assigned to complete',
+    reason: 'Reason',
+    revoke: 'Revoke',
+    suspend: 'Suspend',
+    suspended: 'Suspended',
+    unsuspend: 'Unsuspend',
+    accountSuspended: 'Account suspended',
+    accountSuspendedBody: 'Your account is under sys-admin review and is temporarily locked. Another sys-admin must resolve the case.',
+    sysadminReviewTitle: 'Sys-admin action requires review',
+    sysadminReviewBody: 'Give a clear reason for this sys-admin action.',
+    noThirdSysadminWarning: '',
+    emergencyTitle: '🚨 Sys-admin emergency',
+    emergencyBody: 'A sys-admin opened a case against another sys-admin. Review and decide.',
+    upholdAction: 'Uphold',
+    revertAction: 'Revert (keep initiator suspended)',
+    bothSuspended: 'Both accounts have been suspended pending review.',
+    status: 'Status',
+    resolution: 'Resolution / notes',
+    save: 'Save',
+    deleteAction: 'Delete',
+    saved: 'Saved.',
+    title: 'Title',
+    toggleDarkMode: 'Toggle dark mode',
+    today: 'Today',
+    totalAdmins: 'Total admins',
+    totalUsers: 'Total users',
+    type: 'Type',
+    upload: 'Upload',
+    uploadDocument: 'Upload a document',
+    users: 'Users',
+    usernameOrEmail: 'Username or email',
+    userEmailNotFound: 'No account found for that username.',
+    waitingApproval: 'Waiting for approval',
+    whatHappened: 'What happened?',
+    whatHappenedTitle: 'What happened',
+    whatMustBeDone: 'What must be done to fix this?',
+    whatNeedsFixing: 'What needs fixing?',
+    whenHappened: 'When did it happen?',
+    withinExpected: 'OK',
+    workerApp: 'Worker app',
+    workerAppMeta: 'Checklists, reports, and documents',
+    questionImage: 'Checklist picture',
+    needsActionCount: '{count} need action',
+    yesLabel: 'Yes',
+    yourRecentReports: 'Your recent reports',
+    yourReport: 'Your report',
+    yourDetails: 'Your details',
+    dailyQuota: 'Daily quota',
+    quotaDays: 'Counts on',
+    kpiOverview: 'Overview — triage',
+    kpiIncidents: 'Incidents',
+    kpiChecklists: 'Checklists',
+    kpiAdminPerformance: 'Admin performance',
+    assignedReports: 'Assigned reports',
+    completedTotal: 'Completed total',
+    completionRate: 'Completion rate',
+    completedToday: 'Completed today',
+    noAdminsFound: 'No admins found',
+    createOrPromoteAdmin: 'Create or promote an admin first.',
+    seeWhich: 'See which',
+    expectedNote: 'Expected = daily quota × qualifying days. Match a gap to whoever was on shift.',
+    latestChecklists: 'Latest checklists',
+    noRecentChecklists: 'No checklist submissions in this period.',
+    expectedVsReceived: 'Expected vs received',
+    dailyExpected: 'Daily expected',
+    receivedLabel: 'Received',
+    perDayShort: 'day',
+    more: 'more',
+    showLess: 'Show less',
+    tapToSeeFiled: 'Tap to see when each was filed ▾',
+    whenFiled: 'When filed',
+    allAdmins: 'All admins',
+    completionByAdmin: 'Completion by admin',
+    hiddenGroups: 'Hidden groups',
+    noHiddenGroups: 'No hidden groups.',
+    restore: 'Restore',
+    permanentDelete: 'Permanently delete',
+    requestDelete: 'Request delete',
+    approveDelete: 'Approve delete',
+    deleteReason: 'Reason for deletion',
+    deleteRequested: 'Delete request submitted.',
+    deleteApproved: 'Delete request approved.',
+    groupDeleted: 'Group permanently deleted.',
+    pendingDeleteRequest: 'Pending delete request',
+    pendingDeleteRequests: 'Pending delete requests',
+    hideGroup: 'Hide group',
+    groupHidden: 'Group hidden.',
+    groupRestored: 'Group restored.',
+  },
+  no: {
+    access: 'Tilgang',
+    accountsAccess: 'Kontoer og tilgang',
+    actionLog: 'Handlingslogg',
+    add: 'Legg til',
+    addActionNote: 'Legg til handling / notat',
+    addField: '+ Legg til felt',
+    addGroup: 'Legg til gruppe',
+    addItem: '+ Legg til punkt',
+    addToLog: 'Legg til i logg',
+    addUser: '+ Legg til bruker',
+    adminConsole: 'Administrasjon',
+    adminConsoleMeta: 'Administrer grupper, hendelser og tilgang',
+    all: 'Alle',
+    allChecklists: 'Alle sjekklister',
+    apply: 'Bruk',
+    allTypes: 'Alle typer',
+    anonymous: 'Anonym',
+    admins: 'Administratorer',
+    archive: 'Arkiver',
+    archived: 'Arkivert',
+    archivedReports: 'Arkiverte rapporter',
+    checklistLogs: 'Sjekklistelogger',
+    dateFrom: 'Fra',
+    dateUntil: 'Til',
+    dashboardPeriod: 'Dashboardperiode',
+    periodPrompt: 'Bruk YYYY-MM-DD eller YYYY-MM-DD..YYYY-MM-DD.',
+    invalidPeriod: 'Bruk YYYY-MM-DD eller YYYY-MM-DD..YYYY-MM-DD.',
+    exportExcel: 'Eksporter til Excel',
+    importExcel: 'Importer Excel',
+    expected: 'Forventet',
+    expectedMax: 'Forventet maks',
+    expectedMin: 'Forventet min',
+    expectedValues: 'Forventede verdier',
+    filterByType: 'Rapporttype',
+    filterByUser: 'Bruker',
+    hazard: 'Fare',
+    hazardConsequences: 'Hva kan det føre til?',
+    notifications: 'Varslinger',
+    notifyAll: 'Alle rapporter',
+    notifyOff: 'Av',
+    notifyRed: 'Kun nødstilfeller',
+    reportHazard: 'Rapporter fare',
+    roundNearest: 'Nærmeste',
+    roundUp: 'Rund opp',
+    sliderRound: 'Visning',
+    unarchive: 'Gjenopprett',
+    whatHazard: 'Hva er faren?',
+    whenSpotted: 'Når oppdaget du den?',
+    anyAssignee: 'Alle tildelte',
+    anyCourse: 'Alle kurs',
+    anyReporter: 'Alle',
+    filterByAssignee: 'Tildelt admin',
+    filterByReporter: 'Rapportert av',
+    unassigned: 'Ikke tildelt',
+    assignedTo: 'Tildelt til',
+    inProgressAssignedToYou: 'Pagar og tildelt deg',
+    attachments: 'Bilder',
+    changeRequests: 'Endringsforesporsler',
+    checklist: 'Sjekkliste',
+    checklistComplete: 'Sjekkliste sendt inn.',
+    checklistTypeCheck: 'Avkryssing',
+    checklistTypeChoice: 'Flervalg',
+    checklistTypeText: 'Tekst',
+    checklistsCompletedInPeriod: 'Fullforte sjekklister',
+    checklistsCompletedToday: 'Fullforte sjekklister i dag',
+    checklistLogNeedsAttention: 'Ma ses gjennom',
+    checklistLogsMeta: 'Historikk for innsendte sjekklister',
+    checklistNotesPlaceholder: 'Skriv eventuelle notater for innsending.',
+    checklistProgress: '{done} av {total} fullfort',
+    checklists: 'Sjekklister',
+    courses: 'Kurs',
+    choose: 'Velg',
+    closeCase: 'Lukk sak',
+    completeChecklist: 'Fullfor sjekkliste',
+    completed: 'Fullfort',
+    completedCourses: 'Fullforte kurs',
+    completedCoursesMeta: 'Historikk for bestatte kurs',
+    consequence: 'Konsekvens',
+    correctiveActionPlaceholder: 'Beskriv hva som ma gjores for a rette dette.',
+    correctiveActionRequired: 'Fyll inn hva som ma gjores for alle punkter utenfor forventede verdier.',
+    createAccount: 'Opprett konto',
+    createOne: 'Opprett en',
+    deleteChecklist: 'Slett sjekkliste',
+    deleteLog: 'Slett logg',
+    deleteProcedure: 'Slett prosedyre',
+    description: 'Beskrivelse',
+    documents: 'Dokumenter',
+    dragReorder: 'Dra for å endre rekkefølge',
+    draft: 'utkast',
+    draftSaved: 'Utkast lagret.',
+    edit: 'Rediger',
+    editChecklist: 'Rediger sjekkliste',
+    editProcedure: 'Rediger prosedyre',
+    email: 'E-post',
+    enterLogin: 'Skriv inn brukernavn eller e-post og passord.',
+    entries: 'Innsendinger',
+    field: 'Felt {n}',
+    fields: 'felt',
+    finalReport: 'Sluttrapport',
+    fixed: 'Rettet',
+    fixOnNo: 'Nei krever korrigerende tiltak',
+    groups: 'Grupper',
+    haveAccount: 'Har du konto? Logg inn',
+    incident: 'Hendelse',
+    incidentCategories: 'Hendelseskategorier',
+    incidentReports: 'Hendelsesrapporter',
+    suggestion: 'Forslag',
+    inProgress: 'Pagar',
+    items: '{count} punkter',
+    language: 'Språk',
+    languageSaved: 'Språk oppdatert.',
+    label: 'Etikett',
+    itemImage: 'Bilde',
+    locationOptional: 'Sted (valgfritt)',
+    logs: 'Logger',
+    logsMeta: 'Rapporter, sjekklister og kurs',
+    missingItems: '{count} mangler',
+    missing: 'Mangler',
+    myReports: 'Mine rapporter',
+    name: 'Navn',
+    needAccount: 'Trenger du konto? ',
+    newChecklist: 'Ny sjekkliste',
+    newGroup: 'Ny gruppe',
+    newProcedure: 'Ny prosedyre',
+    noChecklistLogs: 'Ingen sjekklistelogger enna.',
+    noChecklists: 'Ingen sjekklister enna',
+    noCompletedCourses: 'Ingen fullforte kurs enna.',
+    noChecklistsHint: 'Trykk + for a lage en.',
+    noDocuments: 'Ingen dokumenter',
+    noDocumentsHint: 'Ingenting er delt her enna.',
+    noEntries: 'Ingen innsendinger enna',
+    noEntriesHint: 'Innsendinger fra brukere vises her.',
+    noIncidents: 'Ingen hendelser rapportert',
+    noIncidentsHint: 'Rapporter fra brukere vises her.',
+    noProcedures: 'Ingen prosedyrer enna',
+    noProceduresHint: 'Lag et skjema brukere kan fylle ut.',
+    noReports: 'Ingen rapporter',
+    noReportsHint: 'Hendelser du rapporterer vises her.',
+    noLabel: 'Nei',
+    notes: 'Notater',
+    open: 'Apen',
+    openWithConsequences: 'Apen med konsekvenser',
+    optionsComma: 'Valg (kommaseparert)',
+    other: 'Annet',
+    outsideExpected: 'Krever tiltak',
+    removeImage: 'Fjern bilde',
+    password: 'Passord',
+    photosOptional: 'Bilder (valgfritt)',
+    printInspectionReport: 'Skriv ut inspeksjonsrapport',
+    processing: 'Behandling',
+    procedures: 'Prosedyrer',
+    questions: 'sporsmal',
+    published: 'publisert',
+    publish: 'Publiser',
+    reportAnonymously: 'Rapporter anonymt',
+    reportIncident: 'Rapporter hendelse',
+    reports: 'Rapporter',
+    reportLogsMeta: 'Arkiverte rapporter, farer og forslag',
+    reportTypeHazards: 'Farer',
+    reportTypeIncidents: 'Hendelser',
+    reportTypeSuggestions: 'Forslag',
+    reportSuggestion: 'Send forslag',
+    reportsClosedInPeriod: 'Rapporter lukket',
+    reportsClosedToday: 'Rapporter lukket i dag',
+    reportsInPeriod: 'Rapporterte hendelser',
+    reportsToday: 'Rapporter i dag',
+    requestChange: 'Be om endring',
+    required: 'Pakrevd',
+    resolved: 'Lost',
+    returnStart: 'Tilbake til start',
+    rootCause: 'Rotarsak',
+    saveAssignment: 'Lagre tildeling',
+    saveChecklist: 'Lagre sjekkliste',
+    saveDraft: 'Lagre utkast',
+    saveFinalReport: 'Lagre sluttrapport',
+    score: 'Poeng',
+    searchUsers: 'Sok etter brukere',
+    selectTypeCheckbox: 'Avkryssing',
+    selectTypeCheckboxes: 'Avkryssing (flere)',
+    selectTypeDropdown: 'Nedtrekk',
+    selectTypeLong: 'Lang tekst',
+    selectTypeNumber: 'Tall',
+    selectTypeShort: 'Kort tekst',
+    selectTypeSlider: 'Skala',
+    sliderLeft: 'Venstre etikett',
+    sliderMax: 'Maks',
+    sliderMin: 'Min',
+    sliderRight: 'Høyre etikett',
+    settings: 'Innstillinger',
+    showAllKpis: 'Vis alle KPI-er',
+    signIn: 'Logg inn',
+    signInContinue: 'Logg inn for å fortsette.',
+    signInTools: 'Logg inn for å bruke verktøyene.',
+    signOut: 'Logg ut',
+    signedInAs: 'Logget inn som {name}.',
+    submit: 'Send inn',
+    submitReport: 'Send rapport',
+    submitted: 'Sendt inn',
+    submittedAnswers: 'Innsendte svar',
+    submittedPhoto: 'Innsendt bilde',
+    suggestionText: 'Hva vil du foresla?',
+    superAdmins: 'Superadministratorer',
+    roleUser: 'Bruker',
+    roleVerneombud: 'Verneombud',
+    roleAdmin: 'Administrator',
+    roleSuperuser: 'Superbruker',
+    roleSysadmin: 'Sys-admin',
+    safetyReps: 'Verneombud',
+    superusers: 'Superbrukere',
+    sysadmins: 'Sys-admins',
+    varsling: 'Varsling',
+    varslingDesc: 'Konfidensiell melding for alvorlige forhold. Behandles av noen få utvalgte.',
+    fileVarsling: 'Send en varsling',
+    varslingTitle: 'Hva gjelder det?',
+    varslingDetails: 'Beskriv hva som har skjedd',
+    varslingSubmitted: 'Varsling sendt. Den behandles konfidensielt.',
+    varslingAccess: 'Varslingstilgang',
+    varslingAccessGranted: 'Varslingstilgang gitt.',
+    varslingAccessRevoked: 'Varslingstilgang fjernet.',
+    noVarslinger: 'Ingen varslinger.',
+    confidential: 'Konfidensiell',
+    submitAnonymously: 'Send anonymt',
+    assigned: 'Tildelt',
+    assignedToComplete: 'Tildelt for fullføring',
+    reason: 'Begrunnelse',
+    revoke: 'Trekk tilbake',
+    suspend: 'Suspender',
+    suspended: 'Suspendert',
+    unsuspend: 'Opphev suspensjon',
+    accountSuspended: 'Konto suspendert',
+    accountSuspendedBody: 'Kontoen din er under sys-admin-vurdering og er midlertidig låst. En annen sys-admin må avgjøre saken.',
+    sysadminReviewTitle: 'Sys-admin-handling krever vurdering',
+    sysadminReviewBody: 'Gi en tydelig begrunnelse for denne sys-admin-handlingen.',
+    noThirdSysadminWarning: '',
+    emergencyTitle: '🚨 Sys-admin-nødsituasjon',
+    emergencyBody: 'En sys-admin opprettet en sak mot en annen sys-admin. Vurder og bestem.',
+    upholdAction: 'Oppretthold',
+    revertAction: 'Reverser (hold initiativtaker suspendert)',
+    bothSuspended: 'Begge kontoer er suspendert i påvente av vurdering.',
+    status: 'Status',
+    resolution: 'Løsning / notater',
+    save: 'Lagre',
+    deleteAction: 'Slett',
+    saved: 'Lagret.',
+    title: 'Tittel',
+    toggleDarkMode: 'Bytt mørk modus',
+    totalAdmins: 'Totalt administratorer',
+    totalUsers: 'Totalt brukere',
+    type: 'Type',
+    upload: 'Last opp',
+    uploadDocument: 'Last opp dokument',
+    users: 'Brukere',
+    usernameOrEmail: 'Brukernavn eller e-post',
+    userEmailNotFound: 'Fant ingen konto med det brukernavnet.',
+    waitingApproval: 'Venter pa godkjenning',
+    whatHappened: 'Hva skjedde?',
+    whatHappenedTitle: 'Hva skjedde',
+    whatMustBeDone: 'Hva ma gjores for a rette dette?',
+    whatNeedsFixing: 'Hva ma rettes?',
+    whenHappened: 'Nar skjedde det?',
+    withinExpected: 'OK',
+    workerApp: 'Arbeiderapp',
+    workerAppMeta: 'Sjekklister, rapporter og dokumenter',
+    questionImage: 'Sjekklistebilde',
+    needsActionCount: '{count} krever tiltak',
+    yesLabel: 'Ja',
+    yourRecentReports: 'Dine siste rapporter',
+    yourReport: 'Din rapport',
+    yourDetails: 'Dine detaljer',
+    dailyQuota: 'Dagskvote',
+    quotaDays: 'Telles pa',
+    kpiOverview: 'Oversikt — triage',
+    kpiIncidents: 'Hendelser',
+    kpiChecklists: 'Sjekklister',
+    kpiAdminPerformance: 'Adminytelse',
+    assignedReports: 'Tildelte rapporter',
+    completedTotal: 'Fullfort totalt',
+    completionRate: 'Fullforingsgrad',
+    completedToday: 'Fullfort i dag',
+    noAdminsFound: 'Ingen administratorer funnet',
+    createOrPromoteAdmin: 'Opprett eller promoter en administrator forst.',
+    seeWhich: 'Se hvilke',
+    expectedNote: 'Forventet = dagskvote × kvalifiserende dager. Match et gap mot hvem som hadde skift.',
+    latestChecklists: 'Siste sjekklister',
+    noRecentChecklists: 'Ingen sjekklister levert i denne perioden.',
+    expectedVsReceived: 'Forventet mot mottatt',
+    dailyExpected: 'Forventet per dag',
+    receivedLabel: 'Mottatt',
+    perDayShort: 'dag',
+    more: 'flere',
+    showLess: 'Vis færre',
+    tapToSeeFiled: 'Trykk for å se når hver ble levert ▾',
+    whenFiled: 'Levert',
+    allAdmins: 'Alle administratorer',
+    completionByAdmin: 'Fullføring per administrator',
+    hiddenGroups: 'Skjulte grupper',
+    noHiddenGroups: 'Ingen skjulte grupper.',
+    restore: 'Gjenopprett',
+    permanentDelete: 'Slett permanent',
+    requestDelete: 'Be om sletting',
+    approveDelete: 'Godkjenn sletting',
+    deleteReason: 'Begrunnelse for sletting',
+    deleteRequested: 'Sletteforespørsel sendt.',
+    deleteApproved: 'Sletteforespørsel godkjent.',
+    groupDeleted: 'Gruppe slettet permanent.',
+    pendingDeleteRequest: 'Ventende sletteforespørsel',
+    pendingDeleteRequests: 'Ventende sletteforespørsler',
+    hideGroup: 'Skjul gruppe',
+    groupHidden: 'Gruppe skjult.',
+    groupRestored: 'Gruppe gjenopprettet.',
+  },
+};
+
+export const languages = [
+  ['en', 'English'],
+  ['no', 'Norsk'],
+];
+
+export function initLanguage() {
+  const saved = localStorage.getItem(LANG_KEY);
+  const lang = TEXT[saved] ? saved : DEFAULT_LANG;
+  document.documentElement.lang = lang;
+  localStorage.setItem(LANG_KEY, lang);
+  return lang;
+}
+
+export function currentLanguage() {
+  return initLanguage();
+}
+
+export function setLanguage(lang) {
+  const next = TEXT[lang] ? lang : DEFAULT_LANG;
+  localStorage.setItem(LANG_KEY, next);
+  document.documentElement.lang = next;
+  return next;
+}
+
+export function t(key, vars = {}) {
+  const lang = currentLanguage();
+  const template = TEXT[lang]?.[key] || TEXT[DEFAULT_LANG][key] || key;
+  return Object.entries(vars).reduce((out, [name, value]) => out.replaceAll(`{${name}}`, value ?? ''), template);
+}
+
+export function languageSelect(onChange = null) {
+  const select = el('select', { class: 'language-select', title: t('language') },
+    languages.map(([code, label]) => el('option', { value: code }, label)));
+  select.value = currentLanguage();
+  select.addEventListener('change', () => {
+    setLanguage(select.value);
+    if (onChange) onChange(select.value);
+  });
+  return labeledSelect(t('language'), select);
+}
+
+function labeledSelect(label, select) {
+  return el('label', { class: 'field language-field' }, [el('span', {}, label), select]);
+}
+
+// Format an ISO timestamp as a short local string.
+export function fmt(ts) {
+  if (!ts) return '';
+  const d = new Date(ts);
+  return d.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+}
+
+// Lightweight toast.
+export function toast(msg, kind = 'ok') {
+  let host = document.getElementById('toast-host');
+  if (!host) {
+    host = el('div', { id: 'toast-host', class: 'toast-host' });
+    document.body.appendChild(host);
+  }
+  const t = el('div', { class: `toast toast-${kind}` }, msg);
+  host.appendChild(t);
+  setTimeout(() => t.classList.add('show'), 10);
+  setTimeout(() => { t.classList.remove('show'); setTimeout(() => t.remove(), 300); }, 3200);
+}
