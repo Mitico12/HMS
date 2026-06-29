@@ -1102,7 +1102,11 @@
             custom_fields: custom.values(),
           });
           if (error) return toast(error.message, 'err');
-          toast(t('varslingSubmitted')); back();
+          // Return to the reports overview regardless of how this form was opened
+          // (the sidebar opens it with reset:true, which would make back() a no-op
+          // and leave the filled form on screen).
+          toast(t('varslingSubmitted'));
+          go(myReportsView(), { reset: true });
         }
       },
     };

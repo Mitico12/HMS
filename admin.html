@@ -1288,7 +1288,7 @@
           el('h2', { class: 'display', style: 'font-size:1.15rem;margin:0' }, t('archivedReports')),
           el('div', { style: 'display:flex;gap:8px;flex-wrap:wrap' }, [
             archived.length ? el('button', { class: 'btn btn-ghost', onclick: () =>
-              exportReportsExcel(rFiltered(), 'archived-reports.xlsx') }, t('exportExcel')) : null,
+              exportReportsExcel(rFiltered(), 'archived-reports.xlsx') }, `⬇  ${t('exportExcel')}`) : null,
             el('button', { class: 'btn btn-ghost', onclick: () => importInput.click() }, t('importExcel')),
           ]),
         ]));
@@ -1394,7 +1394,10 @@
         const { data: checklists } = await db.from('checklists').select('*');
         const byChecklist = new Map((checklists || []).map(c => [c.id, c]));
 
-        app.append(el('h2', { class: 'display', style: 'font-size:1.15rem;margin:0 0 10px' }, t('checklistLogs')));
+        app.append(el('div', { class: 'section-head', style: 'margin-bottom:10px' }, [
+          el('h2', { class: 'display', style: 'font-size:1.15rem;margin:0' }, t('checklistLogs')),
+          (!runsQ.error && runs.length) ? el('button', { class: 'btn btn-ghost', onclick: () => exportChecklistLogs() }, `⬇  ${t('exportExcel')}`) : null,
+        ]));
         if (runsQ.error) {
           app.append(emptyState(t('noChecklistLogs'), t('migrationChecklistLogsMissing')));
           return;
@@ -1436,12 +1439,37 @@
         const checklistHost = el('div', {});
         app.append(checklistHost);
 
-        function drawChecklists() {
-          checklistHost.innerHTML = '';
-          const rows = runs.filter(r =>
+        function filteredRuns() {
+          return runs.filter(r =>
             inDateRange(r.submitted_at || r.updated_at, cFilters.from, cFilters.until) &&
             (cFilters.user === 'all' || r.user_id === cFilters.user) &&
             (cFilters.checklist === 'all' || r.checklist_id === cFilters.checklist));
+        }
+        function exportChecklistLogs() {
+          const rows = filteredRuns();
+          if (!rows.length) return toast(t('nothingToExport'), 'err');
+          const sheet = rows.map(run => {
+            const checklist = byChecklist.get(run.checklist_id);
+            const items = checklist?.items || [];
+            const missing = items.filter(i => !run.checked?.[i.id]?.done);
+            const issues = items.filter(i => run.checked?.[i.id]?.needs_fix);
+            const needsReview = !run.reviewed_at && (missing.length > 0 || issues.length > 0 || !!(run.notes || '').trim());
+            return {
+              Checklist: checklist?.title || '',
+              User: nameOf(run.user_id),
+              Submitted: fmt(run.submitted_at || run.updated_at),
+              Status: needsReview ? t('checklistLogNeedsAttention') : t('completed'),
+              'Missing items': missing.map(i => i.label).join('; '),
+              Issues: issues.map(i => i.label).join('; '),
+              Notes: (run.notes || '').trim(),
+            };
+          });
+          writeExcel(sheet, 'Checklist logs', 'checklist-logs.xlsx');
+        }
+
+        function drawChecklists() {
+          checklistHost.innerHTML = '';
+          const rows = filteredRuns();
           if (!rows.length) { checklistHost.append(el('p', { class: 'muted' }, runs.length ? t('noChecklistsMatchFilters') : t('noChecklistLogs'))); return; }
           for (const run of rows) {
             const checklist = byChecklist.get(run.checklist_id);
@@ -1513,7 +1541,10 @@
         }
         const byCourse = new Map(courses.map(c => [c.id, c]));
 
-        app.append(el('h2', { class: 'display', style: 'font-size:1.15rem;margin:0 0 10px' }, t('completedCourses')));
+        app.append(el('div', { class: 'section-head', style: 'margin-bottom:10px' }, [
+          el('h2', { class: 'display', style: 'font-size:1.15rem;margin:0' }, t('completedCourses')),
+          submissions.length ? el('button', { class: 'btn btn-ghost', onclick: () => exportCourseLogs() }, `⬇  ${t('exportExcel')}`) : null,
+        ]));
         const avgScore = submissions.length ? Math.round(submissions.reduce((sum, s) => sum + (Number(s.score) || 0), 0) / submissions.length) : 0;
         app.append(el('div', { class: 'kpi-grid', style: 'margin-bottom:14px' }, [
           metricCard({ label: t('completedCourses'), value: submissions.length }),
@@ -1543,12 +1574,31 @@
         const host = el('div', {});
         app.append(host);
 
-        function drawCourses() {
-          host.innerHTML = '';
-          const rows = submissions.filter(s =>
+        function filteredCourses() {
+          return submissions.filter(s =>
             inDateRange(s.created_at, filters.from, filters.until) &&
             (filters.user === 'all' || s.user_id === filters.user) &&
             (filters.course === 'all' || s.course_id === filters.course));
+        }
+        function exportCourseLogs() {
+          const rows = filteredCourses();
+          if (!rows.length) return toast(t('nothingToExport'), 'err');
+          const sheet = rows.map(s => {
+            const c = byCourse.get(s.course_id);
+            return {
+              Course: c?.title || '',
+              User: nameOf(s.user_id),
+              Score: s.score != null ? `${s.score}%` : '',
+              Questions: (c?.questions || []).length,
+              Submitted: fmt(s.created_at),
+            };
+          });
+          writeExcel(sheet, 'Completed courses', 'completed-courses.xlsx');
+        }
+
+        function drawCourses() {
+          host.innerHTML = '';
+          const rows = filteredCourses();
           if (!rows.length) { host.append(el('p', { class: 'muted' }, submissions.length ? t('noCompletedCoursesMatchFilters') : t('noCompletedCourses'))); return; }
           for (const s of rows) {
             const c = byCourse.get(s.course_id);
@@ -1586,7 +1636,10 @@
         }
         const byProc = new Map(procedures.map(p => [p.id, p]));
 
-        app.append(el('h2', { class: 'display', style: 'font-size:1.15rem;margin:0 0 10px' }, t('procedureSubmissions')));
+        app.append(el('div', { class: 'section-head', style: 'margin-bottom:10px' }, [
+          el('h2', { class: 'display', style: 'font-size:1.15rem;margin:0' }, t('procedureSubmissions')),
+          submissions.length ? el('button', { class: 'btn btn-ghost', onclick: () => exportProcedureLogs() }, `⬇  ${t('exportExcel')}`) : null,
+        ]));
         app.append(el('div', { class: 'kpi-grid', style: 'margin-bottom:14px' }, [
           metricCard({ label: t('procedureSubmissions'), value: submissions.length }),
           metricCard({ label: t('uniqueUsers'), value: new Set(submissions.map(s => s.user_id).filter(Boolean)).size }),
@@ -1615,12 +1668,29 @@
         const host = el('div', {});
         app.append(host);
 
-        function draw() {
-          host.innerHTML = '';
-          const rows = submissions.filter(s =>
+        function filteredSubs() {
+          return submissions.filter(s =>
             inDateRange(s.created_at, filters.from, filters.until) &&
             (filters.user === 'all' || s.user_id === filters.user) &&
             (filters.form === 'all' || s.procedure_id === filters.form));
+        }
+        function exportProcedureLogs() {
+          const rows = filteredSubs();
+          if (!rows.length) return toast(t('nothingToExport'), 'err');
+          const fmtVal = (v) => v === true ? t('yes') : v === false ? t('no')
+            : Array.isArray(v) ? v.join(', ') : (v == null ? '' : String(v));
+          const sheet = rows.map(s => {
+            const p = byProc.get(s.procedure_id);
+            const row = { Form: p?.title || '', User: nameOf(s.user_id), Submitted: fmt(s.created_at) };
+            for (const f of (p?.fields || [])) row[f.label] = fmtVal(s.answers?.[f.key]);
+            return row;
+          });
+          writeExcel(sheet, 'Procedure submissions', 'procedure-submissions.xlsx');
+        }
+
+        function draw() {
+          host.innerHTML = '';
+          const rows = filteredSubs();
           if (!rows.length) { host.append(el('p', { class: 'muted' }, submissions.length ? t('noProcedureSubmissionsMatchFilters') : t('noProcedureSubmissions'))); return; }
           for (const s of rows) {
             const p = byProc.get(s.procedure_id);
