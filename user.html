@@ -552,7 +552,8 @@
           kind: 'checklist',
           title: c.title,
           meta: `${(c.items || []).length} item${(c.items || []).length === 1 ? '' : 's'}`,
-          image: firstChecklistImage(c),
+          image: c.image || firstChecklistImage(c),
+          icon: c.icon || null,
           onclick: () => go(checklistRun(c)),
         })));
         app.append(grid);
@@ -1172,6 +1173,8 @@
           title: p.title,
           meta: `${(p.fields || []).length} ${t('fields')}`,
           sub: p.description || '',
+          image: p.image || null,
+          icon: p.icon || null,
           onclick: () => go(procedureFill(p)),
         })));
         app.append(grid);

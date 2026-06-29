@@ -735,9 +735,9 @@
     app.append(el('div', { class: 'kpi-control-wrap' }, [
       el('div', { class: 'kpi-toolbar-row' }, [
         typeSel,
+        type === 'checklists' ? clSel : null,
         type === 'incidents' ? statusFilter : null,
         el('span', { class: 'spacer' }),
-        type === 'checklists' ? clSel : null,
         type === 'admin_performance' ? adminSel : null,
         type !== 'admin_performance' ? el('div', { class: 'kpi-period-chip' }, periodLabel(period)) : null,
         type !== 'admin_performance' ? calBtn : null,
@@ -959,6 +959,9 @@
     else scope.slice().sort((a, b) => a.title.localeCompare(b.title)).forEach(c => {
       const filed = filedByChecklist[c.id] || [];
       const got = filed.length;
+      // Expected across the whole selected range, not per day: daily quota × the
+      // number of qualifying days (e.g. 1/day over 28 days → 28 expected).
+      const expRange = c.daily_quota * qualifyingDays(period, c.quota_weekdays);
       const drill = el('div', { class: 'cl-filed hidden' });
       const drawDrill = () => {
         drill.innerHTML = '';
@@ -975,7 +978,7 @@
         el('div', { class: 'exp-head' }, [
           el('span', { class: 'exp-name' }, c.title),
           el('span', { class: 'exp-got', title: t('receivedLabel') }, String(got)),
-          el('span', { class: 'exp-quota', title: t('dailyExpected') }, `/${c.daily_quota}`),
+          el('span', { class: 'exp-quota', title: t('expectedInRange') }, `/${expRange}`),
         ]),
         drill,
       ]);
@@ -1349,6 +1352,7 @@
           return;
         }
         const reviewCount = runs.filter(run => {
+          if (run.reviewed_at) return false;
           const checklist = byChecklist.get(run.checklist_id);
           const items = checklist?.items || [];
           const missing = items.filter(i => !run.checked?.[i.id]?.done);
@@ -1397,7 +1401,7 @@
             const missing = items.filter(i => !run.checked?.[i.id]?.done);
             const issues = items.filter(i => run.checked?.[i.id]?.needs_fix);
             const hasNotes = !!(run.notes || '').trim();
-            const needsReview = missing.length > 0 || issues.length > 0 || hasNotes;
+            const needsReview = !run.reviewed_at && (missing.length > 0 || issues.length > 0 || hasNotes);
             const card = el('div', {
               class: 'card log-card' + (needsReview ? ' log-warning' : ''),
               style: 'cursor:pointer',
@@ -1521,14 +1525,32 @@
       render(app) {
         const items = checklist?.items || [];
         const answers = run.checked || {};
+        const missingItems = items.filter(i => !answers[i.id]?.done);
+        const issueItems = items.filter(i => answers[i.id]?.needs_fix);
+        const flagged = missingItems.length > 0 || issueItems.length > 0 || !!(run.notes || '').trim();
+        const needsReview = flagged && !run.reviewed_at;
+
+        async function markReviewed() {
+          const { error } = await db.rpc('mark_checklist_run_reviewed', { p_id: run.id });
+          if (error) return toast(error.message, 'err');
+          run.reviewed_at = new Date().toISOString();
+          toast(t('logMarkedReviewed'));
+          back();
+        }
+
         app.append(el('div', { class: 'card' }, [
           el('div', { class: 'section-head' }, [
             el('h3', {}, t('submittedAnswers')),
-            el('button', { class: 'btn btn-ghost print-hide', onclick: () => window.print() }, t('printInspectionReport')),
+            el('div', { style: 'display:flex;gap:8px;align-items:center', class: 'print-hide' }, [
+              needsReview ? el('button', { class: 'btn btn-primary', onclick: markReviewed }, t('markAsReviewed')) : null,
+              el('button', { class: 'btn btn-ghost', onclick: () => window.print() }, t('printInspectionReport')),
+            ]),
           ]),
           el('div', { class: 'sub' }, `${nameOf(run.user_id)} - ${fmt(run.submitted_at || run.updated_at)}`),
-          run.completed ? el('span', { class: 'pill', style: 'margin-top:10px' }, t('completed'))
-            : el('span', { class: 'pill', style: 'margin-top:10px;background:#f2c94c;color:#17212b;border-color:#f2c94c' }, t('checklistLogNeedsAttention')),
+          needsReview
+            ? el('span', { class: 'pill', style: 'margin-top:10px;background:#f2c94c;color:#17212b;border-color:#f2c94c' }, t('checklistLogNeedsAttention'))
+            : el('span', { class: 'pill', style: 'margin-top:10px' }, t('completed')),
+          run.reviewed_at ? el('div', { class: 'sub', style: 'margin-top:6px' }, `${t('reviewedLabel')} · ${fmt(run.reviewed_at)}`) : null,
         ]));
         if (!items.length) {
           app.append(emptyState(t('noChecklists'), t('noChecklistLogs')));
@@ -1666,6 +1688,43 @@
     return (c.items || []).find(i => i.image)?.image || '';
   }
 
+  // Preset "logo" emojis offered as a quick alternative to uploading an image.
+  const PRESET_LOGOS = ['✅','📋','🌅','🌙','🔒','🧹','🩹','🦺','🎓','🧭','🏭','🧑‍🏫','📄','📊','🧪','⚠️','🧯','🚧','🔧','🧰','🍽️','❄️','🔥','🚿'];
+
+  // Reusable "profile image" picker. `target` is a mutable { image, icon } object
+  // mutated in place: uploading sets `image` (a data URL), picking a logo sets
+  // `icon` (an emoji). `image` wins over `icon` when both are present.
+  function logoPicker(target) {
+    const wrap = el('div', { class: 'logo-picker' });
+    const draw = () => {
+      wrap.innerHTML = '';
+      const preview = el('div', { class: 'logo-preview' },
+        target.image ? el('img', { src: target.image, alt: '' })
+                     : el('span', { class: 'logo-preview-icon' }, target.icon || '📁'));
+      const file = el('input', { type: 'file', accept: 'image/*', onchange: async e => {
+        const f = e.target.files?.[0]; if (!f) return;
+        target.image = await fileToDataUrl(f); draw();
+      } });
+      const clearBtn = (target.image || target.icon)
+        ? el('button', { type: 'button', class: 'btn btn-ghost', onclick: () => { target.image = null; target.icon = null; draw(); } }, t('removeImage'))
+        : null;
+      const presets = el('div', { class: 'logo-presets' }, PRESET_LOGOS.map(emoji =>
+        el('button', { type: 'button',
+          class: 'logo-chip' + (!target.image && target.icon === emoji ? ' on' : ''),
+          onclick: () => { target.icon = emoji; target.image = null; draw(); } }, emoji)));
+      wrap.append(
+        el('div', { class: 'logo-picker-top' }, [
+          preview,
+          el('div', { class: 'logo-picker-controls' }, [labeled(t('uploadImage'), file), clearBtn].filter(Boolean)),
+        ]),
+        el('div', { class: 'sub', style: 'margin:4px 0' }, t('orChooseLogo')),
+        presets,
+      );
+    };
+    draw();
+    return wrap;
+  }
+
   // ════════════════════════════════════════════════════════
   //  GROUP — routes by kind
   // ════════════════════════════════════════════════════════
@@ -1710,7 +1769,8 @@
               kind: 'checklist',
               title: c.title,
               meta: t('items', { count: (c.items || []).length }),
-              image: firstChecklistImage(c),
+              image: c.image || firstChecklistImage(c),
+              icon: c.icon || null,
               handle,
               actions: [el('button', { class: 'btn btn-ghost', onclick: e => { e.stopPropagation(); go(checklistEdit(g, c)); } }, t('edit'))],
             });
@@ -1744,6 +1804,7 @@
       title: existing ? t('editChecklist') : t('newChecklist'), tab: 'groups',
       render(app) {
         const title = el('input', { type: 'text', value: existing?.title || '', placeholder: 'Checklist title' });
+        const logo = { image: existing?.image || null, icon: existing?.icon || null };
         let items = (existing?.items || []).map(i => ({ ...i }));
         const quota = el('input', { type: 'number', min: '0', step: '1',
           value: existing?.daily_quota ?? 0, placeholder: '0' });
@@ -1848,6 +1909,7 @@
         draw();
         app.append(
           labeled(t('title'), title, true),
+          labeled(t('profileImage'), logoPicker(logo)),
           labeled(t('dailyQuota'), quota),
           labeled(t('quotaDays'), dayRow),
           list,
@@ -1871,6 +1933,8 @@
             group_id: g.id,
             title: title.value.trim(),
             items: clean,
+            image: logo.image || null,
+            icon: logo.icon || null,
             daily_quota: Math.max(0, parseInt(quota.value, 10) || 0),
             quota_weekdays: [...quotaDays].sort((a, b) => a - b),
           };
@@ -1940,7 +2004,7 @@
 
         // Status chips — now with a visible active state.
         const statusChips = {};
-        const statusBar = el('div', { style: 'display:flex;flex-wrap:wrap' });
+        const statusBar = el('div', { style: 'display:flex;gap:8px;flex-wrap:wrap' });
         ['all', 'open', 'in_progress', 'resolved'].forEach(s => {
           const chip = el('button', { class: 'chip', onclick: () => {
             filters.status = s; markActive(statusChips, s); apply();
@@ -1969,8 +2033,9 @@
         ]);
 
         app.append(el('div', { style: 'display:grid;gap:10px;margin-bottom:14px' }, [
-          typeBar,
-          el('div', { style: 'display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end' }, [
+          el('div', { style: 'display:flex;gap:8px 14px;flex-wrap:wrap;align-items:center' }, [
+            typeBar,
+            el('span', { class: 'filter-divider' }),
             statusBar,
           ]),
           el('div', { style: 'display:flex;gap:10px;flex-wrap:wrap' }, [
@@ -2514,6 +2579,8 @@
               title: p.title,
               meta: `${(p.fields || []).length} ${t('fields')}`,
               sub: p.is_draft ? t('draft') : t('published'),
+              image: p.image || null,
+              icon: p.icon || null,
               handle,
               actions: [
                 el('button', { class: 'btn btn-ghost', onclick: e => { e.stopPropagation(); go(submissionsView(p)); } }, t('entries')),
@@ -2551,6 +2618,7 @@
       render(app) {
         const title = el('input', { type: 'text', value: existing?.title || '', placeholder: 'Procedure title' });
         const desc = el('textarea', { placeholder: 'Short description (optional)' }); desc.value = existing?.description || '';
+        const logo = { image: existing?.image || null, icon: existing?.icon || null };
         let fields = (existing?.fields || []).map(f => ({ ...f }));
         let dragIdx = null;
         const list = el('div', {});
@@ -2632,7 +2700,7 @@
         };
         draw();
         app.append(
-          labeled(t('title'), title, true), labeled(t('description'), desc), list,
+          labeled(t('title'), title, true), labeled(t('profileImage'), logoPicker(logo)), labeled(t('description'), desc), list,
           el('button', { class: 'btn btn-ghost btn-block', style: 'margin-bottom:16px', onclick: () => {
             fields.push({ key: crypto.randomUUID(), type: 'short', label: '', required: false, options: [] }); draw();
           } }, t('addField')),
@@ -2646,7 +2714,7 @@
           const clean = fields.filter(f => f.label.trim());
           if (!title.value.trim() || !clean.length) return toast(t('addTitleAndField'), 'err');
           const payload = { group_id: g.id, title: title.value.trim(), description: desc.value.trim() || null,
-            fields: clean, is_draft, created_by: state.profile.id };
+            fields: clean, is_draft, image: logo.image || null, icon: logo.icon || null, created_by: state.profile.id };
           const q = existing ? db.from('procedures').update(payload).eq('id', existing.id)
                              : db.from('procedures').insert(payload);
           const { error } = await q;

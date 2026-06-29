@@ -883,6 +883,38 @@ input[type="checkbox"], input[type="radio"] {
   z-index: 1;
 }
 
+/* "profile image" picker for checklists / courses / procedures */
+.logo-picker { display: grid; gap: 8px; }
+.logo-picker-top { display: flex; gap: 14px; align-items: flex-start; }
+.logo-picker-controls { flex: 1; min-width: 0; display: grid; gap: 8px; align-content: start; }
+.logo-picker-controls .field { margin: 0; }
+.logo-preview {
+  flex: 0 0 auto;
+  width: 132px;
+  aspect-ratio: 1.55;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  background:
+    radial-gradient(circle at 74% 22%, color-mix(in srgb, var(--primary) 18%, transparent), transparent 34%),
+    linear-gradient(135deg, color-mix(in srgb, var(--paper-2) 86%, #fff 14%), color-mix(in srgb, var(--paper) 72%, var(--primary) 8%));
+  display: grid;
+  place-items: center;
+}
+.logo-preview img { width: 100%; height: 100%; object-fit: cover; }
+.logo-preview-icon { font-size: 2.8rem; line-height: 1; }
+.logo-presets { display: flex; flex-wrap: wrap; gap: 6px; }
+.logo-chip {
+  width: 40px; height: 40px; padding: 0;
+  display: grid; place-items: center;
+  font-size: 1.25rem; line-height: 1;
+  border: 1px solid var(--line); border-radius: 8px;
+  background: var(--paper-2); cursor: pointer;
+  transition: border-color .14s ease, transform .14s ease;
+}
+.logo-chip:hover { transform: translateY(-1px); border-color: color-mix(in srgb, var(--primary) 45%, var(--line)); }
+.logo-chip.on { border-color: var(--primary); box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary) 30%, transparent); }
+
 .kpi-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
@@ -1438,6 +1470,11 @@ input[type="checkbox"], input[type="radio"] {
 .exp-quota { font-size: .78rem; font-weight: 600; color: var(--steel); white-space: nowrap; }
 .cl-filed { margin-top: 6px; padding-left: 2px; }
 .cl-filed-row { display: flex; align-items: center; gap: 8px; padding: 4px 0; }
+
+/* vertical separator between grouped filter chip sets */
+.filter-divider { align-self: stretch; width: 1px; min-height: 24px;
+  background: var(--line); margin: 0 2px; }
+@media (max-width: 560px) { .filter-divider { display: none; } }
 
 /* hide button on home tiles + hidden-groups modal rows */
 .tile-hide {

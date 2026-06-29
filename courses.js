@@ -74,6 +74,10 @@ function ensureStyles() {
     .course-library { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 16px; }
     .course-library .course-row { min-height: 230px; padding: 14px; border-radius: 8px; display: grid; grid-template-rows: auto 1fr auto; align-items: stretch; text-align: center; }
     .course-library .course-row::before { content: "🎓"; order: 2; aspect-ratio: 1.55; border-radius: 7px; border: 1px solid var(--line, rgba(26,47,54,.12)); background: radial-gradient(circle at 74% 22%, color-mix(in srgb, var(--primary, #6c7cff) 18%, transparent), transparent 34%), linear-gradient(135deg, color-mix(in srgb, var(--paper-2, #f7f7fb) 86%, #fff 14%), color-mix(in srgb, var(--paper, #fffaf0) 72%, var(--primary, #6c7cff) 8%)); display: grid; place-items: center; font-size: clamp(3.2rem, 9vw, 5rem); line-height: 1; margin: 8px 0 10px; }
+    .course-library .course-row.course-row-has-art::before { content: none; }
+    .course-library .course-row .course-art { order: 2; aspect-ratio: 1.55; border-radius: 7px; overflow: hidden; border: 1px solid var(--line, rgba(26,47,54,.12)); background: radial-gradient(circle at 74% 22%, color-mix(in srgb, var(--primary, #6c7cff) 18%, transparent), transparent 34%), linear-gradient(135deg, color-mix(in srgb, var(--paper-2, #f7f7fb) 86%, #fff 14%), color-mix(in srgb, var(--paper, #fffaf0) 72%, var(--primary, #6c7cff) 8%)); display: grid; place-items: center; margin: 8px 0 10px; }
+    .course-library .course-row .course-art img { width: 100%; height: 100%; object-fit: cover; }
+    .course-library .course-row .course-art-icon { font-size: clamp(3.2rem, 9vw, 5rem); line-height: 1; }
     .course-library .course-row > div:first-child { order: 1; }
     .course-library .course-row > div:last-child { order: 3; }
     .course-library .course-row .c-title { min-height: 2.5em; display: grid; place-items: center; font-size: 1rem; }
@@ -149,6 +153,50 @@ function libraryCard({ kind, title, meta, sub, icon, onclick, actions = [], clas
   ]);
 }
 
+const PRESET_LOGOS = ['✅','📋','🌅','🌙','🔒','🧹','🩹','🦺','🎓','🧭','🏭','🧑‍🏫','📄','📊','🧪','⚠️','🧯','🚧','🔧','🧰','🍽️','❄️','🔥','🚿'];
+
+function fileToDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result);
+    r.onerror = reject;
+    r.readAsDataURL(file);
+  });
+}
+
+// Reusable "profile image" picker, mirroring admin.html. `target` is a mutable
+// { image, icon } object: uploading sets `image` (data URL), a logo sets `icon`.
+function logoPicker(target) {
+  const wrap = el('div', { class: 'logo-picker' });
+  const draw = () => {
+    wrap.innerHTML = '';
+    const preview = el('div', { class: 'logo-preview' },
+      target.image ? el('img', { src: target.image, alt: '' })
+                   : el('span', { class: 'logo-preview-icon' }, target.icon || '📁'));
+    const file = el('input', { type: 'file', accept: 'image/*', onchange: async e => {
+      const f = e.target.files?.[0]; if (!f) return;
+      target.image = await fileToDataUrl(f); draw();
+    } });
+    const clearBtn = (target.image || target.icon)
+      ? el('button', { type: 'button', class: 'btn btn-ghost', onclick: () => { target.image = null; target.icon = null; draw(); } }, t('removeImage'))
+      : null;
+    const presets = el('div', { class: 'logo-presets' }, PRESET_LOGOS.map(emoji =>
+      el('button', { type: 'button',
+        class: 'logo-chip' + (!target.image && target.icon === emoji ? ' on' : ''),
+        onclick: () => { target.icon = emoji; target.image = null; draw(); } }, emoji)));
+    wrap.append(
+      el('div', { class: 'logo-picker-top' }, [
+        preview,
+        el('div', { class: 'logo-picker-controls' }, [labeled(t('uploadImage'), file), clearBtn].filter(Boolean)),
+      ]),
+      el('div', { class: 'sub', style: 'margin:4px 0' }, t('orChooseLogo')),
+      presets,
+    );
+  };
+  draw();
+  return wrap;
+}
+
 /* ============================================================
  *  ADMIN — list courses in a group
  * ============================================================ */
@@ -168,11 +216,15 @@ export function coursesGroupView(g, ctx) {
       }
       rows.forEach(c => {
         const qn = (c.questions || []).length;
-        app.append(el('div', { class: 'course-row' }, [
+        const art = el('div', { class: 'course-art' }, c.image
+          ? el('img', { src: c.image, alt: c.title })
+          : el('span', { class: 'course-art-icon' }, c.icon || '🎓'));
+        app.append(el('div', { class: 'course-row course-row-has-art' }, [
           el('div', { style: 'min-width:0' }, [
             el('div', { class: 'c-title' }, c.title),
             el('div', { class: 'c-meta' }, `${qn} question${qn === 1 ? '' : 's'} · pass ${c.pass_threshold}%`),
           ]),
+          art,
           el('div', { style: 'display:flex;gap:8px;align-items:center' }, [
             c.is_draft ? el('span', { class: 'c-badge draft' }, 'Draft') : null,
             el('button', { class: 'btn btn-ghost', onclick: () => ctx.go(courseResults(c, ctx)) }, 'Results'),
@@ -303,6 +355,7 @@ export function courseBuild(g, existing, ctx) {
       const content = el('textarea', { placeholder: 'Reading material. Separate paragraphs with a blank line.', rows: 10 });
       content.value = existing?.content || '';
       const pass = el('input', { type: 'number', min: '0', max: '100', step: '5', value: existing?.pass_threshold ?? 100 });
+      const logo = { image: existing?.image || null, icon: existing?.icon || null };
 
       let questions = (existing?.questions || []).map(q => ({ ...q }));
       const list = el('div', {});
@@ -391,6 +444,7 @@ export function courseBuild(g, existing, ctx) {
 
       app.append(
         labeled('Title', title, true),
+        labeled(t('profileImage'), logoPicker(logo)),
         labeled('Reading material', content),
         labeled('Pass threshold (%)', pass),
         el('h3', { style: 'margin:18px 0 8px' }, 'Quiz'),
@@ -429,6 +483,8 @@ export function courseBuild(g, existing, ctx) {
           pass_threshold: Math.max(0, Math.min(100, parseInt(pass.value, 10) || 100)),
           questions: clean,
           is_draft,
+          image: logo.image || null,
+          icon: logo.icon || null,
           created_by: ctx.state.profile.id,
         };
         const qy = existing ? db.from('courses').update(payload).eq('id', existing.id)
@@ -553,12 +609,16 @@ export function courseListView(g, ctx) {
         const assigned = assignedIds.has(c.id);
         const qn = (c.questions || []).length;
         const assignedTodo = assigned && !done;
-        app.append(el('div', { class: 'course-row' + (assignedTodo ? ' assigned-todo' : ''), style: 'cursor:pointer', onclick: () => ctx.go(courseTake(c, ctx)) }, [
+        const art = el('div', { class: 'course-art' }, c.image
+          ? el('img', { src: c.image, alt: c.title })
+          : el('span', { class: 'course-art-icon' }, c.icon || '🎓'));
+        app.append(el('div', { class: 'course-row course-row-has-art' + (assignedTodo ? ' assigned-todo' : ''), style: 'cursor:pointer', onclick: () => ctx.go(courseTake(c, ctx)) }, [
           el('div', { style: 'min-width:0' }, [
             el('div', { class: 'c-title' }, c.title),
             el('div', { class: 'c-meta' }, `${qn} question${qn === 1 ? '' : 's'}`),
             assignedTodo ? el('div', { class: 'assigned-msg' }, '⚑ ' + t('assignedToComplete')) : null,
           ]),
+          art,
           el('div', { style: 'display:flex;gap:8px;align-items:center' }, [
             assignedTodo ? el('span', { class: 'c-badge assigned' }, t('assigned')) : null,
             el('span', { class: 'c-badge ' + (done ? 'pass' : 'todo') }, done ? 'Passed ✓' : 'Start'),
