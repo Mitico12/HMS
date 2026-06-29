@@ -1783,8 +1783,11 @@
           ]);
           if (item.image) card.append(el('div', { class: 'sub' }, t('questionImage')),
             el('img', { src: item.image, alt: item.label, class: 'checklist-item-image' }));
-          if (answer.photo) card.append(el('div', { class: 'sub' }, t('submittedPhoto')),
-            el('img', { src: answer.photo, alt: item.label, class: 'checklist-item-image' }));
+          if (answer.photo) {
+            const photoImg = el('img', { alt: item.label, class: 'checklist-item-image' });
+            resolveChecklistPhoto(answer.photo).then(src => { if (src) photoImg.src = src; });
+            card.append(el('div', { class: 'sub' }, t('submittedPhoto')), photoImg);
+          }
           app.append(card);
         }
         if ((run.notes || '').trim()) {
@@ -1850,6 +1853,15 @@
     });
   }
   const opt = (v, t) => el('option', { value: v }, t);
+
+  // A submitted checklist photo is either a legacy inline data-URL (old rows) or
+  // a Storage path (new rows). Resolve it to something an <img> can show.
+  async function resolveChecklistPhoto(photo) {
+    if (!photo) return '';
+    if (typeof photo === 'string' && photo.startsWith('data:')) return photo;
+    const { data, error } = await db.storage.from('checklist-photos').createSignedUrl(photo, 300);
+    return (!error && data?.signedUrl) ? data.signedUrl : '';
+  }
 
   function fileToDataUrl(file) {
     return new Promise((resolve, reject) => {
@@ -3615,19 +3627,14 @@
         await auth.auth.signOut();
         return toast(`Row ${idx + 2}: user created, but Supabase did not return an id.`, 'err');
       }
-      const payload = {
-        id,
-        email,
-        username,
-        full_name: fullName || null,
-        mobile_number: mobile || null,
-        role,
-        is_verified: role !== 'user' ? true : parseApproved(r.Approved),
-      };
-      let { error: profileErr } = await db.from('profiles').upsert(payload, { onConflict: 'id' });
-      if (profileErr && /mobile_number/i.test(profileErr.message || '')) {
-        delete payload.mobile_number;
-        ({ error: profileErr } = await db.from('profiles').upsert(payload, { onConflict: 'id' }));
+      // The profile row is created by the handle_new_user trigger from the
+      // sign-up metadata; role/approval go through the rank-checked RPCs so the
+      // privileged columns are never written directly from the browser (audit V3).
+      let profileErr = null;
+      if (role !== 'user') {
+        ({ error: profileErr } = await db.rpc('set_role', { target: id, new_role: role }));
+      } else if (parseApproved(r.Approved)) {
+        ({ error: profileErr } = await db.rpc('set_verification', { target: id, verified: true }));
       }
       if (profileErr) {
         await auth.auth.signOut();
@@ -3890,8 +3897,10 @@
       controls.push(el('span', { class: 'muted', style: 'font-size:.85rem' }, roleName(p.role)));
     }
 
-    // Approve / revoke access for anyone at my level or below (self excluded above).
-    if (roleRank(me) >= roleRank(p)) {
+    // Approve / revoke access only for strictly-lower-ranked accounts (same gate
+    // as role changes) so peers can't revoke each other (admin lockout). Sys-admins
+    // may act on anyone; a sys-admin↔sys-admin action routes to the review flow.
+    if (canManage) {
       const revoking = p.is_verified;
       controls.push(el('button', {
         class: 'btn ' + (revoking ? 'btn-danger' : 'btn-primary'),
@@ -4207,17 +4216,17 @@
           if (error) return toast(error.message, 'err');
           const id = data?.user?.id;
           if (!id) return toast(t('userCreatedNoId'), 'err');
-          const payload = { id, email: em, username: un, full_name: fn || null, mobile_number: mob || null, role: role.value, is_verified: verified.checked };
-          let { error: profileErr } = await db.from('profiles').upsert(payload, { onConflict: 'id' });
-          if (profileErr && /username/i.test(profileErr.message || '')) {
-            delete payload.username;
-            ({ error: profileErr } = await db.from('profiles').upsert(payload, { onConflict: 'id' }));
+          // The profile row is created by the handle_new_user trigger (name /
+          // username / email / mobile come from the sign-up metadata). Role and
+          // approval go through the rank-checked RPCs so the privileged columns
+          // are never written directly from the browser (audit V3).
+          if (role.value !== 'user') {
+            const { error: rErr } = await db.rpc('set_role', { target: id, new_role: role.value });
+            if (rErr) return toast(rErr.message, 'err');
+          } else if (verified.checked) {
+            const { error: vErr } = await db.rpc('set_verification', { target: id, verified: true });
+            if (vErr) return toast(vErr.message, 'err');
           }
-          if (profileErr && /mobile_number/i.test(profileErr.message || '')) {
-            delete payload.mobile_number;
-            ({ error: profileErr } = await db.from('profiles').upsert(payload, { onConflict: 'id' }));
-          }
-          if (profileErr) return toast(profileErr.message + ' - run migration_mobile_number_users.sql if the mobile column is missing.', 'err');
           toast(t('userAddedTempPassword'));
           close(); await loadProfiles(); refresh();
         } }, 'Create user'),
