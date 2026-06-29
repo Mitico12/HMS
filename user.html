@@ -194,7 +194,7 @@
     ];
     for (const item of items) nav.append(sidebarButton(item, active));
     side.append(nav, el('button', {
-      class: `sidebar-footer sidebar-footer-action ${active === 'settings' ? 'active' : ''}`,
+      class: 'sidebar-footer sidebar-footer-action',
       title: t('settings'),
       onclick: () => go(settingsView(), { reset: true }),
     }, [

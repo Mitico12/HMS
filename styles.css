@@ -16,6 +16,17 @@
   --ok: #16a34a;
   --warning: #f59e0b;
   --nav: #111827;
+  --sidebar-bg: linear-gradient(180deg, #f8fafc 0%, #eef3f8 100%);
+  --sidebar-ink: #1e293b;
+  --sidebar-muted: #64748b;
+  --sidebar-faint: #94a3b8;
+  --sidebar-line: rgba(15, 23, 42, .12);
+  --sidebar-hover: rgba(79, 70, 229, .08);
+  --sidebar-active: rgba(79, 70, 229, .13);
+  --sidebar-icon: #4f46e5;
+  --sidebar-card: rgba(255, 255, 255, .68);
+  --sidebar-switch: rgba(15, 23, 42, .07);
+  --sidebar-switch-active: #ffffff;
   --shadow: 0 22px 60px rgba(15, 23, 42, .12);
   --shadow-soft: 0 8px 24px rgba(15, 23, 42, .07);
   /* role colours: orange=verneombud, blue=user, black=admin, red=superuser, green=sysadmin */
@@ -44,6 +55,17 @@
   --ok: #4ade80;
   --warning: #fbbf24;
   --nav: #020617;
+  --sidebar-bg: linear-gradient(180deg, #111827 0%, #1f2937 100%);
+  --sidebar-ink: #f8fafc;
+  --sidebar-muted: #93a4c7;
+  --sidebar-faint: #7f90af;
+  --sidebar-line: rgba(226, 232, 240, .12);
+  --sidebar-hover: rgba(255, 255, 255, .10);
+  --sidebar-active: rgba(255, 255, 255, .12);
+  --sidebar-icon: #94a3ff;
+  --sidebar-card: rgba(255, 255, 255, .045);
+  --sidebar-switch: rgba(2, 6, 23, .36);
+  --sidebar-switch-active: rgba(255, 255, 255, .12);
   --shadow: 0 24px 70px rgba(0, 0, 0, .36);
   --shadow-soft: 0 10px 28px rgba(0, 0, 0, .22);
   --role-admin: #e5e7eb; /* "black" tier reads as light on dark backgrounds */
@@ -115,14 +137,10 @@ h1, h2, h3, p {
   flex-direction: column;
   gap: 18px;
   padding: 28px 16px 18px;
-  background: linear-gradient(180deg, #111827 0%, #1f2937 100%);
-  border-right: 1px solid rgba(226, 232, 240, .12);
-  color: #f8fafc;
+  background: var(--sidebar-bg);
+  border-right: 1px solid var(--sidebar-line);
+  color: var(--sidebar-ink);
   overflow: auto;
-}
-
-:root[data-theme="light"] .sidebar {
-  background: linear-gradient(180deg, #111827 0%, #253247 100%);
 }
 
 .sidebar-brand {
@@ -131,7 +149,7 @@ h1, h2, h3, p {
   gap: 12px;
   align-items: center;
   padding: 6px 10px 20px;
-  border-bottom: 1px solid rgba(226, 232, 240, .10);
+  border-bottom: 1px solid var(--sidebar-line);
 }
 
 .sidebar-logo {
@@ -154,7 +172,7 @@ h1, h2, h3, p {
 
 .sidebar-subtitle {
   margin-top: 5px;
-  color: #93a4c7;
+  color: var(--sidebar-muted);
   font-size: .9rem;
   font-weight: 800;
   letter-spacing: .08em;
@@ -163,10 +181,10 @@ h1, h2, h3, p {
 
 .workspace-card {
   padding: 16px;
-  border: 1px solid rgba(226, 232, 240, .13);
+  border: 1px solid var(--sidebar-line);
   border-radius: 8px;
-  background: rgba(255, 255, 255, .045);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .03);
+  background: var(--sidebar-card);
+  box-shadow: var(--shadow-soft);
 }
 
 .workspace-head {
@@ -175,7 +193,7 @@ h1, h2, h3, p {
   justify-content: space-between;
   gap: 10px;
   margin-bottom: 12px;
-  color: #93a4c7;
+  color: var(--sidebar-muted);
   font-size: .78rem;
   font-weight: 850;
   letter-spacing: .1em;
@@ -197,7 +215,7 @@ h1, h2, h3, p {
   gap: 6px;
   padding: 5px;
   border-radius: 8px;
-  background: rgba(2, 6, 23, .36);
+  background: var(--sidebar-switch);
 }
 
 .workspace-switch button {
@@ -205,13 +223,13 @@ h1, h2, h3, p {
   border: 0;
   border-radius: 8px;
   background: transparent;
-  color: #a8b4ca;
+  color: var(--sidebar-muted);
   font-weight: 800;
 }
 
 .workspace-switch button.active {
-  background: rgba(255, 255, 255, .12);
-  color: #fff;
+  background: var(--sidebar-switch-active);
+  color: var(--sidebar-ink);
 }
 
 .workspace-switch button:disabled {
@@ -221,7 +239,7 @@ h1, h2, h3, p {
 
 .sidebar-section-label {
   padding: 8px 18px 0;
-  color: #7f90af;
+  color: var(--sidebar-faint);
   font-size: .78rem;
   font-weight: 850;
   letter-spacing: .12em;
@@ -244,16 +262,20 @@ h1, h2, h3, p {
   border: 1px solid transparent;
   border-radius: 8px;
   background: transparent;
-  color: #a8bad5;
+  color: var(--sidebar-muted);
   text-align: left;
   font-weight: 750;
 }
 
 .sidebar-link:hover,
 .sidebar-link.active {
-  border-color: rgba(226, 232, 240, .13);
-  background: rgba(255, 255, 255, .10);
-  color: #fff;
+  border-color: var(--sidebar-line);
+  background: var(--sidebar-hover);
+  color: var(--sidebar-ink);
+}
+
+.sidebar-link.active {
+  background: var(--sidebar-active);
 }
 
 .sidebar-link .ic {
@@ -261,7 +283,7 @@ h1, h2, h3, p {
   height: 30px;
   display: grid;
   place-items: center;
-  color: #94a3ff;
+  color: var(--sidebar-icon);
   font-weight: 900;
 }
 
@@ -287,7 +309,7 @@ h1, h2, h3, p {
   opacity: 0;
   padding: 0 4px;
   font-size: .85rem;
-  color: #a8bad5;
+  color: var(--sidebar-muted);
   cursor: pointer;
   transition: opacity .14s ease, color .14s ease;
 }
@@ -297,7 +319,7 @@ h1, h2, h3, p {
 .sidebar-footer {
   margin-top: auto;
   padding: 14px 10px 0;
-  border-top: 1px solid rgba(226, 232, 240, .10);
+  border-top: 1px solid var(--sidebar-line);
   display: grid;
   grid-template-columns: 42px minmax(0, 1fr);
   gap: 10px;
@@ -315,9 +337,13 @@ h1, h2, h3, p {
   cursor: pointer;
 }
 
-.sidebar-footer-action:hover,
-.sidebar-footer-action.active {
-  background: rgba(255, 255, 255, .08);
+.sidebar-footer-action:hover {
+  background: transparent;
+}
+
+.sidebar-footer-action:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 4px;
 }
 
 .sidebar-avatar {
@@ -346,7 +372,7 @@ h1, h2, h3, p {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: #93a4c7;
+  color: var(--sidebar-muted);
   font-size: .82rem;
 }
 

@@ -390,7 +390,11 @@
         countClass: pendingDeleteCount ? 'warn' : '',
         open: hiddenGroupsModal }, active));
     }
-    side.append(nav, el('div', { class: 'sidebar-footer' }, [
+    side.append(nav, el('button', {
+      class: 'sidebar-footer sidebar-footer-action',
+      title: t('settings'),
+      onclick: () => go(settingsView(), { reset: true }),
+    }, [
       el('div', { class: 'sidebar-avatar' }, userInitial),
       el('div', { class: 'sidebar-user' }, [
         el('div', { class: 'sidebar-user-name' }, userName),

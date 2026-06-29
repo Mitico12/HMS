@@ -1,0 +1,26 @@
+2026-06-29 01:49:43 +02:00
+Planning to add a course-centered assignment action in the Manage Courses area. The change will add an Assign button between Results and Edit for each course, backed by a small admin view that loads users and existing course_assignments so admins can assign or unassign the selected course without changing Claude's existing user-profile assignment flow.
+
+2026-06-29 01:54:44 +02:00
+Planning to remove the pre-action suspension disclosure from the sys-admin reason popup. The DB two-person suspension behavior stays unchanged; only the modal copy/warning shown before submitting a sys-admin action will be reduced so it asks for a reason without explaining the account-lock outcome.
+
+2026-06-29 01:56:26 +02:00
+Planning to simplify the course assignment screen by removing the duplicate user dropdown and adding an Assign to all button. The existing per-user Assign/Unassign buttons will stay, while Assign to all will create assignments for every visible user who is not already assigned to the selected course.
+
+2026-06-29 02:06:04 +02:00
+Planning to reorganize the admin reports area. The main menu "Incidents Queue" label will become "Reports"; Varsling will move out of the main menu and into the Reports view as an extra type button visible only to profiles with Varsling access; the existing report-type dropdown in the active reports queue will be replaced by explicit Incidents, Hazards, and Suggestions buttons that work alongside the existing status/filter controls.
+
+2026-06-29 02:12:42 +02:00
+Planning to add a two-step permanent delete flow for hidden groups. Regular admins will request deletion with a reason; that pending request will turn the Hidden Groups count badge yellow. Superusers and sysadmins will be able to permanently delete hidden groups directly after confirmation, or approve pending admin requests after confirmation. This requires a new migration for group delete requests plus admin UI changes in the hidden groups modal.
+
+2026-06-29 02:19:57 +02:00
+Planning to change checklist, course, document, and procedure/protocol list views from compact rows into visual card grids like the provided example. The change will add shared card styling with illustration panels and update both admin and worker list views where these content types are shown, while keeping existing open/edit/results/assign actions intact.
+
+2026-06-29 02:35:28 +02:00
+Planning to revise the course assignment screen into a checkbox-based bulk workflow. Each user row will get a checkbox, and the top action area will offer Assign selected and Unassign selected actions that operate on the checked users while preserving assignment status and attempt details.
+
+2026-06-29 02:45:11 +02:00
+Planning to tighten report/case assignment and worker navigation. Incident assignment options will be limited to admin-level profiles and higher, with sys-admins hidden from non-sys-admin assigners. In the worker app, the settings sidebar item will be removed and the user footer identity block will open settings instead.
+
+2026-06-29 02:51:06 +02:00
+Planning to clean up sidebar settings access and light-mode theming. The worker footer settings click target will stop showing as a visible active block, the admin sidebar footer will also open settings, and shared sidebar colors will be moved onto theme-aware variables so light mode changes the sidebar properly.
