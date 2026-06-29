@@ -1254,6 +1254,21 @@ input[type="checkbox"], input[type="radio"] {
   color: #f59e0b;
 }
 
+.report-action-icon-incident {
+  border: 2px solid currentColor;
+}
+
+.report-action-icon-suggestion {
+  color: #0f8a61;
+  font-size: 1.15rem;
+}
+
+.report-action-icon-varsling {
+  border-radius: 7px;
+  background: color-mix(in srgb, #6d5bd0 16%, transparent);
+  color: #6d5bd0;
+}
+
 .report-row {
   align-items: flex-start;
 }
@@ -1262,6 +1277,55 @@ input[type="checkbox"], input[type="radio"] {
   color: var(--ink);
   font-size: 1rem;
   font-weight: 650;
+}
+
+.report-type-picker {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+}
+
+.report-type-card {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--paper);
+  color: var(--ink);
+  box-shadow: var(--shadow-soft);
+  padding: 14px;
+  display: grid;
+  gap: 4px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.report-type-card span {
+  color: var(--steel);
+  font-size: .84rem;
+}
+
+.report-type-card.on {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary) 22%, transparent);
+}
+
+.report-form-builder {
+  display: grid;
+  gap: 12px;
+  margin: 12px 0;
+}
+
+.report-custom-line {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 8px 0;
+  border-top: 1px solid var(--line);
+}
+
+.report-custom-line strong {
+  text-align: right;
+  overflow-wrap: anywhere;
 }
 
 .toast-host {

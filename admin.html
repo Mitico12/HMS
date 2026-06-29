@@ -2024,7 +2024,7 @@
   function reportsGroupView(g) {
     return {
       title: groupName(g), tab: 'groups',
-      action: el('button', { class: 'iconbtn', title: t('incidentCategories'), onclick: () => go(categoriesView()) }, '☰'),
+      action: isSuperPlus(state.profile) ? el('button', { class: 'iconbtn', title: t('editReportForms'), onclick: () => go(categoriesView()) }, '☰') : null,
       async render(app) {
         await loadProfiles();
         const data = await fetchActiveReports();
@@ -2319,6 +2319,18 @@
     }
   }
 
+  function customFieldsCard(values) {
+    const entries = Object.entries(values || {}).filter(([, v]) => Array.isArray(v) ? v.length : v !== null && v !== undefined && v !== '');
+    if (!entries.length) return null;
+    return el('div', { class: 'card' }, [
+      el('h3', {}, t('customFields')),
+      ...entries.map(([key, value]) => el('div', { class: 'report-custom-line' }, [
+        el('span', { class: 'muted' }, key),
+        el('strong', {}, Array.isArray(value) ? value.join(', ') : value === true ? 'Yes' : value === false ? 'No' : String(value)),
+      ])),
+    ]);
+  }
+
   function incidentView(id) {
     return {
       title: t('reports'), tab: 'groups',
@@ -2347,6 +2359,8 @@
             el('div', {}, `Submitted: ${fmt(inc.created_at)}`),
           ]),
         ]));
+        const customCard = customFieldsCard(inc.custom_fields);
+        if (customCard) app.append(customCard);
         await renderIncidentPhotos(app, inc);
 
         // processing controls — status as open/close buttons
@@ -2458,6 +2472,214 @@
   }
 
   function categoriesView() {
+    return reportFormDesignerView();
+  }
+
+  const REPORT_FORM_TYPES = [
+    ['incident', 'reportIncident'],
+    ['hazard', 'reportHazard'],
+    ['suggestion', 'reportSuggestion'],
+    ['varsling', 'varsling'],
+  ];
+  function reportFormStorageKey(type) { return `reportForm:${type}`; }
+  function readLocalReportFields(type) {
+    try { return JSON.parse(localStorage.getItem(reportFormStorageKey(type)) || '[]'); }
+    catch (_) { return []; }
+  }
+  async function loadReportFormFields(type) {
+    const { data, error } = await db.from('report_form_configs').select('fields').eq('report_type', type).maybeSingle();
+    if (error) {
+      if (!missingOptionalTable(error)) toast(error.message, 'err');
+      return readLocalReportFields(type);
+    }
+    return Array.isArray(data?.fields) ? data.fields : readLocalReportFields(type);
+  }
+  async function saveReportFormFields(type, fields) {
+    localStorage.setItem(reportFormStorageKey(type), JSON.stringify(fields));
+    const payload = {
+      report_type: type,
+      fields,
+      updated_by: state.profile.id,
+      updated_at: new Date().toISOString(),
+    };
+    const { error } = await db.from('report_form_configs').upsert(payload, { onConflict: 'report_type' });
+    if (error) {
+      if (missingOptionalTable(error)) {
+        toast(t('reportFormMigrationNeeded'), 'err');
+        return true;
+      }
+      toast(error.message, 'err');
+      return false;
+    }
+    return true;
+  }
+  function reportTypeLabel(type) {
+    const found = REPORT_FORM_TYPES.find(([key]) => key === type);
+    return found ? t(found[1]) : type;
+  }
+  function reportFormDesignerView() {
+    return {
+      title: t('editReportForms'), tab: 'groups',
+      async render(app) {
+        if (!isSuperPlus(state.profile)) {
+          app.append(emptyState(t('editReportForms'), 'Superuser access required.'));
+          return;
+        }
+        let selected = 'incident';
+        let fields = [];
+        let dragIdx = null;
+        const typeButtons = {};
+        const typeBar = el('div', { class: 'report-type-picker' });
+        const editorHost = el('div', {});
+
+        for (const [type, labelKey] of REPORT_FORM_TYPES) {
+          const btn = el('button', { class: 'report-type-card', onclick: () => selectType(type) }, [
+            el('strong', {}, t(labelKey)),
+            el('span', {}, t('customFields')),
+          ]);
+          typeButtons[type] = btn;
+          typeBar.append(btn);
+        }
+        app.append(
+          typeBar,
+          el('div', { class: 'section-head', style: 'margin-top:18px' }, [
+            el('h2', {}, t('customFields')),
+            el('button', { class: 'btn btn-ghost', onclick: () => go(incidentCategoriesView()) }, t('incidentCategories')),
+          ]),
+          editorHost,
+        );
+
+        await selectType(selected);
+
+        async function selectType(type) {
+          selected = type;
+          for (const [key, btn] of Object.entries(typeButtons)) btn.classList.toggle('on', key === selected);
+          fields = (await loadReportFormFields(type)).map(f => ({ ...f, key: f.key || crypto.randomUUID() }));
+          draw();
+        }
+        function draw() {
+          editorHost.innerHTML = '';
+          const list = el('div', { class: 'report-form-builder' });
+          fields.forEach((f, idx) => {
+            const labelInp = el('input', { type: 'text', value: f.label || '', placeholder: t('label'),
+              oninput: e => f.label = e.target.value });
+            const typeSel = el('select', { onchange: e => { f.type = e.target.value; draw(); } },
+              FIELD_TYPES.map(([v, key]) => opt(v, t(key))));
+            typeSel.value = f.type || 'short';
+            const reqBox = el('label', { class: 'req-toggle' }, [
+              el('input', { type: 'checkbox', onchange: e => f.required = e.target.checked }),
+              document.createTextNode(t('required')),
+            ]);
+            reqBox.querySelector('input').checked = !!f.required;
+            const handle = el('span', { class: 'drag-handle', draggable: 'true', title: t('dragReorder') }, '::');
+            const card = el('div', { class: 'card' }, [
+              el('div', { class: 'section-head' }, [
+                el('div', { style: 'display:flex;align-items:center;gap:8px;min-width:0' }, [
+                  handle,
+                  el('strong', {}, t('field', { n: idx + 1 })),
+                ]),
+                el('button', { class: 'btn btn-danger', onclick: () => { fields.splice(idx, 1); draw(); } }, 'x'),
+              ]),
+              labeled(t('label'), labelInp),
+              labeled(t('type'), typeSel),
+              reqBox,
+            ]);
+
+            handle.addEventListener('dragstart', e => {
+              dragIdx = idx;
+              e.dataTransfer.effectAllowed = 'move';
+              e.dataTransfer.setData('text/plain', String(idx));
+              card.classList.add('dragging');
+            });
+            handle.addEventListener('dragend', () => { card.classList.remove('dragging'); dragIdx = null; });
+            card.addEventListener('dragover', e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; });
+            card.addEventListener('drop', e => {
+              e.preventDefault();
+              if (dragIdx === null || dragIdx === idx) return;
+              const [moved] = fields.splice(dragIdx, 1);
+              fields.splice(idx, 0, moved);
+              dragIdx = null;
+              draw();
+            });
+
+            if (f.type === 'dropdown' || f.type === 'checkboxes') {
+              const optsInp = el('input', { type: 'text', value: (f.options || []).join(', '),
+                placeholder: 'Option A, Option B, Option C',
+                oninput: e => f.options = e.target.value.split(',').map(s => s.trim()).filter(Boolean) });
+              card.append(labeled(t('optionsComma'), optsInp));
+            }
+            if (f.type === 'slider') {
+              if (f.min == null) f.min = 1;
+              if (f.max == null) f.max = 5;
+              if (f.round == null) f.round = 'nearest';
+              const minInp = el('input', { type: 'number', value: f.min, oninput: e => f.min = Number(e.target.value) });
+              const maxInp = el('input', { type: 'number', value: f.max, oninput: e => f.max = Number(e.target.value) });
+              const leftInp = el('input', { type: 'text', value: f.leftLabel || '', placeholder: 'Low',
+                oninput: e => f.leftLabel = e.target.value });
+              const rightInp = el('input', { type: 'text', value: f.rightLabel || '', placeholder: 'High',
+                oninput: e => f.rightLabel = e.target.value });
+              const roundSel = el('select', { onchange: e => f.round = e.target.value }, [
+                opt('nearest', t('roundNearest')),
+                opt('up', t('roundUp')),
+              ]);
+              roundSel.value = f.round;
+              card.append(
+                el('div', { style: 'display:flex;gap:10px' }, [
+                  el('div', { style: 'flex:1' }, labeled(t('sliderMin'), minInp)),
+                  el('div', { style: 'flex:1' }, labeled(t('sliderMax'), maxInp)),
+                ]),
+                labeled(t('sliderLeft'), leftInp),
+                labeled(t('sliderRight'), rightInp),
+                labeled(t('sliderRound'), roundSel),
+              );
+            }
+            list.append(card);
+          });
+
+          editorHost.append(
+            el('div', { class: 'card' }, [
+              el('div', { class: 'section-head' }, [
+                el('h3', {}, reportTypeLabel(selected)),
+                el('span', { class: 'muted' }, `${fields.length} ${t('fields')}`),
+              ]),
+              el('p', { class: 'muted', style: 'margin:0' }, t('coreReportFields')),
+            ]),
+            list,
+            el('div', { style: 'display:flex;gap:10px;flex-wrap:wrap' }, [
+              el('button', { class: 'btn btn-ghost', onclick: () => {
+                fields.push({ key: crypto.randomUUID(), type: 'short', label: '', required: false, options: [] });
+                draw();
+              } }, t('addField')),
+              el('button', { class: 'btn btn-primary', onclick: save }, t('saveReportForm')),
+            ]),
+          );
+        }
+        async function save() {
+          const clean = fields
+            .filter(f => (f.label || '').trim())
+            .map(f => ({
+              key: f.key || crypto.randomUUID(),
+              type: f.type || 'short',
+              label: f.label.trim(),
+              required: !!f.required,
+              options: f.type === 'dropdown' || f.type === 'checkboxes' ? (f.options || []) : [],
+              min: f.type === 'slider' ? Number(f.min ?? 1) : undefined,
+              max: f.type === 'slider' ? Number(f.max ?? 5) : undefined,
+              leftLabel: f.type === 'slider' ? (f.leftLabel || '') : undefined,
+              rightLabel: f.type === 'slider' ? (f.rightLabel || '') : undefined,
+              round: f.type === 'slider' ? (f.round || 'nearest') : undefined,
+            }));
+          const ok = await saveReportFormFields(selected, clean);
+          if (!ok) return;
+          fields = clean.map(f => ({ ...f }));
+          toast(t('reportFormSaved'));
+          draw();
+        }
+      },
+    };
+  }
+
+  function incidentCategoriesView() {
     return {
       title: t('incidentCategories'), tab: 'groups',
       async render(app) {
@@ -2876,8 +3098,8 @@
           el('span', { class: 'muted' }, '›'),
         ]));
         app.append(el('div', { class: 'row', onclick: () => go(categoriesView()), style: 'cursor:pointer' }, [
-          el('div', { class: 'grow' }, [el('div', {}, 'Incident categories'),
-            el('div', { class: 'sub' }, 'Manage root-cause and consequence options')]),
+          el('div', { class: 'grow' }, [el('div', {}, t('editReportForms')),
+            el('div', { class: 'sub' }, t('editReportFormsHint'))]),
           el('span', { class: 'muted' }, '›'),
         ]));
       },
@@ -3099,6 +3321,8 @@
           el('p', { class: 'muted', style: 'margin:6px 0 0' }, `${who} · ${fmt(r.created_at)}`),
           el('p', { style: 'margin-top:12px;white-space:pre-wrap' }, r.description || ''),
         ]));
+        const customCard = customFieldsCard(r.custom_fields);
+        if (customCard) app.append(customCard);
         const statusSel = el('select', {}, ['open', 'in_progress', 'resolved'].map(s => opt(s, statusLabel(s))));
         statusSel.value = r.status;
         const resolution = el('textarea', { rows: 4 });

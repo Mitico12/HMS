@@ -205,11 +205,12 @@
       { id: 'reports', ic: '⚠', label: t('myReports'), open: () => go(myReportsView(), { reset: true }) },
       { id: 'varsling', ic: '🔒', label: t('varsling'), open: () => go(varslingForm(), { reset: true }) },
     ];
-    for (const item of fixedItems) nav.append(sidebarButton(item, active));
+    for (const item of []) nav.append(sidebarButton(item, active));
     // Group links are draggable to reorder. Workers can't write the groups
     // table, so the order is a per-user preference saved to the same localStorage
     // key the home tiles use, keeping the two views in sync.
-    const orderedGroups = sortGroupsBySaved(state.groups, 'userHomeTileOrder');
+    const orderedGroups = sortGroupsBySaved(state.groups, 'userHomeTileOrder')
+      .filter(g => g.kind !== 'reports');
     let dragIdx = null;
     let didDrag = false;
     orderedGroups.forEach((g, idx) => {
@@ -888,7 +889,7 @@
   function renderReportActions(app) {
     app.append(el('div', { class: 'report-action-stack' }, [
       el('button', { class: 'report-action report-action-primary', onclick: () => go(reportForm()) }, [
-        el('span', { class: 'report-action-icon' }, '!'),
+        el('span', { class: 'report-action-icon report-action-icon-incident' }, '!'),
         el('span', {}, t('reportIncident')),
       ]),
       el('button', { class: 'report-action', onclick: () => go(hazardForm()) }, [
@@ -896,8 +897,12 @@
         el('span', {}, t('reportHazard')),
       ]),
       el('button', { class: 'report-action', onclick: () => go(suggestionForm()) }, [
-        el('span', { class: 'report-action-icon' }, '+'),
+        el('span', { class: 'report-action-icon report-action-icon-suggestion' }, '+'),
         el('span', {}, t('reportSuggestion')),
+      ]),
+      el('button', { class: 'report-action', onclick: () => go(varslingForm()) }, [
+        el('span', { class: 'report-action-icon report-action-icon-varsling' }, 'V'),
+        el('span', {}, t('varsling')),
       ]),
     ]));
   }
@@ -937,11 +942,141 @@
     return `background:${bg};color:${fg};border-color:${bg}`;
   }
 
+  const REPORT_FORM_TYPES = ['incident', 'hazard', 'suggestion', 'varsling'];
+  function reportFormStorageKey(type) { return `reportForm:${type}`; }
+  function readLocalReportFields(type) {
+    try { return JSON.parse(localStorage.getItem(reportFormStorageKey(type)) || '[]'); }
+    catch (_) { return []; }
+  }
+  async function loadReportFormFields(type) {
+    if (!REPORT_FORM_TYPES.includes(type)) return [];
+    const { data, error } = await db.from('report_form_configs').select('fields').eq('report_type', type).maybeSingle();
+    if (error) {
+      if (!missingOptionalTable(error)) toast(error.message, 'err');
+      return readLocalReportFields(type);
+    }
+    return Array.isArray(data?.fields) ? data.fields : readLocalReportFields(type);
+  }
+  function missingOptionalColumn(error) {
+    if (!error) return false;
+    return ['42703', 'PGRST204'].includes(error.code) || /custom_fields|schema cache|Could not find/i.test(error.message || '');
+  }
+  async function insertReportRow(table, payload) {
+    let { error } = await db.from(table).insert(payload);
+    if (error && payload.custom_fields && missingOptionalColumn(error)) {
+      const retryPayload = { ...payload };
+      delete retryPayload.custom_fields;
+      ({ error } = await db.from(table).insert(retryPayload));
+    }
+    return { error };
+  }
+  function renderCustomReportFields(app, fields) {
+    const clean = (fields || []).filter(f => f?.label && f?.key);
+    const answers = {};
+    if (!clean.length) return { answers, validate: () => true };
+    app.append(el('h2', { class: 'display report-section-title' }, t('customFields')));
+    for (const f of clean) {
+      let input;
+      if (f.type === 'long') input = el('textarea', { oninput: e => answers[f.key] = e.target.value });
+      else if (f.type === 'number') input = el('input', { type: 'number', oninput: e => answers[f.key] = e.target.value });
+      else if (f.type === 'dropdown') {
+        input = el('select', { onchange: e => answers[f.key] = e.target.value },
+          [opt('', `- ${t('choose')} -`), ...(f.options || []).map(o => opt(o, o))]);
+      } else if (f.type === 'checkbox') {
+        answers[f.key] = false;
+        input = el('input', { type: 'checkbox', onchange: e => answers[f.key] = e.target.checked });
+        app.append(el('label', { class: 'check-item' }, [input, el('span', {}, f.label + (f.required ? ' *' : ''))]));
+        continue;
+      } else if (f.type === 'checkboxes') {
+        const picked = [];
+        answers[f.key] = picked;
+        const group = el('div', {});
+        for (const o of (f.options || [])) {
+          const box = el('input', { type: 'checkbox', onchange: e => {
+            if (e.target.checked) { if (!picked.includes(o)) picked.push(o); }
+            else { const i = picked.indexOf(o); if (i > -1) picked.splice(i, 1); }
+          } });
+          group.append(el('label', { class: 'check-item' }, [box, el('span', {}, o)]));
+        }
+        app.append(el('div', { class: 'field' }, [
+          el('span', {}, [f.label, f.required ? el('span', { class: 'req' }, ' *') : null]),
+          group,
+        ]));
+        continue;
+      } else if (f.type === 'slider') {
+        const min = Number(f.min ?? 1), max = Number(f.max ?? 5);
+        const round = f.round === 'up' ? Math.ceil : Math.round;
+        const step = max > min ? (max - min) / 100 : 1;
+        answers[f.key] = round(min);
+        const valueOut = el('div', { style: 'font-weight:750;font-size:1.25rem;text-align:center;margin-bottom:4px' }, String(round(min)));
+        input = el('input', { type: 'range', min, max, step, value: min, oninput: e => {
+          const shown = round(Number(e.target.value));
+          answers[f.key] = shown;
+          valueOut.textContent = String(shown);
+        } });
+        app.append(el('div', { class: 'field' }, [
+          el('span', {}, [f.label, f.required ? el('span', { class: 'req' }, ' *') : null]),
+          valueOut,
+          input,
+          el('div', { style: 'display:flex;justify-content:space-between;font-size:.82rem;color:var(--steel);margin-top:2px' }, [
+            el('span', {}, f.leftLabel || String(min)),
+            el('span', {}, f.rightLabel || String(max)),
+          ]),
+        ]));
+        continue;
+      } else input = el('input', { type: 'text', oninput: e => answers[f.key] = e.target.value });
+      app.append(labeled(f.label, input, !!f.required));
+    }
+    return {
+      answers,
+      validate() {
+        for (const f of clean) {
+          if (!f.required) continue;
+          if (f.type === 'checkbox' || f.type === 'slider') continue;
+          if (f.type === 'checkboxes') {
+            if (!Array.isArray(answers[f.key]) || !answers[f.key].length) {
+              toast(`"${f.label}" is required.`, 'err');
+              return false;
+            }
+            continue;
+          }
+          if (!answers[f.key]) {
+            toast(`"${f.label}" is required.`, 'err');
+            return false;
+          }
+        }
+        return true;
+      },
+      values() {
+        const out = {};
+        for (const f of clean) {
+          const value = answers[f.key];
+          if (Array.isArray(value) ? value.length : value !== undefined && value !== null && value !== '') {
+            out[f.label] = value;
+          }
+        }
+        return out;
+      },
+    };
+  }
+  function customFieldsCard(values) {
+    const entries = Object.entries(values || {}).filter(([, v]) => Array.isArray(v) ? v.length : v !== null && v !== undefined && v !== '');
+    if (!entries.length) return null;
+    return el('div', { class: 'card' }, [
+      el('h3', {}, t('customFields')),
+      ...entries.map(([key, value]) => el('div', { class: 'report-custom-line' }, [
+        el('span', { class: 'muted' }, key),
+        el('strong', {}, Array.isArray(value) ? value.join(', ') : value === true ? 'Yes' : value === false ? 'No' : String(value)),
+      ])),
+    ]);
+  }
+
   // Confidential "varsling": anyone may file one; only granted handlers can read it.
   function varslingForm() {
     return {
-      title: t('varsling'), tab: 'groups',
+      title: t('varsling'), tab: 'reports',
       async render(app) {
+        const customFields = await loadReportFormFields('varsling');
         const title = el('input', { type: 'text', placeholder: t('varslingTitle') });
         const desc = el('textarea', { placeholder: t('varslingDetails') });
         const anonBox = el('input', { type: 'checkbox' });
@@ -954,15 +1089,18 @@
           labeled(t('varslingTitle'), title, true),
           labeled(t('varslingDetails'), desc),
           el('label', { class: 'check-item' }, [anonBox, el('span', {}, t('submitAnonymously'))]),
-          el('button', { class: 'btn btn-primary btn-block btn-lg', style: 'margin-top:8px', onclick: submit }, t('fileVarsling')),
         );
+        const custom = renderCustomReportFields(app, customFields);
+        app.append(el('button', { class: 'btn btn-primary btn-block btn-lg', style: 'margin-top:8px', onclick: submit }, t('fileVarsling')));
         async function submit() {
           if (!title.value.trim()) return toast(t('varslingTitle'), 'err');
-          const { error } = await db.from('varslinger').insert({
+          if (!custom.validate()) return;
+          const { error } = await insertReportRow('varslinger', {
             reporter_id: anonBox.checked ? null : state.profile.id,
             is_anonymous: anonBox.checked,
             title: title.value.trim(),
             description: desc.value.trim() || null,
+            custom_fields: custom.values(),
           });
           if (error) return toast(error.message, 'err');
           toast(t('varslingSubmitted')); back();
@@ -978,6 +1116,7 @@
         const { data: cats } = await db.from('incident_categories').select('*').order('sort_order');
         const roots = (cats || []).filter(c => c.kind === 'root_cause');
         const cons  = (cats || []).filter(c => c.kind === 'consequence');
+        const customFields = await loadReportFormFields('incident');
 
         const what = el('textarea', { placeholder: t('whatHappened') });
         const wrong = el('textarea', { placeholder: t('whatNeedsFixing') });
@@ -1007,15 +1146,17 @@
           consBlock.field,
           labeled(t('photosOptional'), photos),
           anonRow,
-          el('button', { class: 'btn btn-primary btn-block btn-lg', style: 'margin-top:8px', onclick: submit }, t('submitReport')),
         );
+        const custom = renderCustomReportFields(app, customFields);
+        app.append(el('button', { class: 'btn btn-primary btn-block btn-lg', style: 'margin-top:8px', onclick: submit }, t('submitReport')));
 
         async function submit() {
           if (!what.value.trim()) return toast(t('whatHappened'), 'err');
+          if (!custom.validate()) return;
           const incidentId = crypto.randomUUID();
           const photoPaths = await uploadIncidentPhotos(incidentId, photos.files);
           if (photoPaths === null) return;
-          const { error } = await db.from('incidents').insert({
+          const { error } = await insertReportRow('incidents', {
             id: incidentId,
             reporter_id: state.profile.id,
             report_type: 'incident',
@@ -1029,6 +1170,7 @@
             location: where.value.trim() || null,
             is_anonymous: anonBox.checked,
             photo_paths: photoPaths,
+            custom_fields: custom.values(),
           });
           if (error) return toast(error.message, 'err');
           toast(t('submitted')); back();
@@ -1043,6 +1185,7 @@
       async render(app) {
         const { data: cats } = await db.from('incident_categories').select('*').order('sort_order');
         const cons = (cats || []).filter(c => c.kind === 'consequence');
+        const customFields = await loadReportFormFields('hazard');
 
         const what = el('textarea', { placeholder: t('whatHazard') });
         const fix = el('textarea', { placeholder: t('whatNeedsFixing') });
@@ -1068,15 +1211,17 @@
           consBlock.field,
           labeled(t('photosOptional'), photos),
           anonRow,
-          el('button', { class: 'btn btn-primary btn-block btn-lg', style: 'margin-top:8px', onclick: submit }, t('submitReport')),
         );
+        const custom = renderCustomReportFields(app, customFields);
+        app.append(el('button', { class: 'btn btn-primary btn-block btn-lg', style: 'margin-top:8px', onclick: submit }, t('submitReport')));
 
         async function submit() {
           if (!what.value.trim()) return toast(t('whatHazard'), 'err');
+          if (!custom.validate()) return;
           const incidentId = crypto.randomUUID();
           const photoPaths = await uploadIncidentPhotos(incidentId, photos.files);
           if (photoPaths === null) return;
-          const { error } = await db.from('incidents').insert({
+          const { error } = await insertReportRow('incidents', {
             id: incidentId,
             reporter_id: state.profile.id,
             report_type: 'hazard',
@@ -1089,6 +1234,7 @@
             location: where.value.trim() || null,
             is_anonymous: anonBox.checked,
             photo_paths: photoPaths,
+            custom_fields: custom.values(),
           });
           if (error) return toast(error.message, 'err');
           toast(t('submitted')); back();
@@ -1100,7 +1246,8 @@
   function suggestionForm() {
     return {
       title: t('reportSuggestion'), tab: 'reports',
-      render(app) {
+      async render(app) {
+        const customFields = await loadReportFormFields('suggestion');
         const what = el('textarea', { placeholder: t('suggestionText'), style: 'min-height:180px' });
         const photos = el('input', { type: 'file', accept: 'image/*', multiple: 'multiple' });
         const anonBox = el('input', { type: 'checkbox' });
@@ -1114,15 +1261,17 @@
           labeled(t('suggestionText'), what, true),
           labeled(t('photosOptional'), photos),
           anonRow,
-          el('button', { class: 'btn btn-primary btn-block btn-lg', style: 'margin-top:8px', onclick: submit }, t('submitReport')),
         );
+        const custom = renderCustomReportFields(app, customFields);
+        app.append(el('button', { class: 'btn btn-primary btn-block btn-lg', style: 'margin-top:8px', onclick: submit }, t('submitReport')));
 
         async function submit() {
           if (!what.value.trim()) return toast(t('suggestionText'), 'err');
+          if (!custom.validate()) return;
           const incidentId = crypto.randomUUID();
           const photoPaths = await uploadIncidentPhotos(incidentId, photos.files);
           if (photoPaths === null) return;
-          const { error } = await db.from('incidents').insert({
+          const { error } = await insertReportRow('incidents', {
             id: incidentId,
             reporter_id: state.profile.id,
             report_type: 'suggestion',
@@ -1131,6 +1280,7 @@
             consequence_ids: [],
             is_anonymous: anonBox.checked,
             photo_paths: photoPaths,
+            custom_fields: custom.values(),
           });
           if (error) return toast(error.message, 'err');
           toast(t('submitted')); back();
@@ -1246,6 +1396,8 @@
             inc.is_anonymous ? ' · submitted anonymously' : '',
           ].join('')),
         ]));
+        const customCard = customFieldsCard(inc.custom_fields);
+        if (customCard) app.append(customCard);
         await renderIncidentPhotos(app, inc);
 
         if (inc.status === 'resolved' && inc.final_report) {
