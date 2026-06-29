@@ -355,7 +355,7 @@
       ]),
       el('div', { class: 'workspace-card' }, [
         el('div', { class: 'workspace-head' }, [
-          el('span', {}, t('currentWorkspace')),
+          el('span', {}, t('workspace')),
           el('span', { class: 'workspace-role' }, roleName(state.profile.role)),
         ]),
         el('div', { class: 'workspace-switch' }, [
@@ -478,11 +478,11 @@
     const view = viewStack[viewStack.length - 1];
     const bar = $('#topbar'); bar.innerHTML = '';
     bar.append(el('button', { class: 'iconbtn mobile-menu-btn', title: 'Open navigation', 'aria-label': 'Open navigation', 'aria-expanded': String(mobileSidebarOpen), onclick: toggleMobileSidebar }, '\u2630'));
-    bar.append(el('button', { class: 'iconbtn', title: t('returnStart'), onclick: goIndex }, '⌂'));
-    bar.append(themeToggleButton());
+    bar.append(el('button', { class: 'iconbtn', title: t('refresh'), onclick: goIndex }, '⟳'));
     if (viewStack.length > 1) bar.append(el('button', { class: 'iconbtn', onclick: back }, '‹'));
     bar.append(el('h1', {}, view.title));
     bar.append(el('span', { class: 'role-pill' }, roleName(state.profile.role)));
+    bar.append(themeToggleButton());
     bar.append(el('button', { class: 'iconbtn', title: t('signOut'), onclick: signOut }, '⏻'));
     if (view.action) bar.append(view.action);
     const app = $('#app'); app.innerHTML = ''; app.className = 'wrap';
