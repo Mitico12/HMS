@@ -45,7 +45,7 @@
   <div id="screen"></div>
 
   <script type="module">
-  import { db, requireSession, currentProfile, el, $, fmt, toast, newAuthClient, initTheme, themeToggleButton, initLanguage, languageSelect, t,
+  import { db, requireSession, currentProfile, el, $, fmt, toast, newAuthClient, initTheme, themeToggleButton, initLanguage, languageSelect, currentLanguage, t,
            roleRank, isAdminPlus, isSuperPlus, isSysadmin, canViewChecklistLogs, canAccessVarsling, isSuspended } from './config.js';
   import { coursesGroupView, courseBuild, courseResults } from './courses.js';
 
@@ -186,7 +186,7 @@
     const { error } = await db.rpc('resolve_sysadmin_case', { case_id: id, verdict });
     if (error) return toast(error.message, 'err');
     caseMonitor.seen.delete(id);
-    toast('Case resolved.');
+    toast(t('caseResolved'));
     if (done) done();
     await loadProfiles();
     go(homeView(), { reset: true });
@@ -253,13 +253,13 @@
       const password = $('#pw').value;
       if (mode === 'signup') {
         const email = $('#em').value.trim(), username = $('#un').value.trim(), full_name = $('#fn').value.trim();
-        if (!email || !username || !password) return toast('Email, username and password are required.', 'err');
+        if (!email || !username || !password) return toast(t('emailUsernamePasswordRequired'), 'err');
         const { data: free } = await db.rpc('username_available', { p_username: username });
-        if (free === false) return toast('That username is taken.', 'err');
+        if (free === false) return toast(t('usernameTaken'), 'err');
         const { error } = await db.auth.signUp({ email, password,
           options: { data: { full_name, username }, emailRedirectTo: new URL('confirmed.html', location.href).href } });
         if (error) return toast(error.message, 'err');
-        toast('Account created. Confirm your email, then ask an admin to grant access.');
+        toast(t('accountCreatedGrantAccess'));
         mode = 'login'; render();
       } else {
         const ident = $('#lid').value.trim();
@@ -341,29 +341,29 @@
       ]),
       el('div', { class: 'workspace-card' }, [
         el('div', { class: 'workspace-head' }, [
-          el('span', {}, 'Current workspace'),
+          el('span', {}, t('currentWorkspace')),
           el('span', { class: 'workspace-role' }, roleName(state.profile.role)),
         ]),
         el('div', { class: 'workspace-switch' }, [
-          el('button', { onclick: () => location.href = new URL('./user.html', location.href).href }, 'Worker App'),
-          el('button', { class: 'active', onclick: () => go(homeView(), { reset: true }) }, 'Admin Console'),
+          el('button', { onclick: () => location.href = new URL('./user.html', location.href).href }, t('workerApp')),
+          el('button', { class: 'active', onclick: () => go(homeView(), { reset: true }) }, t('adminConsole')),
         ]),
       ]),
-      el('div', { class: 'sidebar-section-label' }, 'Management panel'),
+      el('div', { class: 'sidebar-section-label' }, t('managementPanel')),
     );
     const nav = el('div', { class: 'sidebar-nav' });
     const isAdmin = isAdminPlus(state.profile);
     const pendingAccounts = state.profiles.filter(p => p.role === 'user' && !p.is_verified).length;
     // Safety reps (verneombud) see only Checklist Logs; admins and above see everything.
     const fixed = isAdmin ? [
-      { id: 'analytics', ic: '▦', label: 'Executive Analytics', open: () => go(homeView(), { reset: true }) },
+      { id: 'analytics', ic: '▦', label: t('executiveAnalytics'), open: () => go(homeView(), { reset: true }) },
       { id: 'incidents', ic: '⚠', label: t('reports'), badge: true, open: () => openKind('reports') },
-      { id: 'checklist-logs', ic: '☑', label: 'Checklist Logs', open: () => go(checklistLogsView()) },
-      { id: 'procedures', ic: '▤', label: 'Procedure Submissions', open: () => openKind('procedures') },
-      { id: 'courses', ic: '▣', label: 'Manage Courses', open: () => openKind('courses') },
-      { id: 'users', ic: 'U', label: 'Accounts', count: pendingAccounts, open: () => go(usersView()) },
+      { id: 'checklist-logs', ic: '☑', label: t('checklistLogs'), open: () => go(checklistLogsView()) },
+      { id: 'procedures', ic: '▤', label: t('procedureSubmissions'), open: () => openKind('procedures') },
+      { id: 'courses', ic: '▣', label: t('manageCourses'), open: () => openKind('courses') },
+      { id: 'users', ic: 'U', label: t('accounts'), count: pendingAccounts, open: () => go(usersView()) },
     ] : [
-      { id: 'checklist-logs', ic: '☑', label: 'Checklist Logs', open: () => go(checklistLogsView()) },
+      { id: 'checklist-logs', ic: '☑', label: t('checklistLogs'), open: () => go(checklistLogsView()) },
     ];
     for (const item of fixed) nav.append(sidebarButton(item, active));
     const hidden = hiddenGroupIds();
@@ -371,7 +371,7 @@
       ? state.groups.filter(g => !['reports', 'procedures', 'courses'].includes(g.kind) && !hidden.has(g.id))
       : [];
     if (extras.length) {
-      nav.append(el('div', { class: 'sidebar-section-label' }, 'Content groups'));
+      nav.append(el('div', { class: 'sidebar-section-label' }, t('contentGroups')));
       for (const g of extras) {
         nav.append(sidebarButton({
           id: `group:${g.id}`,
@@ -418,7 +418,7 @@
   function openKind(kind) {
     const group = firstGroup(kind);
     if (group) go(groupView(group));
-    else toast(`No ${kind} group found.`, 'err');
+    else toast(t('noGroupFound', { kind }), 'err');
   }
 
   // ── view stack / router ────────────────────────────────
@@ -439,7 +439,7 @@
     bar.append(el('span', { class: 'role-pill' }, roleName(state.profile.role)));
     bar.append(el('button', { class: 'iconbtn', title: t('signOut'), onclick: signOut }, '⏻'));
     if (view.action) bar.append(view.action);
-    const app = $('#app'); app.innerHTML = '';
+    const app = $('#app'); app.innerHTML = ''; app.className = 'wrap';
     renderBotnav(view.tab || 'groups');
     renderSidebar(view.side || view.tab || 'analytics');
     view.render(app);
@@ -779,12 +779,12 @@
     const medC = medianDays(medCur), medP = medianDays(medPrev);
 
     const grid = el('div', { class: 'kpi-grid' }, [
-      metricCard({ label: t('reportsInPeriod'), value: backlog, live: true, hint: 'Open backlog' }),
+      metricCard({ label: t('reportsInPeriod'), value: backlog, live: true, hint: t('openBacklog') }),
       metricCard({ label: t('unassigned'), value: unassigned, live: true }),
-      metricCard({ label: 'Oldest open', value: oldestDays + 'd', live: true }),
-      metricCard({ label: 'Serious', value: serCur, delta: pctChange(serCur, serPrev), good: isGood(serCur, serPrev, 'down') }),
-      metricCard({ label: 'Resolution rate', value: rateCur + '%', delta: pctChange(rateCur, ratePrev), good: isGood(rateCur, ratePrev, 'up') }),
-      metricCard({ label: 'Median resolve', value: medC == null ? '–' : medC + 'd', delta: medP ? pctChange(medC, medP) : null, good: isGood(medC || 0, medP || 0, 'down') }),
+      metricCard({ label: t('oldestOpen'), value: oldestDays + 'd', live: true }),
+      metricCard({ label: t('serious'), value: serCur, delta: pctChange(serCur, serPrev), good: isGood(serCur, serPrev, 'down') }),
+      metricCard({ label: t('resolutionRate'), value: rateCur + '%', delta: pctChange(rateCur, ratePrev), good: isGood(rateCur, ratePrev, 'up') }),
+      metricCard({ label: t('medianResolve'), value: medC == null ? '–' : medC + 'd', delta: medP ? pctChange(medC, medP) : null, good: isGood(medC || 0, medP || 0, 'down') }),
     ]);
     host.append(grid);
   }
@@ -815,10 +815,10 @@
     ]);
 
     host.append(el('div', { class: 'kpi-grid' }, [
-      metricCard({ label: 'Reported', value: repCur, delta: pctChange(repCur, repPrev), good: isGood(repCur, repPrev, 'down') }),
-      metricCard({ label: 'Resolved', value: resCur, delta: pctChange(resCur, resPrev), good: isGood(resCur, resPrev, 'up') }),
-      metricCard({ label: 'Serious', value: serCur, delta: pctChange(serCur, serPrev), good: isGood(serCur, serPrev, 'down') }),
-      metricCard({ label: 'Anonymous', value: anonCur + '%', delta: pctChange(anonCur, anonPrev), good: null }),
+      metricCard({ label: t('reported'), value: repCur, delta: pctChange(repCur, repPrev), good: isGood(repCur, repPrev, 'down') }),
+      metricCard({ label: t('resolved'), value: resCur, delta: pctChange(resCur, resPrev), good: isGood(resCur, resPrev, 'up') }),
+      metricCard({ label: t('serious'), value: serCur, delta: pctChange(serCur, serPrev), good: isGood(serCur, serPrev, 'down') }),
+      metricCard({ label: t('anonymous'), value: anonCur + '%', delta: pctChange(anonCur, anonPrev), good: null }),
     ]));
 
     // severity strip
@@ -834,7 +834,7 @@
     const legend = el('div', { class: 'sev-legend' }, counts.map(c =>
       el('span', {}, [el('i', { style: `background:${c.color}` }), `${c.name} ${c.n}`])));
     host.append(el('div', { class: 'kpi-card', style: 'margin-top:14px' }, [
-      el('div', { class: 'kpi-label', style: 'margin-bottom:10px' }, 'Reports by worst consequence'), bar, legend,
+      el('div', { class: 'kpi-label', style: 'margin-bottom:10px' }, t('reportsByWorstConsequence')), bar, legend,
     ]));
   }
 
@@ -888,17 +888,17 @@
     const drawDrill = () => {
       drillHost.innerHTML = '';
       if (!open) return;
-      if (!missed) { drillHost.append(el('div', { class: 'kpi-card' }, '✓ Every checklist hit its daily quota in this range.')); return; }
+      if (!missed) { drillHost.append(el('div', { class: 'kpi-card' }, '✓ ' + t('everyChecklistHitQuota'))); return; }
       const card = el('div', { class: 'kpi-card' }, [
-        el('div', { class: 'kpi-label' }, `${missed} below quota across ${shortfalls.length} checklist-days`),
+        el('div', { class: 'kpi-label' }, t('belowQuotaAcross', { missed, days: shortfalls.length })),
       ]);
       const limit = showAllMissed ? shortfalls.length : 12;
       shortfalls.slice(0, limit).forEach(s => card.append(el('div', { class: 'miss-row' }, [
         el('div', { class: 'miss-top' }, [
           el('span', { style: 'flex:1' }, s.title),
-          el('span', { class: 'miss-pill' }, `short ${s.short}`),
+          el('span', { class: 'miss-pill' }, t('shortCount', { count: s.short })),
         ]),
-        el('p', { class: 'miss-sub' }, `${s.date.getDate()} ${s.date.toLocaleString('en', { month: 'short' })} · expected ${s.exp}, got ${s.got}`),
+        el('p', { class: 'miss-sub' }, `${s.date.getDate()} ${s.date.toLocaleString(currentLanguage(), { month: 'short' })} - ${t('expectedGot', { expected: s.exp, got: s.got })}`),
       ])));
       if (shortfalls.length > 12) {
         card.append(showAllMissed
@@ -911,8 +911,8 @@
 
     host.append(el('div', { class: 'kpi-grid' }, [
       metricCard({ label: t('checklistsCompletedInPeriod'), value: completions, delta: pctChange(completions, evPrev.length), good: isGood(completions, evPrev.length, 'up') }),
-      metricCard({ label: 'Completion rate', value: rateCur + '%', delta: pctChange(rateCur, ratePrev), good: isGood(rateCur, ratePrev, 'up') }),
-      metricCard({ label: 'Missed', value: missed, delta: pctChange(missed, 0), good: isGood(missed, 0, 'down'), hint: t('seeWhich') + ' ▾', onClick: () => { open = !open; drawDrill(); } }),
+      metricCard({ label: t('completionRate'), value: rateCur + '%', delta: pctChange(rateCur, ratePrev), good: isGood(rateCur, ratePrev, 'up') }),
+      metricCard({ label: t('missed'), value: missed, delta: pctChange(missed, 0), good: isGood(missed, 0, 'down'), hint: t('seeWhich') + ' ▾', onClick: () => { open = !open; drawDrill(); } }),
     ]));
     host.append(drillHost);
 
@@ -1245,10 +1245,10 @@
         archived.forEach(r => reportTypeCounts.set(r.report_type || 'incident', (reportTypeCounts.get(r.report_type || 'incident') || 0) + 1));
         const topType = [...reportTypeCounts.entries()].sort((a, b) => b[1] - a[1])[0];
         app.append(el('div', { class: 'kpi-grid', style: 'margin-bottom:14px' }, [
-          metricCard({ label: 'Archived reports', value: archived.length }),
-          metricCard({ label: 'Suggestions', value: archived.filter(r => (r.report_type || 'incident') === 'suggestion').length }),
-          metricCard({ label: 'Anonymous', value: archived.length ? Math.round(archived.filter(r => r.is_anonymous).length / archived.length * 100) + '%' : '0%' }),
-          metricCard({ label: 'Top type', value: topType ? typeLabel(topType[0]) : '—', hint: topType ? `${topType[1]} total` : '' }),
+          metricCard({ label: t('archivedReports'), value: archived.length }),
+          metricCard({ label: t('reportTypeSuggestions'), value: archived.filter(r => (r.report_type || 'incident') === 'suggestion').length }),
+          metricCard({ label: t('anonymous'), value: archived.length ? Math.round(archived.filter(r => r.is_anonymous).length / archived.length * 100) + '%' : '0%' }),
+          metricCard({ label: t('topType'), value: topType ? typeLabel(topType[0]) : '—', hint: topType ? `${topType[1]} ${t('total')}` : '' }),
         ]));
 
         const rFilters = { from: '', until: '', type: 'all', admin: 'all', user: 'all' };
@@ -1292,7 +1292,7 @@
         function drawReports() {
           reportsHost.innerHTML = '';
           const rows = rFiltered();
-          if (!rows.length) { reportsHost.append(el('p', { class: 'muted', style: 'margin-bottom:18px' }, archived.length ? 'No reports match these filters.' : 'No archived reports yet.')); return; }
+          if (!rows.length) { reportsHost.append(el('p', { class: 'muted', style: 'margin-bottom:18px' }, archived.length ? t('noReportsMatchFilters') : t('noArchivedReportsYet'))); return; }
           const byType = new Map();
           for (const r of rows) {
             const k = r.report_type || 'incident';
@@ -1318,7 +1318,7 @@
         drawReports();
 
         async function deleteReportLog(i) {
-          if (!confirm('Delete this report log permanently? This cannot be undone.')) return;
+          if (!confirm(t('deleteReportLogConfirm'))) return;
           if ((i.photo_paths || []).length) {
             await db.storage.from('incident-photos').remove(i.photo_paths);
           }
@@ -1326,7 +1326,7 @@
           if (error) return toast(error.message, 'err');
           const idx = archived.findIndex(r => r.id === i.id);
           if (idx > -1) archived.splice(idx, 1);
-          toast('Log deleted.'); drawReports();
+          toast(t('logDeleted')); drawReports();
         }
       },
     };
@@ -1345,7 +1345,7 @@
 
         app.append(el('h2', { class: 'display', style: 'font-size:1.15rem;margin:0 0 10px' }, t('checklistLogs')));
         if (runsQ.error) {
-          app.append(emptyState(t('noChecklistLogs'), 'Run migration_incident_photos_checklist_logs.sql first.'));
+          app.append(emptyState(t('noChecklistLogs'), t('migrationChecklistLogsMissing')));
           return;
         }
         const reviewCount = runs.filter(run => {
@@ -1356,10 +1356,10 @@
           return missing.length > 0 || issues.length > 0 || !!(run.notes || '').trim();
         }).length;
         app.append(el('div', { class: 'kpi-grid', style: 'margin-bottom:14px' }, [
-          metricCard({ label: 'Checklist logs', value: runs.length }),
+          metricCard({ label: t('checklistLogs'), value: runs.length }),
           metricCard({ label: t('checklistLogNeedsAttention'), value: reviewCount }),
-          metricCard({ label: 'Unique users', value: new Set(runs.map(r => r.user_id).filter(Boolean)).size }),
-          metricCard({ label: 'Checklist types', value: new Set(runs.map(r => r.checklist_id).filter(Boolean)).size }),
+          metricCard({ label: t('uniqueUsers'), value: new Set(runs.map(r => r.user_id).filter(Boolean)).size }),
+          metricCard({ label: t('checklistTypes'), value: new Set(runs.map(r => r.checklist_id).filter(Boolean)).size }),
         ]));
 
         const cFilters = { from: '', until: '', user: 'all', checklist: 'all' };
@@ -1390,7 +1390,7 @@
             inDateRange(r.submitted_at || r.updated_at, cFilters.from, cFilters.until) &&
             (cFilters.user === 'all' || r.user_id === cFilters.user) &&
             (cFilters.checklist === 'all' || r.checklist_id === cFilters.checklist));
-          if (!rows.length) { checklistHost.append(el('p', { class: 'muted' }, runs.length ? 'No checklists match these filters.' : t('noChecklistLogs'))); return; }
+          if (!rows.length) { checklistHost.append(el('p', { class: 'muted' }, runs.length ? t('noChecklistsMatchFilters') : t('noChecklistLogs'))); return; }
           for (const run of rows) {
             const checklist = byChecklist.get(run.checklist_id);
             const items = checklist?.items || [];
@@ -1431,12 +1431,12 @@
         drawChecklists();
 
         async function deleteChecklistLog(run) {
-          if (!confirm('Delete this checklist log permanently? This cannot be undone.')) return;
+          if (!confirm(t('deleteChecklistLogConfirm'))) return;
           const { error } = await db.rpc('delete_checklist_run', { p_id: run.id });
           if (error) return toast(error.message, 'err');
           const idx = runs.findIndex(r => r.id === run.id);
           if (idx > -1) runs.splice(idx, 1);
-          toast('Log deleted.'); drawChecklists();
+          toast(t('logDeleted')); drawChecklists();
         }
       },
     };
@@ -1449,7 +1449,7 @@
         await loadProfiles();
         const subsQ = await db.from('course_submissions').select('*').eq('passed', true).order('created_at', { ascending: false });
         if (subsQ.error) {
-          app.append(emptyState(t('noCompletedCourses'), 'Run migration_courses.sql first.'));
+          app.append(emptyState(t('noCompletedCourses'), t('migrationCoursesMissing')));
           return;
         }
         const submissions = subsQ.data || [];
@@ -1465,9 +1465,9 @@
         const avgScore = submissions.length ? Math.round(submissions.reduce((sum, s) => sum + (Number(s.score) || 0), 0) / submissions.length) : 0;
         app.append(el('div', { class: 'kpi-grid', style: 'margin-bottom:14px' }, [
           metricCard({ label: t('completedCourses'), value: submissions.length }),
-          metricCard({ label: 'Unique users', value: new Set(submissions.map(s => s.user_id).filter(Boolean)).size }),
+          metricCard({ label: t('uniqueUsers'), value: new Set(submissions.map(s => s.user_id).filter(Boolean)).size }),
           metricCard({ label: t('courses'), value: courseIds.length }),
-          metricCard({ label: 'Average score', value: submissions.length ? `${avgScore}%` : '—' }),
+          metricCard({ label: t('averageScore'), value: submissions.length ? `${avgScore}%` : '—' }),
         ]));
         const filters = { from: '', until: '', user: 'all', course: 'all' };
         const from = el('input', { type: 'date', onchange: e => { filters.from = e.target.value; drawCourses(); } });
@@ -1497,7 +1497,7 @@
             inDateRange(s.created_at, filters.from, filters.until) &&
             (filters.user === 'all' || s.user_id === filters.user) &&
             (filters.course === 'all' || s.course_id === filters.course));
-          if (!rows.length) { host.append(el('p', { class: 'muted' }, submissions.length ? 'No completed courses match these filters.' : t('noCompletedCourses'))); return; }
+          if (!rows.length) { host.append(el('p', { class: 'muted' }, submissions.length ? t('noCompletedCoursesMatchFilters') : t('noCompletedCourses'))); return; }
           for (const s of rows) {
             const c = byCourse.get(s.course_id);
             const qn = (c?.questions || []).length;
@@ -1603,7 +1603,7 @@
 
   function addGroupModal() {
     openModal(t('newGroup'), (body, close) => {
-      const name = el('input', { type: 'text', placeholder: 'e.g. Kitchen' });
+      const name = el('input', { type: 'text', placeholder: t('exampleKitchen') });
       const icon = el('input', { type: 'text', placeholder: '📁', maxlength: 2, style: 'width:80px' });
       const kind = el('select', {}, [
         opt('procedures', t('procedures')),
@@ -1614,15 +1614,15 @@
       ]);
       body.append(
         labeled(t('name'), name, true),
-        labeled('Icon', icon),
+        labeled(t('icon'), icon),
         labeled(t('type'), kind),
         el('button', { class: 'btn btn-primary btn-block', onclick: async () => {
-          if (!name.value.trim()) return toast('Name is required.', 'err');
+          if (!name.value.trim()) return toast(t('nameRequired'), 'err');
           const sort_order = (state.groups.at(-1)?.sort_order || 0) + 1;
           const { error } = await db.from('groups').insert({
             name: name.value.trim(), icon: icon.value.trim() || '📁', kind: kind.value, sort_order });
           if (error) return toast(error.message, 'err');
-          close(); toast('Group added.'); go(homeView(), { reset: true });
+          close(); toast(t('groupAdded')); go(homeView(), { reset: true });
         } }, t('addGroup')),
       );
     });
@@ -1698,7 +1698,7 @@
         let q = await db.from('checklists').select('*').eq('group_id', g.id).order('sort_order').order('created_at');
         if (q.error) q = await db.from('checklists').select('*').eq('group_id', g.id).order('created_at');
         const data = q.data || [];
-        if (!data?.length) return app.append(emptyState('No checklists yet', 'Tap + to build one.'));
+        if (!data?.length) return app.append(emptyState(t('noChecklists'), t('noChecklistsHint')));
         let rows = data.slice();
         let dragIdx = null;
         const list = el('div', { class: 'library-grid' });
@@ -1709,10 +1709,10 @@
             const row = libraryCard({
               kind: 'checklist',
               title: c.title,
-              meta: `${(c.items || []).length} item${(c.items || []).length === 1 ? '' : 's'}`,
+              meta: t('items', { count: (c.items || []).length }),
               image: firstChecklistImage(c),
               handle,
-              actions: [el('button', { class: 'btn btn-ghost', onclick: e => { e.stopPropagation(); go(checklistEdit(g, c)); } }, 'Edit')],
+              actions: [el('button', { class: 'btn btn-ghost', onclick: e => { e.stopPropagation(); go(checklistEdit(g, c)); } }, t('edit'))],
             });
             handle.addEventListener('dragstart', e => {
               dragIdx = idx;
@@ -1866,7 +1866,7 @@
             fixOnNo: i.type === 'choice' ? (i.fixOnNo ?? hasNoOption(i.options || [])) : false,
             image: i.image || null,
           }));
-          if (!title.value.trim() || !clean.length) return toast('Add a title and at least one item.', 'err');
+          if (!title.value.trim() || !clean.length) return toast(t('addTitleAndItem'), 'err');
           const payload = {
             group_id: g.id,
             title: title.value.trim(),
@@ -1878,12 +1878,12 @@
                              : db.from('checklists').insert(payload);
           const { error } = await q;
           if (error) return toast(error.message, 'err');
-          toast('Saved.'); back();
+          toast(t('saved')); back();
         }
         async function del() {
-          if (!confirm('Delete this checklist?')) return;
+          if (!confirm(t('deleteChecklistConfirm'))) return;
           await db.from('checklists').delete().eq('id', existing.id);
-          toast('Deleted.'); back();
+          toast(t('deleted')); back();
         }
       },
     };
@@ -2046,7 +2046,7 @@
   async function loadXlsx() {
     let XLSX;
     try { XLSX = await import('https://cdn.sheetjs.com/xlsx-0.20.3/package/xlsx.mjs'); }
-    catch (e) { toast('Could not load the Excel library (check the network).', 'err'); return null; }
+    catch (e) { toast(t('excelLibraryLoadFailed'), 'err'); return null; }
     return XLSX;
   }
 
@@ -2067,7 +2067,7 @@
     const wb = XLSX.read(buf, { type: 'array', cellDates: false });
     const ws = wb.Sheets[wb.SheetNames[0]];
     const rows = XLSX.utils.sheet_to_json(ws, { defval: '' });
-    if (!rows.length) { toast('The spreadsheet is empty.', 'err'); return null; }
+    if (!rows.length) { toast(t('spreadsheetEmpty'), 'err'); return null; }
     if (!assertExcelHeaders(rows, columns, label)) return null;
     return rows;
   }
@@ -2084,7 +2084,7 @@
 
   // Export a set of reports to a real .xlsx. Reporter identity respects anonymity exactly as the UI does.
   async function exportReportsExcel(rows, filename) {
-    if (!rows.length) return toast('Nothing to export.', 'err');
+    if (!rows.length) return toast(t('nothingToExport'), 'err');
     const { data: cats } = await db.from('incident_categories').select('*');
     const catName = (id) => (cats || []).find(c => c.id === id)?.name || id;
     const joinCats = (ids, other) => {
@@ -2252,10 +2252,10 @@
 
         const assigneeOptions = assignableIncidentProfiles();
         const canSeeCurrentAssignee = !inc.assigned_to || assigneeOptions.some(p => p.id === inc.assigned_to);
-        const assign = el('select', {}, [opt('', '— unassigned —'), ...assigneeOptions.map(p => opt(p.id, labelOf(p)))]);
+        const assign = el('select', {}, [opt('', `— ${t('unassigned')} —`), ...assigneeOptions.map(p => opt(p.id, labelOf(p)))]);
         assign.value = inc.assigned_to || '';
         app.append(el('div', { class: 'card' }, [
-          el('h3', {}, 'Processing'),
+          el('h3', {}, t('processing')),
           el('div', { style: 'display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px' }, [
             statusBtn('open', t('open')),
             statusBtn('in_progress', t('inProgress')),
@@ -2263,15 +2263,15 @@
           ]),
           labeled(t('assignedTo'), assign),
           el('button', { class: 'btn btn-ghost', onclick: async () => {
-            if (!canSeeCurrentAssignee && !assign.value) return toast('Choose a visible assignee to change this assignment.', 'err');
+            if (!canSeeCurrentAssignee && !assign.value) return toast(t('chooseVisibleAssignee'), 'err');
             const { error } = await db.from('incidents').update({ assigned_to: assign.value || null }).eq('id', id);
             if (error) return toast(error.message, 'err');
-            toast('Assignment saved.');
+            toast(t('assignmentSaved'));
           } }, t('saveAssignment')),
         ]));
 
         // action log
-        const note = el('textarea', { placeholder: 'Record an action taken or a note…' });
+        const note = el('textarea', { placeholder: t('actionNotePlaceholder') });
         const log = el('div', {});
         for (const a of actions || []) {
           log.append(el('div', { class: 'timeline-note' }, [
@@ -2279,7 +2279,7 @@
             el('div', {}, a.note),
           ]));
         }
-        if (!actions?.length) log.append(el('p', { class: 'muted' }, 'No actions logged yet.'));
+        if (!actions?.length) log.append(el('p', { class: 'muted' }, t('noActionsLoggedYet')));
         app.append(el('div', { class: 'card' }, [
           el('h3', {}, t('actionLog')), log, el('hr', { class: 'soft' }),
           labeled(t('addActionNote'), note),
@@ -2293,16 +2293,16 @@
         ]));
 
         // final report
-        const fr = el('textarea', { placeholder: 'Outcome and corrective actions taken…', style: 'min-height:140px' });
+        const fr = el('textarea', { placeholder: t('outcomePlaceholder'), style: 'min-height:140px' });
         fr.value = inc.final_report || '';
         app.append(el('div', { class: 'card' }, [
           el('h3', {}, t('finalReport')),
-          el('p', { class: 'muted', style: 'font-size:.82rem' }, 'Visible to the reporter once saved. Use "Close case" above when it is resolved.'),
+          el('p', { class: 'muted', style: 'font-size:.82rem' }, t('finalReportVisibleHint')),
           fr,
           el('button', { class: 'btn btn-primary', style: 'margin-top:10px', onclick: async () => {
             const { error } = await db.from('incidents').update({ final_report: fr.value.trim() || null }).eq('id', id);
             if (error) return toast(error.message, 'err');
-            toast('Final report saved.');
+            toast(t('finalReportSaved'));
           } }, t('saveFinalReport')),
         ]));
 
@@ -2462,7 +2462,7 @@
         }
         async function upload() {
           const f = file.files[0];
-          if (!f) return toast('Choose a file first.', 'err');
+          if (!f) return toast(t('chooseFileFirst'), 'err');
           const path = `${g.id}/${crypto.randomUUID()}-${f.name}`;
           const { error: upErr } = await db.storage.from('documents').upload(path, f);
           if (upErr) return toast(upErr.message, 'err');
@@ -2470,7 +2470,7 @@
             group_id: g.id, name: f.name, storage_path: path, mime_type: f.type, size_bytes: f.size,
             uploaded_by: state.profile.id });
           if (error) return toast(error.message, 'err');
-          file.value = ''; toast('Uploaded.'); loadDocs();
+          file.value = ''; toast(t('uploaded')); loadDocs();
         }
         async function openDoc(d) {
           const { data, error } = await db.storage.from('documents').createSignedUrl(d.storage_path, 60);
@@ -2644,7 +2644,7 @@
         );
         async function saveProc(is_draft) {
           const clean = fields.filter(f => f.label.trim());
-          if (!title.value.trim() || !clean.length) return toast('Add a title and at least one field.', 'err');
+          if (!title.value.trim() || !clean.length) return toast(t('addTitleAndField'), 'err');
           const payload = { group_id: g.id, title: title.value.trim(), description: desc.value.trim() || null,
             fields: clean, is_draft, created_by: state.profile.id };
           const q = existing ? db.from('procedures').update(payload).eq('id', existing.id)
@@ -2655,7 +2655,7 @@
         }
         async function del() {
           if (!confirm('Delete this procedure?')) return;
-          await db.from('procedures').delete().eq('id', existing.id); toast('Deleted.'); back();
+          await db.from('procedures').delete().eq('id', existing.id); toast(t('deleted')); back();
         }
       },
     };
@@ -2722,12 +2722,12 @@
           hasPending ? el('p', { class: 'muted' }, 'You already have a pending profile change. Wait for it to be approved or rejected before sending another one.') : null,
           el('button', { class: 'btn btn-primary btn-block', disabled: hasPending ? 'disabled' : null, onclick: async () => {
             const next = { full_name: fullName.value.trim(), username: username.value.trim(), email: email.value.trim(), mobile_number: mobile.value.trim() };
-            if (!next.username || !next.email) return toast('Username and email are required.', 'err');
+            if (!next.username || !next.email) return toast(t('usernameEmailRequired'), 'err');
             const unchanged = (p.full_name || '') === next.full_name && (p.username || '') === next.username && (p.email || '') === next.email && (p.mobile_number || '') === next.mobile_number;
-            if (unchanged) return toast('Nothing changed.', 'err');
+            if (unchanged) return toast(t('nothingChanged'), 'err');
             if ((p.username || '') !== next.username) {
               const { data: free, error: freeErr } = await db.rpc('username_available', { p_username: next.username });
-              if (!freeErr && free === false) return toast('That username is taken.', 'err');
+              if (!freeErr && free === false) return toast(t('usernameTaken'), 'err');
             }
             const rpc = await db.rpc('request_profile_change', { p_full_name: next.full_name || null, p_username: next.username, p_email: next.email, p_mobile_number: next.mobile_number || null });
             if (rpc.error && !missingOptionalRpc(rpc.error)) return toast(rpc.error.message, 'err');
@@ -2742,7 +2742,7 @@
               });
               if (error) return toast(error.message + ' — run the SQL patch first.', 'err');
             }
-            toast('Change request sent.'); refresh();
+            toast(t('changeRequestSent')); refresh();
           } }, 'Request change'),
           el('p', { class: 'muted', style: 'font-size:.82rem' }, 'Changes are sent to admins for approval, like account verification.'),
         ]));
@@ -2781,7 +2781,7 @@
       if (sel.value !== 'off' && 'Notification' in window && Notification.permission === 'default') {
         Notification.requestPermission().catch(() => {});
       }
-      toast('Notification preference saved.');
+      toast(t('notificationPreferenceSaved'));
     });
     return el('div', { class: 'card' }, [
       el('h3', {}, t('notifications')),
@@ -2830,7 +2830,7 @@
   }
 
   async function exportUsersExcel(rows) {
-    if (!rows.length) return toast('Nothing to export.', 'err');
+    if (!rows.length) return toast(t('nothingToExport'), 'err');
     await writeExcel(rows.map(p => ({
       'Full name': p.full_name || '',
       Username: p.username || '',
@@ -2875,7 +2875,7 @@
       seenUsernames.add(username);
       if (!role) return toast(`Row ${idx + 2} has an invalid Role. Use User, Safety rep, Admin, Superuser, or Sys-admin.`, 'err');
       if (!isSysadmin(state.profile) && roleRank(role) >= roleRank(state.profile)) {
-        return toast('You can only import accounts below your own role level.', 'err');
+        return toast(t('importBelowRoleOnly'), 'err');
       }
       if (String(r['Temporary password']).trim().length < 6) {
         return toast(`Row ${idx + 2} temporary password must be at least 6 characters.`, 'err');
@@ -3003,7 +3003,7 @@
               if (!confirm('Delete this varsling permanently? This cannot be undone.')) return;
               const { error } = await db.from('varslinger').delete().eq('id', id);
               if (error) return toast(error.message, 'err');
-              toast('Deleted.'); back();
+              toast(t('deleted')); back();
             } }, t('deleteAction')) : null,
           ]),
         ]));
@@ -3365,10 +3365,10 @@
   }
 
   async function assignCourse(userId, courseId) {
-    if (!courseId) return toast('Choose a course first.', 'err');
+    if (!courseId) return toast(t('chooseCourseFirst'), 'err');
     const { error } = await db.from('course_assignments').insert({ user_id: userId, course_id: courseId, assigned_by: state.profile.id });
     if (error) return toast(error.message + ' - run migration_course_assignments.sql first.', 'err');
-    toast('Course assigned.');
+    toast(t('courseAssigned'));
     refresh();
   }
 
@@ -3376,7 +3376,7 @@
     if (!confirm('Remove this course assignment?')) return;
     const { error } = await db.from('course_assignments').delete().eq('id', assignmentId);
     if (error) return toast(error.message, 'err');
-    toast('Assignment removed.');
+    toast(t('assignmentRemoved'));
     refresh();
   }
 
@@ -3443,7 +3443,7 @@
         status: 'approved', reviewed_by: state.profile.id, reviewed_at: new Date().toISOString(),
       }).eq('id', r.id);
     }
-    toast('Profile change approved.');
+    toast(t('profileChangeApproved'));
     await loadProfiles(); refresh();
   }
   async function rejectProfileChange(r) {
@@ -3456,7 +3456,7 @@
       }).eq('id', r.id);
       if (error) return toast(error.message + ' — run the SQL patch if this table/function is missing.', 'err');
     }
-    toast('Profile change rejected.'); refresh();
+    toast(t('profileChangeRejected')); refresh();
   }
 
   function addUserModal() {
@@ -3485,10 +3485,10 @@
           const fn = fullName.value.trim();
           const mob = mobile.value.trim();
           const pw = password.value.trim();
-          if (!em || !un || !pw) return toast('Email, username and temporary password are required.', 'err');
-          if (pw.length < 6) return toast('Password must be at least 6 characters.', 'err');
+          if (!em || !un || !pw) return toast(t('emailUsernameTempPasswordRequired'), 'err');
+          if (pw.length < 6) return toast(t('passwordMinLength'), 'err');
           const { data: free, error: freeErr } = await db.rpc('username_available', { p_username: un });
-          if (!freeErr && free === false) return toast('That username is taken.', 'err');
+          if (!freeErr && free === false) return toast(t('usernameTaken'), 'err');
 
           const auth = newAuthClient();
           const { data, error } = await auth.auth.signUp({ email: em, password: pw,
@@ -3496,7 +3496,7 @@
           await auth.auth.signOut();
           if (error) return toast(error.message, 'err');
           const id = data?.user?.id;
-          if (!id) return toast('User created, but Supabase did not return an id. Refresh and check Users.', 'err');
+          if (!id) return toast(t('userCreatedNoId'), 'err');
           const payload = { id, email: em, username: un, full_name: fn || null, mobile_number: mob || null, role: role.value, is_verified: verified.checked };
           let { error: profileErr } = await db.from('profiles').upsert(payload, { onConflict: 'id' });
           if (profileErr && /username/i.test(profileErr.message || '')) {
@@ -3508,7 +3508,7 @@
             ({ error: profileErr } = await db.from('profiles').upsert(payload, { onConflict: 'id' }));
           }
           if (profileErr) return toast(profileErr.message + ' - run migration_mobile_number_users.sql if the mobile column is missing.', 'err');
-          toast('User added. Send them the temporary password.');
+          toast(t('userAddedTempPassword'));
           close(); await loadProfiles(); refresh();
         } }, 'Create user'),
       );

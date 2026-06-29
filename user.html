@@ -223,7 +223,7 @@
     bar.append(el('h1', {}, view.title));
     bar.append(el('button', { class: 'iconbtn', title: t('signOut'), onclick: signOut }, '⏻'));
     if (view.action) bar.append(view.action);
-    const app = $('#app'); app.innerHTML = '';
+    const app = $('#app'); app.innerHTML = ''; app.className = 'wrap';
     renderBotnav(view.tab || 'groups');
     renderSidebar(view.side || view.tab || 'groups');
     view.render(app);
