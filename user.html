@@ -160,7 +160,7 @@
     const nav = $('#botnav'); nav.innerHTML = '';
     const tabs = [
       { id: 'groups',  ic: '▦', label: t('groups'),     onclick: () => go(homeView(), { reset: true }) },
-      { id: 'reports', ic: '⚠', label: t('myReports'), onclick: () => go(myReportsView(), { reset: true }) },
+      { id: 'reports', ic: '⚠', label: t('reports'), onclick: () => go(myReportsView(), { reset: true }) },
       { id: 'settings', ic: '⚙', label: t('settings'), onclick: () => go(settingsView(), { reset: true }) },
     ];
     for (const t of tabs)
@@ -201,8 +201,7 @@
     );
     const nav = el('div', { class: 'sidebar-nav' });
     const fixedItems = [
-      { id: 'reports', ic: '⚠', label: t('myReports'), open: () => go(myReportsView(), { reset: true }) },
-      { id: 'varsling', ic: '🔒', label: t('varsling'), open: () => go(varslingForm(), { reset: true }) },
+      { id: 'reports', ic: '⚠', label: t('reports'), open: () => go(myReportsView(), { reset: true }) },
     ];
     for (const item of fixedItems) nav.append(sidebarButton(item, active));
     // Group links are draggable to reorder. Workers can't write the groups
@@ -1422,7 +1421,7 @@
 
   function myReportsView() {
     return {
-      title: t('myReports'), tab: 'reports',
+      title: t('reports'), tab: 'reports',
       async render(app) {
         renderReportActions(app);
         await renderRecentReports(app);
