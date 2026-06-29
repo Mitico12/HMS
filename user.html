@@ -47,6 +47,7 @@
     state.assignedCourseGroups = new Set(courses.map(c => c.group_id));
   }
   const viewStack = [];
+  let mobileSidebarOpen = false;
 
   (async function boot() {
     const res = await requireSession();
@@ -136,12 +137,25 @@
     screen.innerHTML = '';
     screen.append(el('div', { class: 'app-shell' }, [
       el('aside', { class: 'sidebar', id: 'sidebar' }),
+      el('button', { class: 'sidebar-backdrop', id: 'sidebar-backdrop', 'aria-label': 'Close navigation', onclick: closeMobileSidebar }),
       el('header', { class: 'topbar', id: 'topbar' }),
       el('main', { class: 'wrap', id: 'app' }),
       el('nav', { class: 'botnav', id: 'botnav' }),
     ]));
+    $('#sidebar').addEventListener('click', e => {
+      if (window.matchMedia('(max-width: 720px)').matches && e.target.closest('button')) closeMobileSidebar();
+    });
     renderSidebar('groups');
   }
+  function setMobileSidebar(open) {
+    mobileSidebarOpen = open;
+    const shell = document.querySelector('.app-shell');
+    if (shell) shell.classList.toggle('nav-open', open);
+    const btn = document.querySelector('.mobile-menu-btn');
+    if (btn) btn.setAttribute('aria-expanded', String(open));
+  }
+  function toggleMobileSidebar() { setMobileSidebar(!mobileSidebarOpen); }
+  function closeMobileSidebar() { setMobileSidebar(false); }
   function renderBotnav(active) {
     const nav = $('#botnav'); nav.innerHTML = '';
     const tabs = [
@@ -252,6 +266,7 @@
   function paint() {
     const view = viewStack[viewStack.length - 1];
     const bar = $('#topbar'); bar.innerHTML = '';
+    bar.append(el('button', { class: 'iconbtn mobile-menu-btn', title: 'Open navigation', 'aria-label': 'Open navigation', 'aria-expanded': String(mobileSidebarOpen), onclick: toggleMobileSidebar }, '\u2630'));
     bar.append(el('button', { class: 'iconbtn', title: t('returnStart'), onclick: goIndex }, '⌂'));
     bar.append(themeToggleButton());
     if (viewStack.length > 1) bar.append(el('button', { class: 'iconbtn', onclick: back }, '‹'));
@@ -261,6 +276,7 @@
     const app = $('#app'); app.innerHTML = ''; app.className = 'wrap';
     renderBotnav(view.tab || 'groups');
     renderSidebar(view.side || view.tab || 'groups');
+    setMobileSidebar(mobileSidebarOpen);
     view.render(app);
   }
   const refresh = () => paint();
@@ -275,11 +291,12 @@
     return {
       title: t('groups'), tab: 'groups',
       async render(app) {
-        await renderUserKpiDashboard(app);
         const { data } = await db.from('groups').select('*').order('sort_order');
         state.groups = visibleGroups(data || []);
         await loadAssignedCourseGroups();
         renderSidebar('groups');
+        await renderUserKpiDashboard(app);
+        return;
         const grid = el('div', { class: 'tile-grid mobile-only-groups' });
         renderSortableHomeTiles(grid, state.groups.map(g => ({
           id: `group:${g.id}`,
@@ -363,18 +380,81 @@
     const period = kpiPeriod(periodKey);
     const { start, end } = periodBounds(period);
     const periodText = periodLabel(period);
-    const [completed, reports] = await Promise.all([
-      countRows(db.from('checklist_runs').select('id', { count: 'exact', head: true })
-        .eq('user_id', state.profile.id).eq('completed', true).gte('submitted_at', start).lt('submitted_at', end)),
-      countRows(db.from('incidents').select('id', { count: 'exact', head: true })
-        .eq('reporter_id', state.profile.id).gte('created_at', start).lt('created_at', end)),
-    ]);
+    const completed = await countRows(db.from('checklist_runs').select('id', { count: 'exact', head: true })
+      .eq('user_id', state.profile.id).eq('completed', true).gte('submitted_at', start).lt('submitted_at', end));
+    const todo = await loadWorkerChecklistTodo();
     const cards = [
       { id: 'completed', label: t('checklistsCompletedInPeriod'), value: completed },
-      { id: 'reports', label: t('reportsInPeriod'), value: reports },
+      { id: 'todo', label: t('checklistsToDo'), value: todo.items.length },
     ];
     renderKpiToolbar(app, 'userKpiVisible', periodKey, cards, () => go(homeView(), { reset: true }));
     renderSortableKpiGrid(app, 'userKpiOrder', visibleKpiCards(cards, 'userKpiVisible'), { periodText });
+    renderWorkerChecklistTodo(app, todo);
+  }
+
+  async function loadWorkerChecklistTodo() {
+    const today = localDateString();
+    const { start, end } = todayBounds();
+    if (!state.groups.length) {
+      const { data } = await db.from('groups').select('*').order('sort_order');
+      state.groups = visibleGroups(data || []);
+    }
+    const checklistGroups = state.groups.filter(g => g.kind === 'checklist');
+    const groupIds = checklistGroups.map(g => g.id);
+    if (!groupIds.length) return { items: [], total: 0 };
+
+    let q = await db.from('checklists').select('*').in('group_id', groupIds).order('sort_order').order('created_at');
+    if (q.error) q = await db.from('checklists').select('*').in('group_id', groupIds).order('created_at');
+    const all = q.data || [];
+    if (!all.length) return { items: [], total: 0 };
+
+    const dueByQuota = all.filter(checklistDueToday);
+    const scoped = dueByQuota.length ? dueByQuota : all;
+    const ids = scoped.map(c => c.id);
+    const { data: runs = [] } = ids.length
+      ? await db.from('checklist_runs')
+        .select('checklist_id,submitted_at,completed')
+        .eq('user_id', state.profile.id)
+        .eq('completed', true)
+        .gte('submitted_at', start)
+        .lt('submitted_at', end)
+        .in('checklist_id', ids)
+      : { data: [] };
+    const doneToday = new Set((runs || []).map(r => r.checklist_id));
+    const groupById = new Map(checklistGroups.map(g => [g.id, g]));
+    return {
+      total: scoped.length,
+      items: scoped.filter(c => !doneToday.has(c.id)).map(c => ({ ...c, group: groupById.get(c.group_id), dueDate: today })),
+    };
+  }
+
+  function checklistDueToday(c) {
+    const quota = Number(c.daily_quota || 0);
+    if (quota <= 0) return false;
+    const days = Array.isArray(c.quota_weekdays) && c.quota_weekdays.length ? c.quota_weekdays.map(Number) : [0,1,2,3,4,5,6];
+    return days.includes(new Date().getDay());
+  }
+
+  function renderWorkerChecklistTodo(app, todo) {
+    app.append(el('div', { class: 'worker-home-section' }, [
+      el('h2', { class: 'display worker-section-title' }, t('checklistsToDo')),
+    ]));
+    if (!todo.items.length) {
+      app.append(emptyState(t('noChecklistsToDo'), t('noChecklistsToDoHint')));
+      return;
+    }
+    const grid = el('div', { class: 'library-grid worker-checklist-todo' });
+    todo.items.forEach(c => grid.append(libraryCard({
+      kind: 'checklist',
+      title: c.title,
+      meta: c.group ? groupName(c.group) : t('checklists'),
+      sub: `${(c.items || []).length} ${t('items', { count: (c.items || []).length }).toLowerCase()} - ${c.dueDate}`,
+      image: c.image || firstChecklistImage(c),
+      icon: c.icon || null,
+      onclick: () => go(checklistRun(c)),
+      className: 'todo-checklist-card',
+    })));
+    app.append(grid);
   }
 
   async function countRows(query) {
@@ -785,6 +865,9 @@
     return {
       title: groupName(g), tab: 'groups',
       async render(app) {
+        renderReportActions(app);
+        await renderRecentReports(app, 5);
+        return;
         app.append(el('div', { style: 'display:grid;gap:10px;margin-bottom:18px' }, [
           el('button', { class: 'btn btn-primary btn-lg btn-block',
             onclick: () => go(reportForm()) }, `!  ${t('reportIncident')}`),
@@ -802,8 +885,35 @@
     };
   }
 
+  function renderReportActions(app) {
+    app.append(el('div', { class: 'report-action-stack' }, [
+      el('button', { class: 'report-action report-action-primary', onclick: () => go(reportForm()) }, [
+        el('span', { class: 'report-action-icon' }, '!'),
+        el('span', {}, t('reportIncident')),
+      ]),
+      el('button', { class: 'report-action', onclick: () => go(hazardForm()) }, [
+        el('span', { class: 'report-action-icon report-action-icon-warn' }, '!'),
+        el('span', {}, t('reportHazard')),
+      ]),
+      el('button', { class: 'report-action', onclick: () => go(suggestionForm()) }, [
+        el('span', { class: 'report-action-icon' }, '+'),
+        el('span', {}, t('reportSuggestion')),
+      ]),
+    ]));
+  }
+
+  async function renderRecentReports(app, limit = null) {
+    app.append(el('h2', { class: 'display report-section-title' }, t('yourRecentReports')));
+    let query = db.from('incidents').select('*')
+      .eq('reporter_id', state.profile.id).order('created_at', { ascending: false });
+    if (limit) query = query.limit(limit);
+    const { data } = await query;
+    if (!data?.length) return app.append(emptyState(t('noReports'), t('noReportsHint')));
+    for (const i of data) app.append(incidentRow(i));
+  }
+
   function incidentRow(i) {
-    return el('div', { class: 'row', onclick: () => go(myIncidentView(i.id)), style: 'cursor:pointer' }, [
+    return el('div', { class: 'row report-row', onclick: () => go(myIncidentView(i.id)), style: 'cursor:pointer' }, [
       el('div', { class: 'grow' }, [el('div', {}, truncate(i.what_happened, 64)),
         el('div', { class: 'sub' }, `${typeLabel(i.report_type)} · ${fmt(i.created_at)}`)]),
       el('span', { class: `pill ${incidentStatusClass(i)}`, style: incidentStatusStyle(i) }, statusLabel(i.status)),
@@ -863,7 +973,7 @@
 
   function reportForm() {
     return {
-      title: t('reportIncident'), tab: 'groups',
+      title: t('reportIncident'), tab: 'reports',
       async render(app) {
         const { data: cats } = await db.from('incident_categories').select('*').order('sort_order');
         const roots = (cats || []).filter(c => c.kind === 'root_cause');
@@ -929,7 +1039,7 @@
 
   function hazardForm() {
     return {
-      title: t('reportHazard'), tab: 'groups',
+      title: t('reportHazard'), tab: 'reports',
       async render(app) {
         const { data: cats } = await db.from('incident_categories').select('*').order('sort_order');
         const cons = (cats || []).filter(c => c.kind === 'consequence');
@@ -989,7 +1099,7 @@
 
   function suggestionForm() {
     return {
-      title: t('reportSuggestion'), tab: 'groups',
+      title: t('reportSuggestion'), tab: 'reports',
       render(app) {
         const what = el('textarea', { placeholder: t('suggestionText'), style: 'min-height:180px' });
         const photos = el('input', { type: 'file', accept: 'image/*', multiple: 'multiple' });
@@ -1159,10 +1269,8 @@
     return {
       title: t('myReports'), tab: 'reports',
       async render(app) {
-        const { data } = await db.from('incidents').select('*')
-          .eq('reporter_id', state.profile.id).order('created_at', { ascending: false });
-        if (!data?.length) return app.append(emptyState(t('noReports'), t('noReportsHint')));
-        for (const i of data) app.append(incidentRow(i));
+        renderReportActions(app);
+        await renderRecentReports(app);
       },
     };
   }
