@@ -72,7 +72,7 @@ function ensureStyles() {
     .course-stat { padding: 12px; border: 1px solid var(--line, rgba(26,47,54,.12)); border-radius: 14px; background: var(--paper, #fffaf0); }`;
   const listCss = `
     .course-library { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 16px; }
-    .course-library .course-row { min-height: 230px; padding: 14px; border-radius: 8px; display: grid; grid-template-rows: auto 1fr auto; align-items: stretch; text-align: center; }
+    .course-library .course-row { min-height: 230px; padding: 14px; border-radius: 8px; display: flex; flex-direction: column; text-align: center; }
     .course-library .course-row::before { content: "🎓"; order: 2; aspect-ratio: 1.55; border-radius: 7px; border: 1px solid var(--line, rgba(26,47,54,.12)); background: radial-gradient(circle at 74% 22%, color-mix(in srgb, var(--primary, #6c7cff) 18%, transparent), transparent 34%), linear-gradient(135deg, color-mix(in srgb, var(--paper-2, #f7f7fb) 86%, #fff 14%), color-mix(in srgb, var(--paper, #fffaf0) 72%, var(--primary, #6c7cff) 8%)); display: grid; place-items: center; font-size: clamp(3.2rem, 9vw, 5rem); line-height: 1; margin: 8px 0 10px; }
     .course-library .course-row.course-row-has-art::before { content: none; }
     .course-library .course-row .course-art { order: 2; aspect-ratio: 1.55; border-radius: 7px; overflow: hidden; border: 1px solid var(--line, rgba(26,47,54,.12)); background: radial-gradient(circle at 74% 22%, color-mix(in srgb, var(--primary, #6c7cff) 18%, transparent), transparent 34%), linear-gradient(135deg, color-mix(in srgb, var(--paper-2, #f7f7fb) 86%, #fff 14%), color-mix(in srgb, var(--paper, #fffaf0) 72%, var(--primary, #6c7cff) 8%)); display: grid; place-items: center; margin: 8px 0 10px; }
@@ -82,7 +82,7 @@ function ensureStyles() {
     .course-library .course-row > div:last-child { order: 3; }
     .course-library .course-row .c-title { min-height: 2.5em; display: grid; place-items: center; font-size: 1rem; }
     .course-library .course-row .c-meta { font-size: .95rem; font-weight: 650; color: var(--ink, #1a2f36); }
-    .course-library .course-row > div:last-child { justify-content: center; flex-wrap: wrap; }`;
+    .course-library .course-row > div:last-child { margin-top: auto; justify-content: center; flex-wrap: wrap; }`;
   document.head.append(el('style', {}, css + listCss));
 }
 

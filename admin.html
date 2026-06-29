@@ -365,6 +365,11 @@
     ] : [
       { id: 'checklist-logs', ic: '☑', label: t('checklistLogs'), open: () => go(checklistLogsView()) },
     ];
+    // Varsling (whistleblowing) reports live in their own confidential list,
+    // visible in the management panel to superusers and above.
+    if (isSuperPlus(state.profile)) {
+      fixed.push({ id: 'varsling', ic: '🔒', label: t('varsling'), open: () => go(varslingListView()) });
+    }
     for (const item of fixed) nav.append(sidebarButton(item, active));
     const hidden = hiddenGroupIds();
     const extras = isAdmin
@@ -372,15 +377,34 @@
       : [];
     if (extras.length) {
       nav.append(el('div', { class: 'sidebar-section-label' }, t('contentGroups')));
-      for (const g of extras) {
-        nav.append(sidebarButton({
-          id: `group:${g.id}`,
-          ic: g.icon || '•',
-          label: groupName(g),
-          open: () => go(groupView(g)),
-          onHide: () => { setGroupHidden(g.id, true); toast(t('groupHidden')); go(homeView(), { reset: true }); },
-        }, active));
-      }
+      let dragIdx = null;
+      let didDrag = false;
+      extras.forEach((g, idx) => {
+        const btn = el('button', {
+          class: `sidebar-link sidebar-link-draggable ${active === `group:${g.id}` ? 'active' : ''}`,
+          draggable: 'true',
+          onclick: () => { if (didDrag) { didDrag = false; return; } go(groupView(g)); },
+        }, [
+          el('span', { class: 'ic' }, g.icon || '•'),
+          el('span', { class: 'label' }, groupName(g)),
+          el('span', { class: 'sidebar-hide', title: t('hideGroup'),
+            onclick: e => { e.stopPropagation(); setGroupHidden(g.id, true); toast(t('groupHidden')); go(homeView(), { reset: true }); } }, '🛇'),
+        ]);
+        btn.addEventListener('dragstart', e => { dragIdx = idx; didDrag = true; e.dataTransfer.effectAllowed = 'move'; btn.classList.add('dragging'); });
+        btn.addEventListener('dragend', () => { dragIdx = null; btn.classList.remove('dragging'); });
+        btn.addEventListener('dragover', e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; });
+        btn.addEventListener('drop', async e => {
+          e.preventDefault();
+          if (dragIdx === null || dragIdx === idx) return;
+          const [moved] = extras.splice(dragIdx, 1);
+          extras.splice(idx, 0, moved);
+          dragIdx = null;
+          applyExtrasOrder(extras);
+          await saveSortOrder('groups', state.groups);
+          renderSidebar(active);
+        });
+        nav.append(btn);
+      });
     }
     if (isAdmin) {
       nav.append(sidebarButton({ id: 'add-group', ic: '+', label: t('addGroup'), open: addGroupModal }, active));
@@ -402,6 +426,13 @@
       ]),
     ]));
     updateReportsBadge();
+  }
+  // Splice a reordered subset (the sidebar content groups) back into the full
+  // state.groups list, keeping non-subset groups in their existing slots.
+  function applyExtrasOrder(newExtras) {
+    const ids = new Set(newExtras.map(g => g.id));
+    let i = 0;
+    state.groups = state.groups.map(g => ids.has(g.id) ? newExtras[i++] : g);
   }
   function sidebarButton(item, active) {
     return el('button', { class: `sidebar-link ${active === item.id ? 'active' : ''}`, onclick: item.open }, [
@@ -3006,9 +3037,9 @@
   // ════════════════════════════════════════════════════════
   function varslingListView() {
     return {
-      title: t('varsling'), tab: 'groups', side: 'incidents',
+      title: t('varsling'), tab: 'groups', side: 'varsling',
       async render(app) {
-        if (!canAccessVarsling(state.profile)) { app.append(emptyState(t('varsling'), 'No access.')); return; }
+        if (!isSuperPlus(state.profile) && !canAccessVarsling(state.profile)) { app.append(emptyState(t('varsling'), 'No access.')); return; }
         await loadProfiles();
         const { data: rows = [], error } = await db.from('varslinger').select('*').order('created_at', { ascending: false });
         if (error) { app.append(emptyState(t('varsling'), error.message)); return; }
@@ -3037,9 +3068,9 @@
 
   function varslingDetailView(id) {
     return {
-      title: t('varsling'), tab: 'groups', side: 'incidents',
+      title: t('varsling'), tab: 'groups', side: 'varsling',
       async render(app) {
-        if (!canAccessVarsling(state.profile)) { app.append(emptyState(t('varsling'), 'No access.')); return; }
+        if (!isSuperPlus(state.profile) && !canAccessVarsling(state.profile)) { app.append(emptyState(t('varsling'), 'No access.')); return; }
         await loadProfiles();
         const { data: r, error } = await db.from('varslinger').select('*').eq('id', id).single();
         if (error || !r) { app.append(emptyState(t('varsling'), error?.message || 'Not found.')); return; }

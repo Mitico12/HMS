@@ -186,13 +186,42 @@
       el('div', { class: 'sidebar-section-label' }, t('groups')),
     );
     const nav = el('div', { class: 'sidebar-nav' });
-    const items = [
+    const fixedItems = [
       { id: 'groups', ic: '▦', label: t('groups'), open: () => go(homeView(), { reset: true }) },
       { id: 'reports', ic: '⚠', label: t('myReports'), open: () => go(myReportsView(), { reset: true }) },
       { id: 'varsling', ic: '🔒', label: t('varsling'), open: () => go(varslingForm(), { reset: true }) },
-      ...state.groups.map(g => ({ id: `group:${g.id}`, ic: g.icon || '•', label: groupName(g), flag: state.assignedCourseGroups.has(g.id), open: () => go(groupView(g)) })),
     ];
-    for (const item of items) nav.append(sidebarButton(item, active));
+    for (const item of fixedItems) nav.append(sidebarButton(item, active));
+    // Group links are draggable to reorder. Workers can't write the groups
+    // table, so the order is a per-user preference saved to the same localStorage
+    // key the home tiles use, keeping the two views in sync.
+    const orderedGroups = sortGroupsBySaved(state.groups, 'userHomeTileOrder');
+    let dragIdx = null;
+    let didDrag = false;
+    orderedGroups.forEach((g, idx) => {
+      const btn = el('button', {
+        class: `sidebar-link sidebar-link-draggable ${active === `group:${g.id}` ? 'active' : ''}`,
+        draggable: 'true',
+        onclick: () => { if (didDrag) { didDrag = false; return; } go(groupView(g)); },
+      }, [
+        el('span', { class: 'ic' }, g.icon || '•'),
+        el('span', { class: 'label' }, groupName(g)),
+        state.assignedCourseGroups.has(g.id) ? el('span', { class: 'sidebar-flag', title: t('assignedToComplete') }, '⚑') : null,
+      ]);
+      btn.addEventListener('dragstart', e => { dragIdx = idx; didDrag = true; e.dataTransfer.effectAllowed = 'move'; btn.classList.add('dragging'); });
+      btn.addEventListener('dragend', () => { dragIdx = null; btn.classList.remove('dragging'); });
+      btn.addEventListener('dragover', e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; });
+      btn.addEventListener('drop', e => {
+        e.preventDefault();
+        if (dragIdx === null || dragIdx === idx) return;
+        const [moved] = orderedGroups.splice(dragIdx, 1);
+        orderedGroups.splice(idx, 0, moved);
+        localStorage.setItem('userHomeTileOrder', JSON.stringify(orderedGroups.map(x => `group:${x.id}`)));
+        dragIdx = null;
+        renderSidebar(active);
+      });
+      nav.append(btn);
+    });
     side.append(nav, el('button', {
       class: 'sidebar-footer sidebar-footer-action',
       title: t('settings'),
@@ -204,6 +233,12 @@
         el('div', { class: 'sidebar-user-meta' }, state.profile?.email || state.profile?.username || ''),
       ]),
     ]));
+  }
+  // Order groups by the saved tile/sidebar preference (ids like "group:<id>").
+  function sortGroupsBySaved(groups, key) {
+    const saved = JSON.parse(localStorage.getItem(key) || '[]');
+    const rank = new Map(saved.map((id, i) => [id, i]));
+    return groups.slice().sort((a, b) => (rank.get(`group:${a.id}`) ?? 999) - (rank.get(`group:${b.id}`) ?? 999));
   }
   function sidebarButton(item, active) {
     return el('button', { class: `sidebar-link ${active === item.id ? 'active' : ''}`, onclick: item.open }, [

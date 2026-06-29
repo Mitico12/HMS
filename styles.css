@@ -201,6 +201,8 @@ h1, h2, h3, p {
 }
 
 .workspace-role {
+  flex: 0 0 auto;
+  white-space: nowrap;
   padding: 4px 9px;
   border-radius: 999px;
   background: rgba(129, 140, 248, .22);
@@ -277,6 +279,10 @@ h1, h2, h3, p {
 .sidebar-link.active {
   background: var(--sidebar-active);
 }
+
+.sidebar-link-draggable { cursor: grab; }
+.sidebar-link-draggable:active { cursor: grabbing; }
+.sidebar-link.dragging { opacity: .45; border-color: var(--primary); }
 
 .sidebar-link .ic {
   width: 30px;
