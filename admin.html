@@ -372,12 +372,12 @@
     const fixed = isAdmin ? [
       { id: 'analytics', ic: '▦', label: t('executiveAnalytics'), open: () => go(homeView(), { reset: true }) },
       { id: 'incidents', ic: '⚠', label: t('reports'), badge: true, open: () => openKind('reports') },
-      { id: 'checklist-logs', ic: '☑', label: t('checklistLogs'), open: () => go(checklistLogsView()) },
+      { id: 'logs', ic: '☑', label: t('logs'), open: () => go(logsView()) },
       { id: 'procedures', ic: '▤', label: t('procedureSubmissions'), open: () => openKind('procedures') },
       { id: 'courses', ic: '▣', label: t('manageCourses'), open: () => openKind('courses') },
       { id: 'users', ic: 'U', label: t('accounts'), count: pendingAccounts, open: () => go(usersView()) },
     ] : [
-      { id: 'checklist-logs', ic: '☑', label: t('checklistLogs'), open: () => go(checklistLogsView()) },
+      { id: 'logs', ic: '☑', label: t('checklistLogs'), open: () => go(checklistLogsView()) },
     ];
     // Varsling (whistleblowing) reports live in their own confidential list,
     // visible in the management panel to superusers and above.
@@ -1242,13 +1242,14 @@
 
   function logsView() {
     return {
-      title: t('logs'), tab: 'groups', side: 'checklist-logs',
+      title: t('logs'), tab: 'groups', side: 'logs',
       async render(app) {
         const grid = el('div', { class: 'tile-grid' });
         renderLogTiles(grid, [
-          { glyph: 'R', name: t('reports'), meta: t('reportLogsMeta'), open: () => go(reportLogsView()) },
-          { glyph: 'CL', name: t('checklistLogs'), meta: t('checklistLogsMeta'), open: () => go(checklistLogsView()) },
-          { glyph: 'CR', name: t('completedCourses'), meta: t('completedCoursesMeta'), open: () => go(completedCourseLogsView()) },
+          { glyph: '☑', name: t('checklists'), meta: t('checklistLogsMeta'), open: () => go(checklistLogsView()) },
+          { glyph: '⚠', name: t('reports'), meta: t('reportLogsMeta'), open: () => go(reportLogsView()) },
+          { glyph: '▤', name: t('procedures'), meta: t('procedureLogsMeta'), open: () => go(procedureLogsView()) },
+          { glyph: '▣', name: t('courses'), meta: t('completedCoursesMeta'), open: () => go(completedCourseLogsView()) },
         ]);
         app.append(grid);
       },
@@ -1270,7 +1271,7 @@
 
   function reportLogsView() {
     return {
-      title: t('archivedReports'), tab: 'groups', side: 'incidents',
+      title: t('archivedReports'), tab: 'groups', side: 'logs',
       async render(app) {
         await loadProfiles();
         const isSuper = isSuperPlus(state.profile);
@@ -1384,7 +1385,7 @@
 
   function checklistLogsView() {
     return {
-      title: t('checklistLogs'), tab: 'groups', side: 'checklist-logs',
+      title: t('checklistLogs'), tab: 'groups', side: 'logs',
       async render(app) {
         await loadProfiles();
         const isSuper = isSuperPlus(state.profile);
@@ -1495,7 +1496,7 @@
 
   function completedCourseLogsView() {
     return {
-      title: t('completedCourses'), tab: 'groups', side: 'courses',
+      title: t('completedCourses'), tab: 'groups', side: 'logs',
       async render(app) {
         await loadProfiles();
         const subsQ = await db.from('course_submissions').select('*').eq('passed', true).order('created_at', { ascending: false });
@@ -1562,6 +1563,88 @@
           }
         }
         drawCourses();
+      },
+    };
+  }
+
+  function procedureLogsView() {
+    return {
+      title: t('procedureSubmissions'), tab: 'groups', side: 'logs',
+      async render(app) {
+        await loadProfiles();
+        const subsQ = await db.from('procedure_submissions').select('*').order('created_at', { ascending: false });
+        if (subsQ.error) {
+          app.append(emptyState(t('noProcedureSubmissions'), t('procedureLogsMeta')));
+          return;
+        }
+        const submissions = subsQ.data || [];
+        const procIds = [...new Set(submissions.map(s => s.procedure_id).filter(Boolean))];
+        let procedures = [];
+        if (procIds.length) {
+          const procQ = await db.from('procedures').select('*').in('id', procIds);
+          procedures = procQ.error ? [] : (procQ.data || []);
+        }
+        const byProc = new Map(procedures.map(p => [p.id, p]));
+
+        app.append(el('h2', { class: 'display', style: 'font-size:1.15rem;margin:0 0 10px' }, t('procedureSubmissions')));
+        app.append(el('div', { class: 'kpi-grid', style: 'margin-bottom:14px' }, [
+          metricCard({ label: t('procedureSubmissions'), value: submissions.length }),
+          metricCard({ label: t('uniqueUsers'), value: new Set(submissions.map(s => s.user_id).filter(Boolean)).size }),
+          metricCard({ label: t('procedures'), value: procIds.length }),
+        ]));
+
+        const filters = { from: '', until: '', user: 'all', form: 'all' };
+        const from = el('input', { type: 'date', onchange: e => { filters.from = e.target.value; draw(); } });
+        const until = el('input', { type: 'date', onchange: e => { filters.until = e.target.value; draw(); } });
+        const userIds = [...new Set(submissions.map(s => s.user_id).filter(Boolean))];
+        const user = el('select', { onchange: e => { filters.user = e.target.value; draw(); } }, [
+          opt('all', t('anyReporter')),
+          ...userIds.map(id => opt(id, labelOf(state.profiles.find(p => p.id === id)))),
+        ]);
+        const form = el('select', { onchange: e => { filters.form = e.target.value; draw(); } }, [
+          opt('all', t('anyForm')),
+          ...procIds.map(id => opt(id, byProc.get(id)?.title || t('form'))),
+        ]);
+        app.append(el('div', { style: 'display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px' }, [
+          el('div', { style: 'flex:1;min-width:130px' }, labeled(t('dateFrom'), from)),
+          el('div', { style: 'flex:1;min-width:130px' }, labeled(t('dateUntil'), until)),
+          el('div', { style: 'flex:1;min-width:150px' }, labeled(t('filterByForm'), form)),
+          el('div', { style: 'flex:1;min-width:150px' }, labeled(t('filterByUser'), user)),
+        ]));
+
+        const host = el('div', {});
+        app.append(host);
+
+        function draw() {
+          host.innerHTML = '';
+          const rows = submissions.filter(s =>
+            inDateRange(s.created_at, filters.from, filters.until) &&
+            (filters.user === 'all' || s.user_id === filters.user) &&
+            (filters.form === 'all' || s.procedure_id === filters.form));
+          if (!rows.length) { host.append(el('p', { class: 'muted' }, submissions.length ? t('noProcedureSubmissionsMatchFilters') : t('noProcedureSubmissions'))); return; }
+          for (const s of rows) {
+            const p = byProc.get(s.procedure_id);
+            const fields = p?.fields || [];
+            const card = el('div', { class: 'card' }, [
+              el('div', { class: 'section-head' }, [
+                el('div', {}, [
+                  el('h3', {}, p?.title || t('form')),
+                  el('div', { class: 'sub' }, `${nameOf(s.user_id)} - ${fmt(s.created_at)}`),
+                ]),
+              ]),
+            ]);
+            for (const f of fields) {
+              const v = s.answers?.[f.key];
+              card.append(el('div', { style: 'margin-bottom:6px' }, [
+                el('span', { class: 'muted', style: 'font-size:.82rem' }, f.label + ': '),
+                el('span', {}, v === true ? t('yes') : v === false ? t('no')
+                  : Array.isArray(v) ? (v.length ? v.join(', ') : '—') : String(v ?? '—')),
+              ]));
+            }
+            host.append(card);
+          }
+        }
+        draw();
       },
     };
   }
@@ -3014,7 +3097,7 @@
             card.append(el('div', { style: 'margin-bottom:6px' }, [
               el('span', { class: 'muted', style: 'font-size:.82rem' }, f.label + ': '),
               el('span', {}, v === true ? 'Yes' : v === false ? 'No'
-                : Array.isArray(v) ? (v.length ? v.join(', ') : '—') : (v ?? '—')),
+                : Array.isArray(v) ? (v.length ? v.join(', ') : '—') : String(v ?? '—')),
             ]));
           }
           app.append(card);
