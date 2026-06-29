@@ -686,11 +686,15 @@ export function courseTake(course, ctx) {
         });
         if (unanswered.length) return toast(`Answer all questions (${unanswered.length} left).`, 'err');
 
-        const { score, passed } = gradeCourse(course, answers);
-        const { error } = await db.from('course_submissions').insert({
-          course_id: course.id, user_id: ctx.state.profile.id, answers, score, passed,
+        // Grading happens server-side: the client only submits raw answers.
+        // submit_course() grades against the stored key and writes the verified
+        // row, so a forged score/passed can't be posted from the browser.
+        const { data: result, error } = await db.rpc('submit_course', {
+          p_course_id: course.id, p_answers: answers,
         });
         if (error) return toast(error.message, 'err');
+        const score = result?.score ?? 0;
+        const passed = !!result?.passed;
 
         resultHost.innerHTML = '';
         resultHost.append(el('div', { class: 'course-result ' + (passed ? 'result-pass' : 'result-fail') }, [
