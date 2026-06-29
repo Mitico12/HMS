@@ -63,6 +63,8 @@ function ensureStyles() {
     .course-row .assigned-msg { color: #8a6d10; font-size: .8rem; font-weight: 650; margin-top: 3px; }
     .course-select { width: 20px; height: 20px; accent-color: var(--primary, #6c7cff); flex: 0 0 auto; }
     .course-select-row { display: flex; align-items: flex-start; gap: 12px; min-width: 0; }
+    .course-row-selectable { cursor: pointer; }
+    .course-row-selectable .course-select { pointer-events: none; }
     .course-bulk-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
     .course-insights { display: grid; gap: 10px; margin-bottom: 14px; }
     .wrong-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
@@ -234,9 +236,10 @@ function courseAssign(course, ctx) {
       profiles.forEach(p => {
         const assignment = assignedByUser.get(p.id);
         const latest = latestByUser.get(p.id);
-        app.append(el('div', { class: 'course-row' }, [
-          el('label', { class: 'course-select-row' }, [
-            el('input', { class: 'course-select', type: 'checkbox', name: selectableName, value: p.id }),
+        const checkbox = el('input', { class: 'course-select', type: 'checkbox', name: selectableName, value: p.id });
+        const row = el('div', { class: 'course-row course-row-selectable' }, [
+          el('div', { class: 'course-select-row' }, [
+            checkbox,
             el('div', { style: 'min-width:0' }, [
               el('div', { class: 'c-title' }, labelOf(p)),
               el('div', { class: 'c-meta' }, [
@@ -250,7 +253,12 @@ function courseAssign(course, ctx) {
             assignment ? el('span', { class: 'c-badge assigned' }, 'Assigned')
                        : el('span', { class: 'c-badge todo' }, 'Not assigned'),
           ]),
-        ]));
+        ]);
+        row.addEventListener('click', e => {
+          if (e.target === checkbox) return; // let the native checkbox toggle itself
+          checkbox.checked = !checkbox.checked;
+        });
+        app.append(row);
       });
 
       async function assignSelected() {
