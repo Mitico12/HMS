@@ -733,7 +733,9 @@
           const photoInput = el('input', { type: 'file', accept: 'image/*', onchange: async e => {
             const file = e.target.files?.[0];
             if (!file) return;
-            setChecklistPhoto(it, await fileToDataUrl(file));
+            // Keep a data-URL for instant local preview and the File itself, which
+            // is uploaded to Storage on submit (so the row stores only a path).
+            setChecklistPhoto(it, await fileToDataUrl(file), file);
             drawChecklistAnswerPhoto(it, photoHost);
           } });
           card.append(labeled(t('photosOptional'), photoInput), photoHost);
@@ -749,10 +751,22 @@
           const missingActions = items.filter(i => checked[i.id]?.needs_fix && !(checked[i.id]?.corrective_action || '').trim());
           if (missingActions.length) return toast(t('correctiveActionRequired'), 'err');
           const completed = items.every(i => checked[i.id]?.done);
+          // Upload captured photos to Storage and keep only the path in the row
+          // (no base64). Strip the transient File + preview data-URL before saving.
+          const cleanChecked = {};
+          for (const [id, ans] of Object.entries(checked)) {
+            const { photoFile, ...rest } = ans || {};
+            if (photoFile) {
+              const path = await uploadChecklistPhoto(photoFile, state.profile.id);
+              if (path === null) return; // upload failed (error already shown)
+              rest.photo = path;
+            }
+            cleanChecked[id] = rest;
+          }
           const payload = {
             checklist_id: c.id,
             user_id: state.profile.id,
-            checked,
+            checked: cleanChecked,
             completed,
             notes: notes.value.trim() || null,
             submitted_at: new Date().toISOString(),
@@ -834,10 +848,10 @@
           return ['no', 'nei'].includes(String(value).trim().toLowerCase());
         }
 
-        function setChecklistPhoto(item, photo) {
+        function setChecklistPhoto(item, photo, file) {
           const current = checked[item.id] || { done: false, value: '' };
           checked = { ...checked,
-            [item.id]: { ...current, photo, photo_at: new Date().toISOString() } };
+            [item.id]: { ...current, photo, photoFile: file || null, photo_at: new Date().toISOString() } };
         }
 
         function drawChecklistAnswerPhoto(item, host) {
@@ -850,6 +864,7 @@
               const current = { ...(checked[item.id] || {}) };
               delete current.photo;
               delete current.photo_at;
+              delete current.photoFile;
               checked = { ...checked, [item.id]: current };
               drawChecklistAnswerPhoto(item, host);
             } }, t('removeImage')),
@@ -1306,6 +1321,17 @@
       paths.push(path);
     }
     return paths;
+  }
+
+  async function uploadChecklistPhoto(file, userId) {
+    const safeName = (file.name || 'photo').replace(/[^\w.\-]+/g, '_');
+    const path = `${userId}/${crypto.randomUUID()}-${safeName}`;
+    const { error } = await db.storage.from('checklist-photos').upload(path, file);
+    if (error) {
+      toast(error.message + ' - create the checklist-photos bucket with the SQL migration first.', 'err');
+      return null;
+    }
+    return path;
   }
 
   function fileToDataUrl(file) {

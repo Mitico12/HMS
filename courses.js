@@ -128,6 +128,64 @@ function renderContent(text) {
   return el('div', { class: 'course-content' }, blocks.map(b => el('p', {}, b)));
 }
 
+function openPreviewModal(title, build) {
+  const bg = el('div', { class: 'modal-bg', onclick: e => { if (e.target === bg) close(); } });
+  const body = el('div', {});
+  const modal = el('div', { class: 'modal' }, [
+    el('div', { class: 'section-head' }, [
+      el('h2', {}, title),
+      el('button', { class: 'btn btn-ghost', onclick: () => close() }, 'Close'),
+    ]),
+    body,
+  ]);
+  const close = () => bg.remove();
+  bg.append(modal);
+  document.body.append(bg);
+  build(body, close);
+}
+
+function showCoursePreview(course) {
+  openPreviewModal('Preview', (body) => {
+    const shell = el('div', { class: 'preview-shell' }, [
+      el('h2', { class: 'display preview-title' }, course.title || 'Course'),
+      renderContent(course.content),
+      el('h3', { class: 'preview-section-title' }, 'Quiz'),
+    ]);
+    const qs = course.questions || [];
+    if (!qs.length) {
+      shell.append(el('p', { class: 'c-meta' }, 'No questions yet.'));
+    } else {
+      qs.forEach((q, idx) => shell.append(courseQuestionPreview(q, idx)));
+      shell.append(el('button', { class: 'btn btn-primary btn-block', type: 'button' }, 'Submit answers'));
+    }
+    body.append(shell);
+  });
+}
+
+function courseQuestionPreview(q, idx) {
+  const box = el('div', { class: 'quiz-q preview-card' }, [
+    el('div', { class: 'q-prompt' }, `${idx + 1}. ${q.prompt}`),
+  ]);
+  if (q.type === 'confirm') {
+    box.append(el('label', { class: 'quiz-opt' }, [el('input', { type: 'checkbox' }), document.createTextNode('I confirm')]));
+  } else if (q.type === 'choice') {
+    (q.options || []).forEach(o => box.append(el('label', { class: 'quiz-opt' }, [
+      el('input', { type: 'radio', name: 'preview_q_' + q.id, value: o }),
+      document.createTextNode(o),
+    ])));
+  } else if (q.type === 'multi') {
+    (q.options || []).forEach(o => box.append(el('label', { class: 'quiz-opt' }, [
+      el('input', { type: 'checkbox', value: o }),
+      document.createTextNode(o),
+    ])));
+  } else if (q.type === 'number') {
+    box.append(el('input', { type: 'number', placeholder: 'Your answer' }));
+  } else {
+    box.append(el('input', { type: 'text', placeholder: 'Your answer' }));
+  }
+  return box;
+}
+
 function answerLabel(ans) {
   if (ans === true) return 'Checked';
   if (ans === false) return 'Unchecked';
@@ -452,15 +510,16 @@ export function courseBuild(g, existing, ctx) {
         el('button', { class: 'btn btn-ghost btn-block', style: 'margin-bottom:16px',
           onclick: () => { questions.push({ id: crypto.randomUUID(), type: 'confirm', prompt: '', options: [], points: 1, required: true }); draw(); } },
           '+ Add question'),
-        el('div', { style: 'display:flex;gap:10px' }, [
+        el('div', { style: 'display:flex;gap:10px;flex-wrap:wrap' }, [
+          el('button', { class: 'btn btn-ghost btn-block', onclick: previewCourse }, 'Preview'),
           el('button', { class: 'btn btn-ghost btn-block', onclick: () => save(true) }, 'Save draft'),
           el('button', { class: 'btn btn-primary btn-block', onclick: () => save(false) }, 'Publish'),
         ]),
         existing ? el('button', { class: 'btn btn-danger btn-block', style: 'margin-top:10px', onclick: del }, 'Delete course') : null,
       );
 
-      async function save(is_draft) {
-        const clean = questions
+      function cleanQuestions() {
+        return questions
           .filter(q => (q.prompt || '').trim())
           .map(q => ({
             id: q.id || crypto.randomUUID(),
@@ -471,6 +530,17 @@ export function courseBuild(g, existing, ctx) {
             points: Number(q.points) || 1,
             required: true,
           }));
+      }
+      function previewCourse() {
+        showCoursePreview({
+          title: title.value.trim() || 'New course',
+          content: content.value,
+          pass_threshold: Math.max(0, Math.min(100, parseInt(pass.value, 10) || 100)),
+          questions: cleanQuestions(),
+        });
+      }
+      async function save(is_draft) {
+        const clean = cleanQuestions();
         if (!title.value.trim()) return toast('Add a title.', 'err');
         if (!clean.length) return toast('Add at least one question.', 'err');
         const bad = clean.find(q => !validExpected(q));

@@ -1783,8 +1783,11 @@
           ]);
           if (item.image) card.append(el('div', { class: 'sub' }, t('questionImage')),
             el('img', { src: item.image, alt: item.label, class: 'checklist-item-image' }));
-          if (answer.photo) card.append(el('div', { class: 'sub' }, t('submittedPhoto')),
-            el('img', { src: answer.photo, alt: item.label, class: 'checklist-item-image' }));
+          if (answer.photo) {
+            const photoImg = el('img', { alt: item.label, class: 'checklist-item-image' });
+            resolveChecklistPhoto(answer.photo).then(src => { if (src) photoImg.src = src; });
+            card.append(el('div', { class: 'sub' }, t('submittedPhoto')), photoImg);
+          }
           app.append(card);
         }
         if ((run.notes || '').trim()) {
@@ -1850,6 +1853,15 @@
     });
   }
   const opt = (v, t) => el('option', { value: v }, t);
+
+  // A submitted checklist photo is either a legacy inline data-URL (old rows) or
+  // a Storage path (new rows). Resolve it to something an <img> can show.
+  async function resolveChecklistPhoto(photo) {
+    if (!photo) return '';
+    if (typeof photo === 'string' && photo.startsWith('data:')) return photo;
+    const { data, error } = await db.storage.from('checklist-photos').createSignedUrl(photo, 300);
+    return (!error && data?.signedUrl) ? data.signedUrl : '';
+  }
 
   function fileToDataUrl(file) {
     return new Promise((resolve, reject) => {
@@ -2115,11 +2127,14 @@
           list,
           el('button', { class: 'btn btn-ghost btn-block', style: 'margin-bottom:16px',
             onclick: () => { items.push({ id: crypto.randomUUID(), label: '' }); draw(); } }, t('addItem')),
-          el('button', { class: 'btn btn-primary btn-block', onclick: save }, t('saveChecklist')),
+          el('div', { style: 'display:flex;gap:10px;flex-wrap:wrap' }, [
+            el('button', { class: 'btn btn-ghost btn-block', onclick: previewChecklist }, 'Preview'),
+            el('button', { class: 'btn btn-primary btn-block', onclick: save }, t('saveChecklist')),
+          ]),
           existing ? el('button', { class: 'btn btn-danger btn-block', style: 'margin-top:10px', onclick: del }, t('deleteChecklist')) : null,
         );
-        async function save() {
-          const clean = items.filter(i => i.label.trim()).map(i => ({
+        function cleanItems() {
+          return items.filter(i => i.label.trim()).map(i => ({
             id: i.id || crypto.randomUUID(),
             label: i.label.trim(),
             type: i.type || 'check',
@@ -2128,6 +2143,16 @@
             fixOnNo: i.type === 'choice' ? (i.fixOnNo ?? hasNoOption(i.options || [])) : false,
             image: i.image || null,
           }));
+        }
+        function previewChecklist() {
+          showChecklistPreview({
+            title: title.value.trim() || t('newChecklist'),
+            items: cleanItems(),
+            daily_quota: Math.max(0, parseInt(quota.value, 10) || 0),
+          });
+        }
+        async function save() {
+          const clean = cleanItems();
           if (!title.value.trim() || !clean.length) return toast(t('addTitleAndItem'), 'err');
           const payload = {
             group_id: g.id,
@@ -2174,6 +2199,51 @@
   }
 
   // ─── REPORTS / INCIDENTS ────────────────────────────────
+  function showChecklistPreview(c) {
+    openModal('Preview', (body) => {
+      const shell = el('div', { class: 'preview-shell' }, [
+        el('h2', { class: 'display preview-title' }, c.title || t('checklist')),
+        c.daily_quota ? el('p', { class: 'muted' }, `${t('dailyQuota')}: ${c.daily_quota}`) : null,
+      ]);
+      const items = c.items || [];
+      if (!items.length) {
+        shell.append(emptyState(t('noChecklists'), t('addItem')));
+      } else {
+        shell.append(el('div', { class: 'muted', style: 'margin-bottom:14px' },
+          t('checklistProgress', { done: 0, total: items.length })));
+        items.forEach((it) => shell.append(checklistPreviewItem(it)));
+        shell.append(
+          labeled(t('notes'), el('textarea', { placeholder: t('checklistNotesPlaceholder') })),
+          el('button', { class: 'btn btn-primary btn-block btn-lg', type: 'button' }, t('completeChecklist')),
+        );
+      }
+      body.append(shell);
+    });
+  }
+
+  function checklistPreviewItem(it) {
+    const type = it.type || 'check';
+    const card = el('div', { class: 'card checklist-run-card preview-card' });
+    if (it.image) card.append(el('img', { src: it.image, alt: it.label, class: 'checklist-item-image' }));
+    if (type === 'check') {
+      card.append(el('label', { class: 'check-item' }, [
+        el('input', { type: 'checkbox' }),
+        el('span', {}, it.label),
+      ]));
+    } else if (type === 'choice') {
+      card.append(labeled(it.label, el('select', {}, [
+        opt('', `- ${t('choose')} -`),
+        ...(it.options || []).map(o => opt(o, o)),
+      ])));
+    } else if (type === 'number') {
+      card.append(labeled(it.label, el('input', { type: 'number' })));
+    } else {
+      card.append(labeled(it.label, el('textarea', {})));
+    }
+    card.append(labeled(t('photosOptional'), el('input', { type: 'file', accept: 'image/*' })));
+    return card;
+  }
+
   function reportsGroupView(g) {
     return {
       title: groupName(g), tab: 'groups',
@@ -2578,11 +2648,14 @@
           el('h3', {}, t('finalReport')),
           el('p', { class: 'muted', style: 'font-size:.82rem' }, t('finalReportVisibleHint')),
           fr,
-          el('button', { class: 'btn btn-primary', style: 'margin-top:10px', onclick: async () => {
-            const { error } = await db.from('incidents').update({ final_report: fr.value.trim() || null }).eq('id', id);
-            if (error) return toast(error.message, 'err');
-            toast(t('finalReportSaved'));
-          } }, t('saveFinalReport')),
+          el('div', { style: 'display:flex;gap:10px;flex-wrap:wrap;margin-top:10px' }, [
+            el('button', { class: 'btn btn-ghost', onclick: () => showFinalReportPreview(inc, fr.value) }, 'Preview'),
+            el('button', { class: 'btn btn-primary', onclick: async () => {
+              const { error } = await db.from('incidents').update({ final_report: fr.value.trim() || null }).eq('id', id);
+              if (error) return toast(error.message, 'err');
+              toast(t('finalReportSaved'));
+            } }, t('saveFinalReport')),
+          ]),
         ]));
 
         // archive — superusers and above only; archiving needs a resolved report.
@@ -2622,6 +2695,26 @@
       el('div', { class: 'muted', style: 'font-size:.78rem;text-transform:uppercase;letter-spacing:.05em' }, label),
       el('div', { style: 'font-weight:500' }, parts.length ? parts.join(', ') : '—'),
     ]);
+  }
+  function showFinalReportPreview(inc, text) {
+    openModal('Preview', (body) => {
+      body.append(el('div', { class: 'preview-shell' }, [
+        el('h2', { class: 'display preview-title' }, t('yourReport')),
+        el('div', { class: 'card preview-card' }, [
+          el('div', { class: 'section-head' }, [
+            el('h3', {}, typeLabel(inc.report_type)),
+            el('span', { class: `pill ${incidentStatusClass(inc)}`, style: incidentStatusStyle(inc) }, statusLabel(inc.status)),
+          ]),
+          el('p', {}, inc.what_happened || ''),
+        ]),
+        el('div', { class: 'card preview-card' }, [
+          el('h3', {}, t('finalReport')),
+          (text || '').trim()
+            ? el('p', {}, text.trim())
+            : el('p', { class: 'muted' }, t('finalReportVisibleHint')),
+        ]),
+      ]));
+    });
   }
 
   function categoriesView() {
@@ -2669,6 +2762,128 @@
   function reportTypeLabel(type) {
     const found = REPORT_FORM_TYPES.find(([key]) => key === type);
     return found ? t(found[1]) : type;
+  }
+  function cleanReportFormFields(fields) {
+    return fields
+      .filter(f => (f.label || '').trim())
+      .map(f => ({
+        key: f.key || crypto.randomUUID(),
+        type: f.type || 'short',
+        label: f.label.trim(),
+        required: !!f.required,
+        options: f.type === 'dropdown' || f.type === 'checkboxes' ? (f.options || []) : [],
+        min: f.type === 'slider' ? Number(f.min ?? 1) : undefined,
+        max: f.type === 'slider' ? Number(f.max ?? 5) : undefined,
+        leftLabel: f.type === 'slider' ? (f.leftLabel || '') : undefined,
+        rightLabel: f.type === 'slider' ? (f.rightLabel || '') : undefined,
+        round: f.type === 'slider' ? (f.round || 'nearest') : undefined,
+      }));
+  }
+  function previewFieldControl(f) {
+    if (f.type === 'long') return el('textarea', {});
+    if (f.type === 'number') return el('input', { type: 'number' });
+    if (f.type === 'dropdown') {
+      return el('select', {}, [opt('', `- ${t('choose')} -`), ...(f.options || []).map(o => opt(o, o))]);
+    }
+    if (f.type === 'checkbox') {
+      return el('label', { class: 'check-item' }, [
+        el('input', { type: 'checkbox' }),
+        el('span', {}, f.label + (f.required ? ' *' : '')),
+      ]);
+    }
+    if (f.type === 'checkboxes') {
+      return el('div', {}, (f.options || []).map(o => el('label', { class: 'check-item' }, [
+        el('input', { type: 'checkbox' }),
+        el('span', {}, o),
+      ])));
+    }
+    if (f.type === 'slider') {
+      const min = Number(f.min ?? 1), max = Number(f.max ?? 5);
+      const round = f.round === 'up' ? Math.ceil : Math.round;
+      const valueOut = el('div', { style: 'font-weight:750;font-size:1.25rem;text-align:center;margin-bottom:4px' }, String(round(min)));
+      const range = el('input', { type: 'range', min, max, step: max > min ? (max - min) / 100 : 1, value: min,
+        oninput: e => valueOut.textContent = String(round(Number(e.target.value))) });
+      return el('div', {}, [
+        valueOut,
+        range,
+        el('div', { style: 'display:flex;justify-content:space-between;font-size:.82rem;color:var(--steel);margin-top:2px' }, [
+          el('span', {}, f.leftLabel || String(min)),
+          el('span', {}, f.rightLabel || String(max)),
+        ]),
+      ]);
+    }
+    return el('input', { type: 'text' });
+  }
+  function appendPreviewFields(host, fields) {
+    for (const f of fields) {
+      if (f.type === 'checkbox') {
+        host.append(previewFieldControl(f));
+      } else if (f.type === 'checkboxes' || f.type === 'slider') {
+        host.append(el('div', { class: 'field' }, [
+          el('span', {}, [f.label, f.required ? el('span', { class: 'req' }, ' *') : null]),
+          previewFieldControl(f),
+        ]));
+      } else {
+        host.append(labeled(f.label, previewFieldControl(f), f.required));
+      }
+    }
+  }
+  function showReportFormPreview(type, fields) {
+    openModal('Preview', (body) => {
+      const shell = el('div', { class: 'preview-shell' }, [
+        el('h2', { class: 'display preview-title' }, reportTypeLabel(type)),
+      ]);
+      appendReportCorePreview(shell, type);
+      if (fields.length) {
+        shell.append(el('h3', { class: 'preview-section-title' }, t('customFields')));
+        appendPreviewFields(shell, fields);
+      }
+      shell.append(el('button', { class: 'btn btn-primary btn-block btn-lg', type: 'button' },
+        type === 'varsling' ? t('fileVarsling') : t('submitReport')));
+      body.append(shell);
+    });
+  }
+  function appendReportCorePreview(host, type) {
+    if (type === 'varsling') {
+      host.append(
+        el('p', { class: 'muted', style: 'margin:0 0 12px' }, t('varslingDesc')),
+        labeled(t('varslingTitle'), el('input', { type: 'text', placeholder: t('varslingTitle') }), true),
+        labeled(t('varslingDetails'), el('textarea', { placeholder: t('varslingDetails') })),
+        el('label', { class: 'check-item' }, [el('input', { type: 'checkbox' }), el('span', {}, t('submitAnonymously'))]),
+      );
+      return;
+    }
+    if (type === 'suggestion') {
+      host.append(
+        labeled(t('suggestionText'), el('textarea', { placeholder: t('suggestionText'), style: 'min-height:180px' }), true),
+        labeled(t('photosOptional'), el('input', { type: 'file', accept: 'image/*', multiple: 'multiple' })),
+        el('label', { class: 'check-item' }, [el('input', { type: 'checkbox' }), el('span', {}, t('reportAnonymously'))]),
+      );
+      return;
+    }
+    const core = [
+      labeled(type === 'hazard' ? t('whatHazard') : t('whatHappened'),
+        el('textarea', { placeholder: type === 'hazard' ? t('whatHazard') : t('whatHappened') }), true),
+      labeled(t('whatNeedsFixing'), el('textarea', { placeholder: t('whatNeedsFixing') })),
+      el('div', { style: 'display:flex;gap:12px;flex-wrap:wrap' }, [
+        el('div', { style: 'flex:1;min-width:160px' }, labeled(type === 'hazard' ? t('whenSpotted') : t('whenHappened'), el('input', { type: 'datetime-local' }))),
+        el('div', { style: 'flex:1;min-width:160px' }, labeled(t('locationOptional'), el('input', { type: 'text', placeholder: t('locationOptional') }))),
+      ]),
+      type === 'incident' ? previewCategoryBlock(t('rootCause')) : null,
+      previewCategoryBlock(type === 'hazard' ? t('hazardConsequences') : t('consequence')),
+      labeled(t('photosOptional'), el('input', { type: 'file', accept: 'image/*', multiple: 'multiple' })),
+      el('label', { class: 'check-item' }, [el('input', { type: 'checkbox' }), el('span', {}, t('reportAnonymously'))]),
+    ].filter(Boolean);
+    host.append(...core);
+  }
+  function previewCategoryBlock(label) {
+    return el('div', { class: 'field' }, [
+      el('span', {}, label),
+      el('div', { class: 'preview-chip-row' }, [
+        el('button', { class: 'chip', type: 'button' }, t('choose')),
+        el('button', { class: 'chip', type: 'button' }, t('other')),
+      ]),
+    ]);
   }
   function reportFormDesignerView() {
     return {
@@ -2803,25 +3018,13 @@
                 fields.push({ key: crypto.randomUUID(), type: 'short', label: '', required: false, options: [] });
                 draw();
               } }, t('addField')),
+              el('button', { class: 'btn btn-ghost', onclick: () => showReportFormPreview(selected, cleanReportFormFields(fields)) }, 'Preview'),
               el('button', { class: 'btn btn-primary', onclick: save }, t('saveReportForm')),
             ]),
           );
         }
         async function save() {
-          const clean = fields
-            .filter(f => (f.label || '').trim())
-            .map(f => ({
-              key: f.key || crypto.randomUUID(),
-              type: f.type || 'short',
-              label: f.label.trim(),
-              required: !!f.required,
-              options: f.type === 'dropdown' || f.type === 'checkboxes' ? (f.options || []) : [],
-              min: f.type === 'slider' ? Number(f.min ?? 1) : undefined,
-              max: f.type === 'slider' ? Number(f.max ?? 5) : undefined,
-              leftLabel: f.type === 'slider' ? (f.leftLabel || '') : undefined,
-              rightLabel: f.type === 'slider' ? (f.rightLabel || '') : undefined,
-              round: f.type === 'slider' ? (f.round || 'nearest') : undefined,
-            }));
+          const clean = cleanReportFormFields(fields);
           const ok = await saveReportFormFields(selected, clean);
           if (!ok) return;
           fields = clean.map(f => ({ ...f }));
@@ -3126,14 +3329,25 @@
           el('button', { class: 'btn btn-ghost btn-block', style: 'margin-bottom:16px', onclick: () => {
             fields.push({ key: crypto.randomUUID(), type: 'short', label: '', required: false, options: [] }); draw();
           } }, t('addField')),
-          el('div', { style: 'display:flex;gap:10px' }, [
+          el('div', { style: 'display:flex;gap:10px;flex-wrap:wrap' }, [
+            el('button', { class: 'btn btn-ghost btn-block', onclick: previewProc }, 'Preview'),
             el('button', { class: 'btn btn-ghost btn-block', onclick: () => saveProc(true) }, t('saveDraft')),
             el('button', { class: 'btn btn-primary btn-block', onclick: () => saveProc(false) }, t('publish')),
           ]),
           existing ? el('button', { class: 'btn btn-danger btn-block', style: 'margin-top:10px', onclick: del }, t('deleteProcedure')) : null,
         );
+        function cleanProcFields() {
+          return cleanReportFormFields(fields);
+        }
+        function previewProc() {
+          showProcedurePreview({
+            title: title.value.trim() || t('newProcedure'),
+            description: desc.value.trim(),
+            fields: cleanProcFields(),
+          });
+        }
         async function saveProc(is_draft) {
-          const clean = fields.filter(f => f.label.trim());
+          const clean = cleanProcFields();
           if (!title.value.trim() || !clean.length) return toast(t('addTitleAndField'), 'err');
           const payload = { group_id: g.id, title: title.value.trim(), description: desc.value.trim() || null,
             fields: clean, is_draft, image: logo.image || null, icon: logo.icon || null, created_by: state.profile.id };
@@ -3149,6 +3363,22 @@
         }
       },
     };
+  }
+
+  function showProcedurePreview(p) {
+    openModal('Preview', (body) => {
+      const shell = el('div', { class: 'preview-shell' }, [
+        el('h2', { class: 'display preview-title' }, p.title || t('procedures')),
+        p.description ? el('p', { class: 'muted', style: 'margin-top:0' }, p.description) : null,
+      ]);
+      if (p.fields?.length) {
+        appendPreviewFields(shell, p.fields);
+        shell.append(el('button', { class: 'btn btn-primary btn-block btn-lg', type: 'button' }, t('submit')));
+      } else {
+        shell.append(emptyState(t('noProcedures'), t('addField')));
+      }
+      body.append(shell);
+    });
   }
 
   function submissionsView(p) {
@@ -3397,19 +3627,14 @@
         await auth.auth.signOut();
         return toast(`Row ${idx + 2}: user created, but Supabase did not return an id.`, 'err');
       }
-      const payload = {
-        id,
-        email,
-        username,
-        full_name: fullName || null,
-        mobile_number: mobile || null,
-        role,
-        is_verified: role !== 'user' ? true : parseApproved(r.Approved),
-      };
-      let { error: profileErr } = await db.from('profiles').upsert(payload, { onConflict: 'id' });
-      if (profileErr && /mobile_number/i.test(profileErr.message || '')) {
-        delete payload.mobile_number;
-        ({ error: profileErr } = await db.from('profiles').upsert(payload, { onConflict: 'id' }));
+      // The profile row is created by the handle_new_user trigger from the
+      // sign-up metadata; role/approval go through the rank-checked RPCs so the
+      // privileged columns are never written directly from the browser (audit V3).
+      let profileErr = null;
+      if (role !== 'user') {
+        ({ error: profileErr } = await db.rpc('set_role', { target: id, new_role: role }));
+      } else if (parseApproved(r.Approved)) {
+        ({ error: profileErr } = await db.rpc('set_verification', { target: id, verified: true }));
       }
       if (profileErr) {
         await auth.auth.signOut();
@@ -3672,8 +3897,10 @@
       controls.push(el('span', { class: 'muted', style: 'font-size:.85rem' }, roleName(p.role)));
     }
 
-    // Approve / revoke access for anyone at my level or below (self excluded above).
-    if (roleRank(me) >= roleRank(p)) {
+    // Approve / revoke access only for strictly-lower-ranked accounts (same gate
+    // as role changes) so peers can't revoke each other (admin lockout). Sys-admins
+    // may act on anyone; a sys-admin↔sys-admin action routes to the review flow.
+    if (canManage) {
       const revoking = p.is_verified;
       controls.push(el('button', {
         class: 'btn ' + (revoking ? 'btn-danger' : 'btn-primary'),
@@ -3989,17 +4216,17 @@
           if (error) return toast(error.message, 'err');
           const id = data?.user?.id;
           if (!id) return toast(t('userCreatedNoId'), 'err');
-          const payload = { id, email: em, username: un, full_name: fn || null, mobile_number: mob || null, role: role.value, is_verified: verified.checked };
-          let { error: profileErr } = await db.from('profiles').upsert(payload, { onConflict: 'id' });
-          if (profileErr && /username/i.test(profileErr.message || '')) {
-            delete payload.username;
-            ({ error: profileErr } = await db.from('profiles').upsert(payload, { onConflict: 'id' }));
+          // The profile row is created by the handle_new_user trigger (name /
+          // username / email / mobile come from the sign-up metadata). Role and
+          // approval go through the rank-checked RPCs so the privileged columns
+          // are never written directly from the browser (audit V3).
+          if (role.value !== 'user') {
+            const { error: rErr } = await db.rpc('set_role', { target: id, new_role: role.value });
+            if (rErr) return toast(rErr.message, 'err');
+          } else if (verified.checked) {
+            const { error: vErr } = await db.rpc('set_verification', { target: id, verified: true });
+            if (vErr) return toast(vErr.message, 'err');
           }
-          if (profileErr && /mobile_number/i.test(profileErr.message || '')) {
-            delete payload.mobile_number;
-            ({ error: profileErr } = await db.from('profiles').upsert(payload, { onConflict: 'id' }));
-          }
-          if (profileErr) return toast(profileErr.message + ' - run migration_mobile_number_users.sql if the mobile column is missing.', 'err');
           toast(t('userAddedTempPassword'));
           close(); await loadProfiles(); refresh();
         } }, 'Create user'),
