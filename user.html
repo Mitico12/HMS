@@ -47,6 +47,7 @@
     state.assignedCourseGroups = new Set(courses.map(c => c.group_id));
   }
   const viewStack = [];
+  let mobileSidebarOpen = false;
 
   (async function boot() {
     const res = await requireSession();
@@ -136,12 +137,25 @@
     screen.innerHTML = '';
     screen.append(el('div', { class: 'app-shell' }, [
       el('aside', { class: 'sidebar', id: 'sidebar' }),
+      el('button', { class: 'sidebar-backdrop', id: 'sidebar-backdrop', 'aria-label': 'Close navigation', onclick: closeMobileSidebar }),
       el('header', { class: 'topbar', id: 'topbar' }),
       el('main', { class: 'wrap', id: 'app' }),
       el('nav', { class: 'botnav', id: 'botnav' }),
     ]));
+    $('#sidebar').addEventListener('click', e => {
+      if (window.matchMedia('(max-width: 720px)').matches && e.target.closest('button')) closeMobileSidebar();
+    });
     renderSidebar('groups');
   }
+  function setMobileSidebar(open) {
+    mobileSidebarOpen = open;
+    const shell = document.querySelector('.app-shell');
+    if (shell) shell.classList.toggle('nav-open', open);
+    const btn = document.querySelector('.mobile-menu-btn');
+    if (btn) btn.setAttribute('aria-expanded', String(open));
+  }
+  function toggleMobileSidebar() { setMobileSidebar(!mobileSidebarOpen); }
+  function closeMobileSidebar() { setMobileSidebar(false); }
   function renderBotnav(active) {
     const nav = $('#botnav'); nav.innerHTML = '';
     const tabs = [
@@ -252,6 +266,7 @@
   function paint() {
     const view = viewStack[viewStack.length - 1];
     const bar = $('#topbar'); bar.innerHTML = '';
+    bar.append(el('button', { class: 'iconbtn mobile-menu-btn', title: 'Open navigation', 'aria-label': 'Open navigation', 'aria-expanded': String(mobileSidebarOpen), onclick: toggleMobileSidebar }, '\u2630'));
     bar.append(el('button', { class: 'iconbtn', title: t('returnStart'), onclick: goIndex }, '⌂'));
     bar.append(themeToggleButton());
     if (viewStack.length > 1) bar.append(el('button', { class: 'iconbtn', onclick: back }, '‹'));
@@ -261,6 +276,7 @@
     const app = $('#app'); app.innerHTML = ''; app.className = 'wrap';
     renderBotnav(view.tab || 'groups');
     renderSidebar(view.side || view.tab || 'groups');
+    setMobileSidebar(mobileSidebarOpen);
     view.render(app);
   }
   const refresh = () => paint();
