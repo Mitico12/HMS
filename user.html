@@ -972,7 +972,7 @@
   function renderCustomReportFields(app, fields) {
     const clean = (fields || []).filter(f => f?.label && f?.key);
     const answers = {};
-    if (!clean.length) return { answers, validate: () => true };
+    if (!clean.length) return { answers, validate: () => true, values: () => ({}) };
     app.append(el('h2', { class: 'display report-section-title' }, t('customFields')));
     for (const f of clean) {
       let input;
