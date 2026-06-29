@@ -1206,6 +1206,7 @@ input[type="checkbox"], input[type="radio"] {
 }
 
 .report-action {
+  position: relative;
   width: 100%;
   min-height: 78px;
   border: 1px solid var(--line);
@@ -1273,11 +1274,74 @@ input[type="checkbox"], input[type="radio"] {
   align-items: flex-start;
 }
 
+.archive-accordion {
+  margin-top: 14px;
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+
+.archive-accordion summary {
+  cursor: pointer;
+  color: var(--steel);
+  font-weight: 800;
+  margin-bottom: 10px;
+}
+
+.btn-sm {
+  min-height: 32px;
+  padding: 6px 10px;
+  font-size: .82rem;
+}
+
+.photo-grid-compact {
+  margin-top: 10px;
+  grid-template-columns: repeat(auto-fill, minmax(92px, 1fr));
+}
+
+.user-addendum {
+  border-left: 3px solid color-mix(in srgb, var(--primary) 58%, var(--line));
+  padding-left: 10px;
+}
+
+.escalation-card {
+  border-color: color-mix(in srgb, #6d5bd0 58%, var(--line));
+}
+
 .report-row .grow > div:first-child {
   color: var(--ink);
   font-size: 1rem;
   font-weight: 650;
 }
+
+.report-type-indicators {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+}
+
+.report-type-indicator {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--paper);
+  color: var(--ink);
+  min-height: 66px;
+  padding: 10px 12px;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-areas: "label count" "meta count";
+  align-items: center;
+  gap: 2px 10px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.report-type-indicator span { grid-area: label; font-weight: 800; }
+.report-type-indicator strong { grid-area: count; font-size: 1.35rem; line-height: 1; }
+.report-type-indicator small { grid-area: meta; color: var(--steel); font-weight: 750; text-transform: uppercase; font-size: .68rem; }
+.report-type-indicator-incident { border-color: color-mix(in srgb, #f97316 62%, var(--line)); }
+.report-type-indicator-hazard { border-color: color-mix(in srgb, #f5c542 70%, var(--line)); }
+.report-type-indicator-suggestion { border-color: color-mix(in srgb, #0f8a61 52%, var(--line)); }
+.report-type-indicator-varsling { border-color: color-mix(in srgb, #6d5bd0 62%, var(--line)); }
 
 .report-type-picker {
   display: grid;

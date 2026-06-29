@@ -879,7 +879,7 @@
     return {
       title: groupName(g), tab: 'groups',
       async render(app) {
-        renderReportActions(app);
+        await renderReportActions(app);
         await renderRecentReports(app, 5);
         return;
         app.append(el('div', { style: 'display:grid;gap:10px;margin-bottom:18px' }, [
@@ -899,24 +899,30 @@
     };
   }
 
-  function renderReportActions(app) {
+  const HIDDEN_REPORTS_KEY = 'workerHiddenReportIds';
+  function hiddenReportIds() {
+    try { return new Set(JSON.parse(localStorage.getItem(HIDDEN_REPORTS_KEY) || '[]')); }
+    catch (err) { return new Set(); }
+  }
+  function setReportHidden(id, hidden) {
+    const ids = hiddenReportIds();
+    if (hidden) ids.add(id); else ids.delete(id);
+    localStorage.setItem(HIDDEN_REPORTS_KEY, JSON.stringify([...ids]));
+  }
+
+  function reportActionButton({ primary, iconClass, icon, label, onclick }) {
+    return el('button', { class: `report-action${primary ? ' report-action-primary' : ''}`, onclick }, [
+      el('span', { class: `report-action-icon ${iconClass}` }, icon),
+      el('span', {}, label),
+    ]);
+  }
+
+  async function renderReportActions(app) {
     app.append(el('div', { class: 'report-action-stack' }, [
-      el('button', { class: 'report-action report-action-primary', onclick: () => go(reportForm()) }, [
-        el('span', { class: 'report-action-icon report-action-icon-incident' }, '!'),
-        el('span', {}, t('reportIncident')),
-      ]),
-      el('button', { class: 'report-action', onclick: () => go(hazardForm()) }, [
-        el('span', { class: 'report-action-icon report-action-icon-warn' }, '!'),
-        el('span', {}, t('reportHazard')),
-      ]),
-      el('button', { class: 'report-action', onclick: () => go(suggestionForm()) }, [
-        el('span', { class: 'report-action-icon report-action-icon-suggestion' }, '+'),
-        el('span', {}, t('reportSuggestion')),
-      ]),
-      el('button', { class: 'report-action', onclick: () => go(varslingForm()) }, [
-        el('span', { class: 'report-action-icon report-action-icon-varsling' }, 'V'),
-        el('span', {}, t('varsling')),
-      ]),
+      reportActionButton({ primary: true, iconClass: 'report-action-icon-incident', icon: '!', label: t('reportIncident'), onclick: () => go(reportForm()) }),
+      reportActionButton({ iconClass: 'report-action-icon-warn', icon: '!', label: t('reportHazard'), onclick: () => go(hazardForm()) }),
+      reportActionButton({ iconClass: 'report-action-icon-suggestion', icon: '+', label: t('reportSuggestion'), onclick: () => go(suggestionForm()) }),
+      reportActionButton({ iconClass: 'report-action-icon-varsling', icon: 'V', label: t('varsling'), onclick: () => go(varslingForm()) }),
     ]));
   }
 
@@ -924,17 +930,35 @@
     app.append(el('h2', { class: 'display report-section-title' }, t('yourRecentReports')));
     let query = db.from('incidents').select('*')
       .eq('reporter_id', state.profile.id).order('created_at', { ascending: false });
-    if (limit) query = query.limit(limit);
     const { data } = await query;
     if (!data?.length) return app.append(emptyState(t('noReports'), t('noReportsHint')));
-    for (const i of data) app.append(incidentRow(i));
+    const hidden = hiddenReportIds();
+    const visibleReports = data.filter(i => !hidden.has(i.id));
+    const hiddenReports = data.filter(i => hidden.has(i.id));
+    const shown = limit ? visibleReports.slice(0, limit) : visibleReports;
+    if (shown.length) {
+      for (const i of shown) app.append(incidentRow(i));
+    } else {
+      app.append(emptyState(t('noReports'), t('noReportsHint')));
+    }
+    app.append(el('details', { class: 'archive-accordion' }, [
+      el('summary', {}, `${t('hiddenArchivedReports')} (${hiddenReports.length})`),
+      hiddenReports.length ? null : el('p', { class: 'muted' }, t('noHiddenReports')),
+      ...hiddenReports.map(i => incidentRow(i, true)),
+    ]));
   }
 
-  function incidentRow(i) {
+  function incidentRow(i, hidden = false) {
     return el('div', { class: 'row report-row', onclick: () => go(myIncidentView(i.id)), style: 'cursor:pointer' }, [
       el('div', { class: 'grow' }, [el('div', {}, truncate(i.what_happened, 64)),
         el('div', { class: 'sub' }, `${typeLabel(i.report_type)} · ${fmt(i.created_at)}`)]),
       el('span', { class: `pill ${incidentStatusClass(i)}`, style: incidentStatusStyle(i) }, statusLabel(i.status)),
+      el('button', { class: 'btn btn-ghost btn-sm', onclick: e => {
+        e.stopPropagation();
+        setReportHidden(i.id, !hidden);
+        toast(hidden ? t('reportRestored') : t('reportHidden'));
+        go(myReportsView(), { reset: true });
+      } }, hidden ? t('unhide') : t('hide')),
     ]);
   }
   const typeLabel = (k) => ({ incident: t('incident'), hazard: t('hazard'), suggestion: t('suggestion') }[k] || k || t('incident'));
@@ -1377,6 +1401,83 @@
     }
   }
 
+  async function appendIncidentActionPhotos(host, paths = []) {
+    if (!paths.length) return;
+    const grid = el('div', { class: 'photo-grid photo-grid-compact' });
+    host.append(grid);
+    for (const path of paths) {
+      const { data, error } = await db.storage.from('incident-photos').createSignedUrl(path, 300);
+      if (!error && data?.signedUrl) grid.append(el('img', { src: data.signedUrl, alt: t('attachments'), class: 'incident-photo' }));
+    }
+  }
+
+  async function renderIncidentActionLog(host, actions = []) {
+    const log = el('div', { class: 'timeline-list' });
+    host.append(el('div', { class: 'card' }, [
+      el('h3', {}, t('actionLog')),
+      log,
+    ]));
+    if (!actions.length) {
+      log.append(el('p', { class: 'muted' }, t('noActionsLoggedYet')));
+      return;
+    }
+    for (const a of actions) {
+      const item = el('div', { class: `timeline-note${a.user_addendum ? ' user-addendum' : ''}` }, [
+        el('div', { class: 'when' }, `${a.author_id === state.profile.id ? t('you') : t('caseTeam')} · ${fmt(a.created_at)}`),
+        el('div', {}, a.note),
+      ]);
+      log.append(item);
+      await appendIncidentActionPhotos(item, a.photo_paths || []);
+    }
+  }
+
+  function appendUpdateCard(host, inc) {
+    const note = el('textarea', { placeholder: t('appendUpdatePlaceholder'), style: 'min-height:110px' });
+    const files = el('input', { type: 'file', accept: 'image/*', multiple: true });
+    host.append(el('div', { class: 'card' }, [
+      el('h3', {}, t('appendUpdate')),
+      el('p', { class: 'muted' }, t('appendUpdateHint')),
+      labeled(t('addActionNote'), note),
+      labeled(t('attachments'), files),
+      el('button', { class: 'btn btn-primary', onclick: async () => {
+        const cleanNote = note.value.trim();
+        if (!cleanNote && !files.files.length) return toast(t('appendUpdateEmpty'), 'err');
+        const paths = await uploadIncidentPhotos(inc.id, files.files);
+        if (paths === null) return;
+        const { error } = await db.from('incident_actions').insert({
+          incident_id: inc.id,
+          author_id: state.profile.id,
+          note: cleanNote || t('attachmentsAdded'),
+          user_addendum: true,
+          photo_paths: paths,
+        });
+        if (error) return toast(error.message, 'err');
+        toast(t('updateAppended'));
+        go(myIncidentView(inc.id), { reset: true });
+      } }, t('appendUpdate')),
+    ]));
+  }
+
+  function appendEscalationCard(host, inc) {
+    if (inc.status !== 'resolved') return;
+    const reason = el('textarea', { placeholder: t('escalationReasonPlaceholder'), style: 'min-height:110px' });
+    host.append(el('div', { class: 'card escalation-card' }, [
+      el('h3', {}, t('reopenEscalate')),
+      el('p', { class: 'muted' }, t('reopenEscalateHint')),
+      labeled(t('reason'), reason),
+      el('button', { class: 'btn btn-primary', onclick: async () => {
+        if (!reason.value.trim()) return toast(t('reasonRequired'), 'err');
+        const { error } = await db.rpc('reopen_incident_escalate', {
+          p_incident: inc.id,
+          p_note: reason.value.trim(),
+        });
+        if (error) return toast(error.message, 'err');
+        toast(t('incidentEscalated'));
+        go(myIncidentView(inc.id), { reset: true });
+      } }, t('reopenEscalate')),
+    ]));
+  }
+
   // A category group: selectable chips + an "Other" chip that reveals a text box.
   function categoryBlock(labelText, cats) {
     const picked = new Set();
@@ -1412,6 +1513,7 @@
       title: t('yourReport'), tab: 'reports',
       async render(app) {
         const { data: inc } = await db.from('incidents').select('*').eq('id', id).single();
+        const { data: actions = [] } = await db.from('incident_actions').select('*').eq('incident_id', id).order('created_at');
         app.append(el('div', { class: 'card' }, [
           el('div', { class: 'section-head' }, [el('h3', {}, t('whatHappenedTitle')),
             el('span', { class: `pill ${incidentStatusClass(inc)}`, style: incidentStatusStyle(inc) }, statusLabel(inc.status))]),
@@ -1441,6 +1543,9 @@
               : 'This case is still being handled. The final report will appear here once it is closed.'),
           ]));
         }
+        await renderIncidentActionLog(app, actions || []);
+        appendUpdateCard(app, inc);
+        appendEscalationCard(app, inc);
       },
     };
   }
@@ -1449,7 +1554,7 @@
     return {
       title: t('reports'), tab: 'reports',
       async render(app) {
-        renderReportActions(app);
+        await renderReportActions(app);
         await renderRecentReports(app);
       },
     };

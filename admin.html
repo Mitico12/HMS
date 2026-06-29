@@ -77,6 +77,28 @@
   const monitor = { seen: null, count: 0, emergency: false, timer: null };
   const notifyPref = () => localStorage.getItem('notify_reports') || 'all';
   const isRedReport = (i) => (i.consequence_ids?.length > 0) || !!i.consequence_other;
+  const notificationController = (() => {
+    const key = 'seen_notification_ids';
+    const read = () => {
+      try { return new Set(JSON.parse(sessionStorage.getItem(key) || '[]')); }
+      catch (err) { return new Set(); }
+    };
+    const ids = read();
+    const persist = () => {
+      try { sessionStorage.setItem(key, JSON.stringify([...ids].slice(-500))); }
+      catch (err) { /* storage may be unavailable */ }
+    };
+    return {
+      shouldFire(kind, id) {
+        if (!id) return true;
+        const token = `${kind}:${id}`;
+        if (ids.has(token)) return false;
+        ids.add(token);
+        persist();
+        return true;
+      },
+    };
+  })();
 
   function updateReportsBadge() {
     const text = monitor.count ? (monitor.emergency ? '🚩 ' : '') + monitor.count : '';
@@ -88,6 +110,7 @@
   }
 
   function fireReportNotification(red, i) {
+    if (!notificationController.shouldFire('incident', i.id)) return;
     const title = red ? '🚩 Emergency report' : 'New report';
     const body = truncate(i.what_happened || 'A new report was submitted.', 80);
     toast(`${title}: ${body}`, red ? 'err' : 'ok');
@@ -154,7 +177,8 @@
     for (const c of cases) {
       if (!caseMonitor.seen.has(c.id)) {
         caseMonitor.seen.add(c.id);
-        if ('Notification' in window && Notification.permission === 'granted')
+        if (notificationController.shouldFire('sysadmin_case', c.id) &&
+            'Notification' in window && Notification.permission === 'granted')
           new Notification(t('emergencyTitle'), { body: t('emergencyBody') });
       }
     }
@@ -512,35 +536,6 @@
         await loadGroupDeleteRequests();
         renderSidebar('analytics');
         await renderAdminKpiDashboard(app);
-        const pendingAccounts = state.profiles.filter(p => p.role === 'user' && !p.is_verified).length;
-        const pendingChanges = await pendingProfileChangeCount();
-        const pending = pendingAccounts + pendingChanges;
-        const grid = el('div', { class: 'tile-grid mobile-only-groups' });
-        const cards = [
-          { id: 'fixed:users', glyph: '👥', name: t('users'), meta: pending ? `${pending} ${t('waitingApproval').toLowerCase()}` : t('accountsAccess'), open: () => go(usersView()) },
-          { id: 'fixed:logs', glyph: '☑', name: t('logs'), meta: t('logsMeta'), open: () => go(logsView()) },
-          ...state.groups.map(g => ({
-            id: `group:${g.id}`,
-            group: g,
-            glyph: g.icon || '📁',
-            name: groupName(g),
-            meta: kindLabel(g.kind),
-            badge: g.kind === 'reports',
-            open: () => go(groupView(g)),
-            onHide: () => { setGroupHidden(g.id, true); toast(t('groupHidden')); go(homeView(), { reset: true }); },
-          })),
-        ];
-        const hidden = hiddenGroupIds();
-        const shownCards = cards.filter(c => !(c.group && hidden.has(c.group.id)));
-        renderSortableHomeTiles(grid, shownCards, 'adminHomeTileOrder', async ordered => {
-          const orderedGroups = ordered.filter(c => c.group).map(c => c.group);
-          state.groups = orderedGroups;
-          await saveSortOrder('groups', orderedGroups);
-          go(homeView(), { reset: true });
-        });
-        grid.append(el('button', { class: 'tile add', onclick: addGroupModal },
-          [el('span', { class: 'glyph' }, '+'), el('div', { class: 't-meta' }, t('addGroup'))]));
-        app.append(grid);
         updateReportsBadge();
       },
     };
@@ -2251,6 +2246,29 @@
       async render(app) {
         await loadProfiles();
         const data = await fetchActiveReports();
+        const openByType = { incident: 0, hazard: 0, suggestion: 0 };
+        data.filter(i => i.status !== 'resolved').forEach(i => {
+          const type = i.report_type || 'incident';
+          if (Object.prototype.hasOwnProperty.call(openByType, type)) openByType[type] += 1;
+        });
+        const canSeeVarsling = isSuperPlus(state.profile) && canAccessVarsling(state.profile);
+        const openVarslingCount = canSeeVarsling
+          ? await countRows(db.from('varslinger').select('id', { count: 'exact', head: true }).neq('status', 'resolved'))
+          : null;
+        const indicator = (type, label, count, open) => el('button', {
+          class: `report-type-indicator report-type-indicator-${type}`,
+          onclick: open,
+        }, [
+          el('span', {}, label),
+          el('strong', {}, String(count || 0)),
+          el('small', {}, t('open')),
+        ]);
+        const indicatorBar = el('div', { class: 'report-type-indicators' }, [
+          indicator('incident', t('reportTypeIncidents'), openByType.incident, () => { filters.type = 'incident'; filters.status = 'all'; markActive(typeChips, 'incident'); markActive(statusChips, 'all'); apply(); }),
+          indicator('hazard', t('reportTypeHazards'), openByType.hazard, () => { filters.type = 'hazard'; filters.status = 'all'; markActive(typeChips, 'hazard'); markActive(statusChips, 'all'); apply(); }),
+          indicator('suggestion', t('reportTypeSuggestions'), openByType.suggestion, () => { filters.type = 'suggestion'; filters.status = 'all'; markActive(typeChips, 'suggestion'); markActive(statusChips, 'all'); apply(); }),
+          canSeeVarsling ? indicator('varsling', t('varsling'), openVarslingCount || 0, () => go(varslingListView())) : null,
+        ]);
 
         const filters = { status: 'all', type: 'incident', assignee: 'all', reporter: 'all' };
         let currentRows = data.slice();
@@ -2268,7 +2286,7 @@
           typeChips[key] = chip;
           typeBar.append(chip);
         });
-        if (isSuperPlus(state.profile) && canAccessVarsling(state.profile)) {
+        if (canSeeVarsling) {
           typeBar.append(el('button', { class: 'chip', onclick: () => go(varslingListView()) }, t('varsling')));
         }
 
@@ -2303,6 +2321,7 @@
         ]);
 
         app.append(el('div', { style: 'display:grid;gap:10px;margin-bottom:14px' }, [
+          indicatorBar,
           el('div', { style: 'display:flex;gap:8px 14px;flex-wrap:wrap;align-items:center' }, [
             typeBar,
             el('span', { class: 'filter-divider' }),
@@ -2542,6 +2561,16 @@
     }
   }
 
+  async function appendIncidentActionPhotos(host, paths = []) {
+    if (!paths.length) return;
+    const grid = el('div', { class: 'photo-grid photo-grid-compact' });
+    host.append(grid);
+    for (const path of paths) {
+      const { data, error } = await db.storage.from('incident-photos').createSignedUrl(path, 300);
+      if (!error && data?.signedUrl) grid.append(el('img', { src: data.signedUrl, alt: t('attachments'), class: 'incident-photo' }));
+    }
+  }
+
   function customFieldsCard(values) {
     const entries = Object.entries(values || {}).filter(([, v]) => Array.isArray(v) ? v.length : v !== null && v !== undefined && v !== '');
     if (!entries.length) return null;
@@ -2623,10 +2652,12 @@
         const note = el('textarea', { placeholder: t('actionNotePlaceholder') });
         const log = el('div', {});
         for (const a of actions || []) {
-          log.append(el('div', { class: 'timeline-note' }, [
-            el('div', { class: 'when' }, `${nameOf(a.author_id)} · ${fmt(a.created_at)}`),
+          const item = el('div', { class: `timeline-note${a.user_addendum ? ' user-addendum' : ''}` }, [
+            el('div', { class: 'when' }, `${nameOf(a.author_id)} · ${fmt(a.created_at)}${a.user_addendum ? ` · ${t('workerAddendum')}` : ''}`),
             el('div', {}, a.note),
-          ]));
+          ]);
+          log.append(item);
+          await appendIncidentActionPhotos(item, a.photo_paths || []);
         }
         if (!actions?.length) log.append(el('p', { class: 'muted' }, t('noActionsLoggedYet')));
         app.append(el('div', { class: 'card' }, [
