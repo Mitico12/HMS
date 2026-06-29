@@ -217,6 +217,9 @@
   const nameOf = (id) => state.profiles.find(p => p.id === id)?.full_name || '—';
   const emailOf = (id) => state.profiles.find(p => p.id === id)?.email || '';
   const labelOf = (p) => p?.full_name || p?.username || p?.email || 'Unnamed user';
+  const assignableIncidentProfiles = () => state.profiles
+    .filter(p => p && p.id && isAdminPlus(p) && (isSysadmin(state.profile) || !isSysadmin(p)))
+    .sort((a, b) => labelOf(a).localeCompare(labelOf(b)));
   // Reporter identity for the UI, hidden when the report is anonymous.
   const reporterOf = (inc) => inc.is_anonymous ? 'Anonymous' : (emailOf(inc.reporter_id) || nameOf(inc.reporter_id));
 
@@ -2243,7 +2246,9 @@
           onclick: () => setStatus(next),
         }, label);
 
-        const assign = el('select', {}, [opt('', '— unassigned —'), ...state.profiles.map(p => opt(p.id, p.full_name || p.email))]);
+        const assigneeOptions = assignableIncidentProfiles();
+        const canSeeCurrentAssignee = !inc.assigned_to || assigneeOptions.some(p => p.id === inc.assigned_to);
+        const assign = el('select', {}, [opt('', '— unassigned —'), ...assigneeOptions.map(p => opt(p.id, labelOf(p)))]);
         assign.value = inc.assigned_to || '';
         app.append(el('div', { class: 'card' }, [
           el('h3', {}, 'Processing'),
@@ -2254,6 +2259,7 @@
           ]),
           labeled(t('assignedTo'), assign),
           el('button', { class: 'btn btn-ghost', onclick: async () => {
+            if (!canSeeCurrentAssignee && !assign.value) return toast('Choose a visible assignee to change this assignment.', 'err');
             const { error } = await db.from('incidents').update({ assigned_to: assign.value || null }).eq('id', id);
             if (error) return toast(error.message, 'err');
             toast('Assignment saved.');
