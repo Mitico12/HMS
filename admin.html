@@ -931,13 +931,17 @@
   }
 
   async function renderAdminKpiDashboard(app) {
-    const periodKey = 'adminKpiPeriod', typeKey = 'adminKpiType', filterKey = 'adminKpiChecklist', adminKey = 'adminKpiAdmin';
-    const period = kpiPeriod(periodKey);
+    const periodKey = 'adminKpiPeriod', typeKey = 'adminKpiType', filterKey = 'adminKpiChecklist', adminKey = 'adminKpiAdmin', presetKey = 'adminKpiPreset';
+    const preset = localStorage.getItem(presetKey) || 'today';
+    // Day/Week/Month presets recompute live so the window always tracks the current
+    // date; only a custom calendar range is read back from storage.
+    const period = preset === 'custom' ? kpiPeriod(periodKey) : presetBounds(preset);
     const prev = previousBounds(period);
     const cur = periodBounds(period);
     let type = localStorage.getItem(typeKey) || 'overview';
     if (type === 'admin_performance' && !isAdminPlus(state.profile)) type = 'overview';
     const refresh = () => go(homeView(), { reset: true });
+    const setPreset = (k) => { localStorage.setItem(presetKey, k); refresh(); };
 
     // ── toolbar: type (left) · checklist filter · period chip + calendar (right) ──
     const typeOptions = [opt('overview', t('kpiOverview')), opt('incidents', t('kpiIncidents')), opt('checklists', t('kpiChecklists'))];
@@ -971,11 +975,19 @@
     const panel = el('div', { class: 'kpi-date-panel hidden' }, [
       labeled(t('dateFrom'), from), labeled(t('dateUntil'), until),
       el('div', { class: 'kpi-date-actions' }, [
-        el('button', { class: 'btn btn-ghost', onclick: () => { localStorage.removeItem(periodKey); refresh(); } }, t('today')),
-        el('button', { class: 'btn btn-primary', onclick: () => saveKpiPeriod(periodKey, from.value, until.value, refresh) }, t('apply')),
+        el('button', { class: 'btn btn-ghost', onclick: () => { localStorage.removeItem(periodKey); setPreset('today'); } }, t('today')),
+        el('button', { class: 'btn btn-primary', onclick: () => { localStorage.setItem(presetKey, 'custom'); saveKpiPeriod(periodKey, from.value, until.value, refresh); } }, t('apply')),
       ]),
     ]);
     const calBtn = el('button', { class: 'iconbtn', title: t('dashboardPeriod'), onclick: () => panel.classList.toggle('hidden') }, '📅');
+
+    // Day / Week / Month quick presets — the common ranges without opening the calendar.
+    const presetIcons = { today: '⏱️', week: '📅', month: '🗓️' };
+    const presetSeg = el('div', { class: 'kpi-seg' }, ['today', 'week', 'month'].map(k =>
+      el('button', { class: 'kpi-seg-btn' + (preset === k ? ' on' : ''), onclick: () => setPreset(k) }, [
+        el('span', { style: 'font-size: 0.95rem; line-height: 1;' }, presetIcons[k]),
+        t('period' + k.charAt(0).toUpperCase() + k.slice(1))
+      ])));
 
     // Incident status quick-filters — sit horizontally to the right of the type dropdown,
     // and only on the incidents view. Selection persists like the other KPI filters.
@@ -994,6 +1006,7 @@
         type === 'incidents' ? statusFilter : null,
         el('span', { class: 'spacer' }),
         type === 'admin_performance' ? adminSel : null,
+        type !== 'admin_performance' ? presetSeg : null,
         type !== 'admin_performance' ? el('div', { class: 'kpi-period-chip' }, periodLabel(period)) : null,
         type !== 'admin_performance' ? calBtn : null,
       ]),
@@ -1009,73 +1022,156 @@
     else await renderAdminPerformanceKpi(host, adminSel.value);
   }
 
-  // ── OVERVIEW ────────────────────────────────────────────────
+  // ── OVERVIEW — everything that happened in the period ───────
   async function renderOverviewKpi(host, period, cur, prev) {
     const seriousIds = await seriousConsequenceIds();
+    const canSeeVarsling = isSuperPlus(state.profile) && canAccessVarsling(state.profile);
 
-    const rpc = await db.rpc('admin_overview_kpi', {
-      p_cur_start: cur.start,
-      p_cur_end: cur.end,
-      p_prev_start: prev.start,
-      p_prev_end: prev.end,
-      p_serious_ids: seriousIds,
-    });
+    // count rows in a table over a date window on a given column (+ optional tweak)
+    const countIn = (table, col, b, tweak) => {
+      let q = db.from(table).select('id', { count: 'exact', head: true }).gte(col, b.start).lt(col, b.end);
+      if (tweak) q = tweak(q);
+      return countRows(q);
+    };
+    // incident rows for a window drive filed / serious / type-breakdown in one fetch
+    const incQ = (b) => db.from('incidents')
+      .select('report_type,consequence_ids,created_at')
+      .gte('created_at', b.start).lt('created_at', b.end);
 
-    let backlog, unassigned, oldestDays, serCur, serPrev, resCur, resPrev, repCur, repPrev, medC, medP;
-    if (!rpc.error && rpc.data) {
-      const s = rpc.data;
-      backlog = Number(s.backlog || 0);
-      unassigned = Number(s.unassigned || 0);
-      oldestDays = s.oldest_open_at ? Math.floor((Date.now() - new Date(s.oldest_open_at)) / DAYMS) : 0;
-      serCur = Number(s.serious_cur || 0);
-      serPrev = Number(s.serious_prev || 0);
-      resCur = Number(s.resolved_cur || 0);
-      resPrev = Number(s.resolved_prev || 0);
-      repCur = Number(s.reported_cur || 0);
-      repPrev = Number(s.reported_prev || 0);
-      medC = s.median_cur == null ? null : Number(s.median_cur);
-      medP = s.median_prev == null ? null : Number(s.median_prev);
-    } else {
-      const [backlogRows, unassignedRows, oldestRow] = await Promise.all([
-        countRows(db.from('incidents').select('id', { count: 'exact', head: true }).neq('status', 'resolved')),
-        countRows(db.from('incidents').select('id', { count: 'exact', head: true }).eq('status', 'open').is('assigned_to', null)),
-        db.from('incidents').select('created_at').neq('status', 'resolved').order('created_at', { ascending: true }).limit(1),
-      ]);
-      backlog = backlogRows;
-      unassigned = unassignedRows;
-      oldestDays = oldestRow.data?.[0]
-        ? Math.floor((Date.now() - new Date(oldestRow.data[0].created_at)) / DAYMS) : 0;
+    const [
+      incCur, incPrev, resCur, resPrev, clCur, clPrev, coCur, coPrev,
+      prCur, prPrev, docCur, docPrev, memCur, memPrev, vrCur, vrPrev,
+      backlog, unassigned, oldestRow,
+    ] = await Promise.all([
+      incQ(cur), incQ(prev),
+      countIn('incidents', 'resolved_at', cur, q => q.eq('status', 'resolved')),
+      countIn('incidents', 'resolved_at', prev, q => q.eq('status', 'resolved')),
+      countIn('checklist_runs', 'submitted_at', cur, q => q.eq('completed', true)),
+      countIn('checklist_runs', 'submitted_at', prev, q => q.eq('completed', true)),
+      countIn('course_submissions', 'created_at', cur, q => q.eq('passed', true)),
+      countIn('course_submissions', 'created_at', prev, q => q.eq('passed', true)),
+      countIn('procedure_submissions', 'created_at', cur),
+      countIn('procedure_submissions', 'created_at', prev),
+      countIn('documents', 'created_at', cur),
+      countIn('documents', 'created_at', prev),
+      countIn('profiles', 'created_at', cur),
+      countIn('profiles', 'created_at', prev),
+      canSeeVarsling ? countIn('varslinger', 'created_at', cur) : Promise.resolve(0),
+      canSeeVarsling ? countIn('varslinger', 'created_at', prev) : Promise.resolve(0),
+      countRows(db.from('incidents').select('id', { count: 'exact', head: true }).neq('status', 'resolved')),
+      countRows(db.from('incidents').select('id', { count: 'exact', head: true }).eq('status', 'open').is('assigned_to', null)),
+      db.from('incidents').select('created_at').neq('status', 'resolved').order('created_at', { ascending: true }).limit(1),
+    ]);
 
-      const [seriousCur, seriousPrev, resolvedCur, resolvedPrev, reportedCur, reportedPrev, medCur, medPrev] = await Promise.all([
-        seriousCount(cur, seriousIds), seriousCount(prev, seriousIds),
-        countRows(db.from('incidents').select('id', { count: 'exact', head: true }).eq('status', 'resolved').gte('resolved_at', cur.start).lt('resolved_at', cur.end)),
-        countRows(db.from('incidents').select('id', { count: 'exact', head: true }).eq('status', 'resolved').gte('resolved_at', prev.start).lt('resolved_at', prev.end)),
-        countRows(db.from('incidents').select('id', { count: 'exact', head: true }).gte('created_at', cur.start).lt('created_at', cur.end)),
-        countRows(db.from('incidents').select('id', { count: 'exact', head: true }).gte('created_at', prev.start).lt('created_at', prev.end)),
-        resolveTimes(cur), resolveTimes(prev),
-      ]);
-      serCur = seriousCur;
-      serPrev = seriousPrev;
-      resCur = resolvedCur;
-      resPrev = resolvedPrev;
-      repCur = reportedCur;
-      repPrev = reportedPrev;
-      medC = medianDays(medCur);
-      medP = medianDays(medPrev);
-    }
-    const rateCur = repCur ? Math.round(resCur / repCur * 100) : 0;
-    const ratePrev = repPrev ? Math.round(resPrev / repPrev * 100) : 0;
+    const rowsCur = incCur.data || [], rowsPrev = incPrev.data || [];
+    const inSet = (ids) => (ids || []).some(id => seriousIds.includes(id));
+    const filedCur = rowsCur.length, filedPrev = rowsPrev.length;
+    const serCur = rowsCur.filter(r => inSet(r.consequence_ids)).length;
+    const serPrev = rowsPrev.filter(r => inSet(r.consequence_ids)).length;
+    const oldestDays = oldestRow.data?.[0]
+      ? Math.floor((Date.now() - new Date(oldestRow.data[0].created_at)) / DAYMS) : 0;
+    const num = (x) => Number(x || 0);
 
-    const grid = el('div', { class: 'kpi-grid' }, [
-      metricCard({ label: t('reportsInPeriod'), value: backlog, live: true, hint: t('openBacklog') }),
+    // ── Right now (live, point-in-time) ──
+    host.append(el('div', { class: 'kpi-section-h' }, t('rightNow')));
+    host.append(el('div', { class: 'kpi-grid' }, [
+      metricCard({ label: t('openBacklog'), value: backlog, live: true }),
       metricCard({ label: t('unassigned'), value: unassigned, live: true }),
       metricCard({ label: t('oldestOpen'), value: oldestDays + 'd', live: true }),
+    ]));
+
+    // ── In this period (vs the previous equal-length window) ──
+    host.append(el('div', { class: 'kpi-section-h' }, t('inThisPeriod')));
+    const cards = [
+      metricCard({ label: t('reportsFiled'), value: filedCur, delta: pctChange(filedCur, filedPrev), good: null }),
+      metricCard({ label: t('reportsResolved'), value: num(resCur), delta: pctChange(num(resCur), num(resPrev)), good: isGood(num(resCur), num(resPrev), 'up') }),
       metricCard({ label: t('serious'), value: serCur, delta: pctChange(serCur, serPrev), good: isGood(serCur, serPrev, 'down') }),
-      metricCard({ label: t('resolutionRate'), value: rateCur + '%', delta: pctChange(rateCur, ratePrev), good: isGood(rateCur, ratePrev, 'up') }),
-      metricCard({ label: t('medianResolve'), value: medC == null ? '–' : medC + 'd', delta: medP ? pctChange(medC, medP) : null, good: isGood(medC || 0, medP || 0, 'down') }),
-    ]);
-    host.append(grid);
+      metricCard({ label: t('checklistsDone'), value: num(clCur), delta: pctChange(num(clCur), num(clPrev)), good: isGood(num(clCur), num(clPrev), 'up') }),
+      metricCard({ label: t('coursesPassed'), value: num(coCur), delta: pctChange(num(coCur), num(coPrev)), good: isGood(num(coCur), num(coPrev), 'up') }),
+      metricCard({ label: t('proceduresFiled'), value: num(prCur), delta: pctChange(num(prCur), num(prPrev)), good: null }),
+      metricCard({ label: t('documentsAdded'), value: num(docCur), delta: pctChange(num(docCur), num(docPrev)), good: null }),
+      metricCard({ label: t('newMembers'), value: num(memCur), delta: pctChange(num(memCur), num(memPrev)), good: null }),
+    ];
+    if (canSeeVarsling) cards.push(metricCard({ label: t('varslingerFiled'), value: num(vrCur), delta: pctChange(num(vrCur), num(vrPrev)), good: null }));
+    host.append(el('div', { class: 'kpi-grid' }, cards));
+
+    // ── Reports by type (period) ──
+    const typePalette = { incident: '#D85A30', hazard: '#BA7517', suggestion: '#1D9E75' };
+    const typeCounts = ['incident', 'hazard', 'suggestion'].map(k => ({
+      name: typeLabel(k), color: typePalette[k],
+      n: rowsCur.filter(r => (r.report_type || 'incident') === k).length,
+    }));
+    const typeTotal = typeCounts.reduce((a, c) => a + c.n, 0);
+    if (typeTotal) {
+      const shown = typeCounts.filter(c => c.n);
+      const bar = el('div', { class: 'sev-bar' }, shown.map(c =>
+        el('div', { style: `width:${c.n / typeTotal * 100}%;background:${c.color}`, title: `${c.name}: ${c.n}` })));
+      const legend = el('div', { class: 'sev-legend' }, shown.map(c =>
+        el('span', {}, [el('i', { style: `background:${c.color}` }), `${c.name} ${c.n}`])));
+      host.append(el('div', { class: 'kpi-card', style: 'margin-top:4px' }, [
+        el('div', { class: 'kpi-label', style: 'margin-bottom:10px' }, t('reportsByType')), bar, legend,
+      ]));
+    }
+
+    // ── Latest activity (merged timeline across surfaces) ──
+    await renderActivityFeed(host, cur, canSeeVarsling);
   }
+
+  // Merge recent events from every surface into one time-sorted "what happened" feed.
+  async function renderActivityFeed(host, cur, canSeeVarsling) {
+    const LIM = 14;
+    const inWin = (q, col) => q.gte(col, cur.start).lt(col, cur.end).order(col, { ascending: false }).limit(LIM);
+    const rows = (q) => q.then(r => r.data || [], () => []);
+
+    const [incs, resolved, runs, courses, procs, docs, members, vars] = await Promise.all([
+      rows(inWin(db.from('incidents').select('report_type,is_anonymous,reporter_id,created_at'), 'created_at')),
+      rows(inWin(db.from('incidents').select('report_type,assigned_to,resolved_at').eq('status', 'resolved'), 'resolved_at')),
+      rows(inWin(db.from('checklist_runs').select('checklist_id,user_id,submitted_at').eq('completed', true).not('submitted_at', 'is', null), 'submitted_at')),
+      rows(inWin(db.from('course_submissions').select('course_id,user_id,passed,score,created_at'), 'created_at')),
+      rows(inWin(db.from('procedure_submissions').select('procedure_id,user_id,created_at'), 'created_at')),
+      rows(inWin(db.from('documents').select('name,uploaded_by,created_at'), 'created_at')),
+      rows(inWin(db.from('profiles').select('id,full_name,username,email,created_at'), 'created_at')),
+      canSeeVarsling ? rows(inWin(db.from('varslinger').select('id,created_at'), 'created_at')) : Promise.resolve([]),
+    ]);
+
+    // tiny id→title lookups (empty map if a column/table is unavailable)
+    const titleMap = (table) => db.from(table).select('id,title').then(
+      r => new Map((r.data || []).map(x => [x.id, x.title])), () => new Map());
+    const [clTitles, coTitles, prTitles] = await Promise.all([titleMap('checklists'), titleMap('courses'), titleMap('procedures')]);
+
+    const who = (id) => { const p = state.profiles.find(u => u.id === id); return p ? labelOf(p) : '—'; };
+    const reportTitle = { incident: t('actIncidentReported'), hazard: t('actHazardReported'), suggestion: t('actSuggestionSent') };
+    const ev = [];
+    const push = (ts, type, ico, title, sub) => { if (ts) ev.push({ ts: +new Date(ts), type, ico, title, sub }); };
+
+    incs.forEach(r => push(r.created_at, r.report_type || 'incident', '📣', reportTitle[r.report_type || 'incident'] || reportTitle.incident, r.is_anonymous ? 'Anonymous' : who(r.reporter_id)));
+    resolved.forEach(r => push(r.resolved_at, 'resolved', '✅', t('actReportResolved'), `${typeLabel(r.report_type)}${r.assigned_to ? ' · ' + who(r.assigned_to) : ''}`));
+    runs.forEach(r => push(r.submitted_at, 'checklist', '☑️', t('actChecklistDone'), `${clTitles.get(r.checklist_id) || t('checklist')} · ${who(r.user_id)}`));
+    courses.forEach(r => push(r.created_at, r.passed ? 'course-passed' : 'course-attempt', r.passed ? '🎓' : '📚', r.passed ? t('actCoursePassed') : t('actCourseAttempt'), `${coTitles.get(r.course_id) || t('course')} · ${who(r.user_id)}${r.passed ? '' : ' · ' + num0(r.score) + '%'}`));
+    procs.forEach(r => push(r.created_at, 'procedure', '📋', t('actProcedureFiled'), `${prTitles.get(r.procedure_id) || t('procedure')} · ${who(r.user_id)}`));
+    docs.forEach(r => push(r.created_at, 'document', '📄', t('actDocumentAdded'), `${r.name || ''}${r.uploaded_by ? ' · ' + who(r.uploaded_by) : ''}`.trim()));
+    members.forEach(r => push(r.created_at, 'member', '👤', t('actMemberJoined'), labelOf(r)));
+    vars.forEach(r => push(r.created_at, 'varsling', '🔒', t('actVarslingFiled'), t('confidential')));
+
+    ev.sort((a, b) => b.ts - a.ts);
+
+    host.append(el('div', { class: 'kpi-section-h' }, t('latestActivity')));
+    if (!ev.length) {
+      host.append(el('div', { class: 'kpi-card' }, el('p', { class: 'miss-sub' }, t('noActivityYet'))));
+      return;
+    }
+    const feed = el('div', { class: 'act-feed' });
+    ev.slice(0, 18).forEach(e => feed.append(el('div', { class: `act-row act-${e.type}` }, [
+      el('span', { class: 'act-ico' }, e.ico),
+      el('div', { class: 'act-main' }, [
+        el('div', { class: 'act-title' }, e.title),
+        el('div', { class: 'act-sub' }, e.sub),
+      ]),
+      el('span', { class: 'time-pill' }, fmt(new Date(e.ts).toISOString())),
+    ])));
+    host.append(feed);
+  }
+  const num0 = (x) => Number(x || 0);
 
   // ── INCIDENTS ───────────────────────────────────────────────
   async function renderIncidentsKpi(host, period, cur, prev, status = 'all') {
@@ -1384,57 +1480,7 @@
     return true;
   }
 
-  function renderSortableHomeTiles(host, cards, storageKey, onPersist = null) {
-    const saved = JSON.parse(localStorage.getItem(storageKey) || '[]');
-    const rank = new Map(saved.map((id, idx) => [id, idx]));
-    cards.sort((a, b) => (rank.get(a.id) ?? 999) - (rank.get(b.id) ?? 999));
-    let dragIdx = null;
-    let didDrag = false;
-    const draw = () => {
-      host.innerHTML = '';
-      cards.forEach((card, idx) => {
-        const handle = el('span', { class: 'drag-handle tile-drag', draggable: 'true', title: t('dragReorder') }, '⠿');
-        const tile = el('button', { class: 'tile', onclick: () => {
-          if (didDrag) { didDrag = false; return; }
-          card.open();
-        } }, [
-          handle,
-          el('span', { class: 'glyph' }, card.glyph),
-          el('div', {}, [
-            el('div', { class: 't-name' }, card.name),
-            el('div', { class: 't-meta' }, card.meta),
-          ]),
-        ]);
-        if (card.badge) tile.append(el('span', { class: 'badge reports-badge' }));
-        if (card.onHide) {
-          const hideBtn = el('button', { class: 'tile-hide', title: t('hideGroup'), onclick: e => { e.stopPropagation(); card.onHide(); } }, '🛇');
-          tile.append(hideBtn);
-        }
-        handle.addEventListener('click', e => e.stopPropagation());
-        handle.addEventListener('dragstart', e => {
-          dragIdx = idx;
-          didDrag = true;
-          e.dataTransfer.effectAllowed = 'move';
-          e.dataTransfer.setData('text/plain', card.id);
-          tile.classList.add('dragging');
-        });
-        handle.addEventListener('dragend', () => { dragIdx = null; tile.classList.remove('dragging'); });
-        tile.addEventListener('dragover', e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; });
-        tile.addEventListener('drop', async e => {
-          e.preventDefault();
-          if (dragIdx === null || dragIdx === idx) return;
-          const [moved] = cards.splice(dragIdx, 1);
-          cards.splice(idx, 0, moved);
-          localStorage.setItem(storageKey, JSON.stringify(cards.map(c => c.id)));
-          dragIdx = null;
-          draw();
-          if (onPersist) await onPersist(cards);
-        });
-        host.append(tile);
-      });
-    };
-    draw();
-  }
+
 
   function todayBounds() {
     const start = new Date();
@@ -1465,6 +1511,21 @@
     const end = new Date(`${period.until}T00:00:00`);
     end.setDate(end.getDate() + 1);
     return { start: start.toISOString(), end: end.toISOString() };
+  }
+
+  // Day/Week/Month → a {from, until} range ending today, computed live.
+  function presetBounds(kind) {
+    const now = new Date();
+    const today = localDateString(now);
+    if (kind === 'week') {
+      const d = new Date(now);
+      d.setDate(d.getDate() - ((d.getDay() + 6) % 7)); // back to Monday
+      return { from: localDateString(d), until: today };
+    }
+    if (kind === 'month') {
+      return { from: localDateString(new Date(now.getFullYear(), now.getMonth(), 1)), until: today };
+    }
+    return { from: today, until: today };
   }
 
   function periodLabel(period) {
