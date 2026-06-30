@@ -431,19 +431,125 @@
     const periodKey = 'userKpiPeriod';
     const period = kpiPeriod(periodKey);
     const { start, end } = periodBounds(period);
+    const periodText = periodLabel(period);
+    const todo = await loadWorkerChecklistTodo();
+
+    // 1. Hero — greeting + today's checklist progress (the first thing a worker sees).
+    renderWorkerHero(app, todo);
+    // 2. Primary — today's checklists to do.
+    renderWorkerChecklistTodo(app, todo);
+    // 3. Communications — private messages first, then news broadcasts.
+    await renderWorkerCommunications(app);
+
+    // 4. Your activity — period stats live below the day's work, for those who want them.
     const completed = await countRows(db.from('checklist_runs').select('id', { count: 'exact', head: true })
       .eq('user_id', state.profile.id).eq('completed', true).gte('submitted_at', start).lt('submitted_at', end));
-    const todo = await loadWorkerChecklistTodo();
+    app.append(el('div', { class: 'worker-home-section worker-activity-head' }, [
+      el('h2', { class: 'display worker-section-title' }, t('yourActivity')),
+    ]));
     const cards = [
       { id: 'completed', label: t('checklistsCompletedInPeriod'), value: completed },
       { id: 'todo', label: t('checklistsToDo'), value: todo.items.length },
     ];
-    renderKpiToolbar(app, 'userKpiVisible', cards, () => go(homeView(), { reset: true }));
-    renderSortableKpiGrid(app, 'userKpiOrder', visibleKpiCards(cards, 'userKpiVisible'), {
-      periodKey,
-      refreshHome: () => go(homeView(), { reset: true })
+    renderKpiToolbar(app, 'userKpiVisible', periodKey, cards, () => go(homeView(), { reset: true }));
+    renderSortableKpiGrid(app, 'userKpiOrder', visibleKpiCards(cards, 'userKpiVisible'), { periodText });
+  }
+
+  // Welcome hero: a time-of-day greeting + a progress bar for today's checklist load.
+  function renderWorkerHero(app, todo) {
+    const raw = (state.profile?.full_name || state.profile?.username || state.profile?.email || '').trim();
+    const name = raw ? raw.split(/[\s@]+/)[0] : '';
+    const h = new Date().getHours();
+    const greet = h < 12 ? t('greetingMorning') : h < 18 ? t('greetingAfternoon') : t('greetingEvening');
+    const total = todo.total || 0;
+    const remaining = todo.items.length;
+    const done = Math.max(0, total - remaining);
+    const pct = total ? Math.round(done / total * 100) : 0;
+    const allDone = total > 0 && remaining === 0;
+    const status = !total ? t('nothingScheduledToday')
+      : allDone ? t('allChecklistsDone')
+      : t('doneOfTotalToday', { done, total });
+    app.append(el('div', { class: 'worker-hero' }, [
+      el('div', { class: 'worker-hero-top' }, [
+        el('div', {}, [
+          el('div', { class: 'worker-hero-greeting' }, name ? `${greet}, ${name}` : greet),
+          el('div', { class: 'worker-hero-sub' }, status),
+        ]),
+        total ? el('div', { class: 'worker-hero-count' + (allDone ? ' is-done' : '') }, allDone ? '✓' : `${done}/${total}`) : null,
+      ]),
+      total ? el('div', { class: 'hero-progress-track' }, el('div', { class: 'hero-progress-fill', style: `width:${pct}%` })) : null,
+    ]));
+  }
+
+  // Communications — private messages first, then news broadcasts. Each is a
+  // phone-notification-style row (mini image + title/snippet); unread rows carry a
+  // red flag until opened. Opening records a read receipt (the admin's hidden stat).
+  async function renderWorkerCommunications(app) {
+    let comms;
+    const res = await db.from('communications').select('*').order('created_at', { ascending: false }).then(r => r, () => ({ error: true }));
+    if (res.error) return; // table not migrated yet → show nothing, don't break the home
+    comms = res.data || [];
+    app.append(el('div', { class: 'worker-home-section' }, [
+      el('h2', { class: 'display worker-section-title' }, t('communications')),
+    ]));
+    if (!comms.length) {
+      app.append(emptyState(t('noCommunications'), t('noCommunicationsHint')));
+      return;
+    }
+    const ids = comms.map(c => c.id);
+    const { data: readRows = [] } = await db.from('communication_reads')
+      .select('communication_id').eq('user_id', state.profile.id).in('communication_id', ids);
+    const readSet = new Set((readRows || []).map(r => r.communication_id));
+    const thumbs = await signedUrls('communications', comms.map(c => c.image_path), 600);
+    renderWorkerCommSection(app, t('messages'), comms.filter(c => c.kind === 'message'), readSet, thumbs, t('noMessages'));
+    renderWorkerCommSection(app, t('news'), comms.filter(c => c.kind === 'news'), readSet, thumbs, t('noNews'));
+  }
+
+  function renderWorkerCommSection(app, title, list, readSet, thumbs, emptyMsg) {
+    app.append(el('div', { class: 'comm-subhead' }, title));
+    if (!list.length) { app.append(el('p', { class: 'muted comm-empty' }, emptyMsg)); return; }
+    const wrap = el('div', { class: 'comm-feed' });
+    list.forEach(c => {
+      const unread = !readSet.has(c.id);
+      const url = thumbs.get(c.image_path);
+      const snippet = c.title || (c.body || '').slice(0, 80) || (c.kind === 'news' ? t('news') : t('messages'));
+      const sub = c.title ? (c.body || '').slice(0, 80) : fmt(c.created_at);
+      wrap.append(el('button', { class: 'comm-row' + (unread ? ' comm-unread' : ''), onclick: () => go(communicationDetail(c)) }, [
+        el('div', { class: 'comm-thumb' }, url ? el('img', { src: url, alt: '' }) : el('span', { class: 'comm-thumb-ico' }, c.kind === 'news' ? '📰' : '✉')),
+        el('div', { class: 'comm-main' }, [
+          el('div', { class: 'comm-title' }, snippet),
+          el('div', { class: 'comm-snippet' }, sub),
+        ]),
+        unread
+          ? el('span', { class: 'comm-flag', title: t('unread') }, '❗')
+          : el('span', { class: 'comm-time' }, fmt(c.created_at)),
+      ]));
     });
-    renderWorkerChecklistTodo(app, todo);
+    app.append(wrap);
+  }
+
+  function communicationDetail(comm) {
+    return {
+      title: comm.title || (comm.kind === 'news' ? t('news') : t('messages')), tab: 'groups',
+      async render(app) {
+        // Record the read receipt on open (ignore the duplicate if already read).
+        db.from('communication_reads').insert({ communication_id: comm.id, user_id: state.profile.id }).then(() => {}, () => {});
+        const media = await signedUrls('communications', [comm.image_path, ...(comm.attachments || []).map(a => a.path)], 600);
+        const card = el('div', { class: 'card comm-detail' });
+        if (comm.image_path && media.get(comm.image_path)) card.append(el('img', { src: media.get(comm.image_path), class: 'comm-detail-img', alt: '' }));
+        if (comm.title) card.append(el('h2', { class: 'comm-detail-title' }, comm.title));
+        card.append(el('div', { class: 'comm-detail-meta' }, fmt(comm.created_at)));
+        if (comm.body) card.append(el('p', { class: 'comm-detail-body' }, comm.body));
+        if ((comm.attachments || []).length) {
+          card.append(el('div', { class: 'comm-attach-list' }, comm.attachments.map(a =>
+            el('button', { class: 'btn btn-ghost comm-attach', onclick: () => { const u = media.get(a.path); if (u) window.open(u, '_blank'); } }, [
+              el('span', {}, /image\//.test(a.type || '') ? '🖼️' : /\.pdf$/i.test(a.name || '') ? '📕' : '📄'),
+              el('span', {}, a.name || 'file'),
+            ]))));
+        }
+        app.append(card);
+      },
+    };
   }
 
   async function loadWorkerChecklistTodo() {
@@ -495,7 +601,7 @@
 
   function renderWorkerChecklistTodo(app, todo) {
     app.append(el('div', { class: 'worker-home-section' }, [
-      el('h2', { class: 'display worker-section-title' }, t('checklistsToDo')),
+      el('h2', { class: 'display worker-section-title' }, t('todaysChecklists')),
     ]));
     if (!todo.items.length) {
       app.append(emptyState(t('noChecklistsToDo'), t('noChecklistsToDoHint')));
@@ -506,7 +612,7 @@
       kind: 'checklist',
       title: c.title,
       meta: c.group ? groupName(c.group) : t('checklists'),
-      sub: `${(c.items || []).length} ${t('items', { count: (c.items || []).length }).toLowerCase()} - ${c.dueDate}`,
+      sub: `${t('items', { count: (c.items || []).length })} - ${c.dueDate}`,
       image: c.image || firstChecklistImage(c),
       icon: c.icon || null,
       onclick: () => go(checklistRun(c)),
@@ -560,7 +666,8 @@
     return selected === 'all' ? cards : cards.filter(card => card.id === selected);
   }
 
-  function renderKpiToolbar(host, filterKey, cards, refreshHome) {
+  function renderKpiToolbar(host, filterKey, periodKey, cards, refreshHome) {
+    const period = kpiPeriod(periodKey);
     const filter = el('select', { class: 'kpi-filter', onchange: e => {
       localStorage.setItem(filterKey, e.target.value);
       refreshHome();
@@ -570,9 +677,29 @@
     ]);
     const selected = localStorage.getItem(filterKey) || 'all';
     filter.value = cards.some(card => card.id === selected) ? selected : 'all';
-
-    host.append(el('div', { class: 'kpi-toolbar-row' }, [
-      el('div', { class: 'kpi-select-wrap' }, filter),
+    const from = el('input', { type: 'date', value: period.from });
+    const until = el('input', { type: 'date', value: period.until });
+    const panel = el('div', { class: 'kpi-date-panel hidden' }, [
+      labeled(t('dateFrom'), from),
+      labeled(t('dateUntil'), until),
+      el('div', { class: 'kpi-date-actions' }, [
+        el('button', { class: 'btn btn-ghost', onclick: () => {
+          localStorage.removeItem(periodKey);
+          refreshHome();
+        } }, t('today')),
+        el('button', { class: 'btn btn-primary', onclick: () => saveKpiPeriod(periodKey, from.value, until.value, refreshHome) }, t('apply')),
+      ]),
+    ]);
+    const calendar = el('button', { class: 'iconbtn kpi-calendar-btn', title: t('dashboardPeriod'), onclick: () => {
+      panel.classList.toggle('hidden');
+    } }, '📅');
+    host.append(el('div', { class: 'kpi-control-wrap' }, [
+      el('div', { class: 'kpi-toolbar-row' }, [
+        el('div', { class: 'kpi-select-wrap' }, filter),
+        el('div', { class: 'kpi-period-chip' }, periodLabel(period)),
+        calendar,
+      ]),
+      panel,
     ]));
   }
 
@@ -613,7 +740,7 @@
     const draw = () => {
       grid.innerHTML = '';
       cards.forEach((card, idx) => {
-        const node = kpiCard(card, card.value, options);
+        const node = kpiCard(card.label, card.value, options.periodText);
         node.setAttribute('draggable', 'true');
         node.addEventListener('dragstart', e => {
           dragIdx = idx;
@@ -644,53 +771,12 @@
     host.append(grid);
   }
 
-  function kpiCard(card, value, options = {}) {
-    if (card.id === 'completed' && options.periodKey && options.refreshHome) {
-      const period = kpiPeriod(options.periodKey);
-      const from = el('input', { type: 'date', value: period.from });
-      const until = el('input', { type: 'date', value: period.until });
-      const panel = el('div', { class: 'kpi-date-panel hidden' }, [
-        labeled(t('dateFrom'), from),
-        labeled(t('dateUntil'), until),
-        el('div', { class: 'kpi-date-actions' }, [
-          el('button', { class: 'btn btn-ghost btn-sm', onclick: e => {
-            e.stopPropagation();
-            localStorage.removeItem(options.periodKey);
-            options.refreshHome();
-          } }, t('today')),
-          el('button', { class: 'btn btn-primary btn-sm', onclick: e => {
-            e.stopPropagation();
-            saveKpiPeriod(options.periodKey, from.value, until.value, options.refreshHome);
-          } }, t('apply')),
-        ]),
-      ]);
-
-      const calendarBtn = el('button', { class: 'iconbtn kpi-card-calendar-btn', title: t('dashboardPeriod'), onclick: e => {
-        e.stopPropagation();
-        panel.classList.toggle('hidden');
-      } }, '📅');
-
-      const periodText = periodLabel(period);
-      const periodChip = el('span', { class: 'kpi-period-chip clickable', onclick: e => {
-        e.stopPropagation();
-        panel.classList.toggle('hidden');
-      } }, periodText);
-
-      return el('div', { class: 'kpi-card kpi-card-completed', style: 'position: relative;' }, [
-        el('span', { class: 'drag-handle kpi-drag', title: t('dragReorder') }, '⠿'),
-        el('div', { class: 'kpi-card-header' }, [
-          el('div', { class: 'kpi-value' }, value == null ? '-' : String(value)),
-          el('div', { class: 'kpi-card-controls' }, [periodChip, calendarBtn]),
-        ]),
-        el('div', { class: 'kpi-label' }, card.label),
-        panel,
-      ]);
-    }
-
-    return el('div', { class: 'kpi-card' }, [
+  function kpiCard(label, value, periodText = '') {
+    return el('div', { class: 'kpi-card', title: t('dashboardPeriod') }, [
       el('span', { class: 'drag-handle kpi-drag', title: t('dragReorder') }, '⠿'),
       el('div', { class: 'kpi-value' }, value == null ? '-' : String(value)),
-      el('div', { class: 'kpi-label' }, card.label),
+      el('div', { class: 'kpi-label' }, label),
+      periodText ? el('div', { class: 'kpi-period' }, periodText) : null,
     ]);
   }
 

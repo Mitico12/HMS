@@ -552,6 +552,7 @@
       { id: 'courses', ic: '▣', label: t('manageCourses'), open: () => openKind('courses') },
       { id: 'users', ic: 'U', label: t('accounts'), count: pendingAccounts, open: () => go(usersView()) },
       { id: 'departments', ic: 'D', label: t('departments'), open: () => go(departmentsView()) },
+      { id: 'communications', ic: '✉', label: t('communications'), open: () => go(communicationsView()) },
     ] : [
       { id: 'logs', ic: '☑', label: t('checklistLogs'), open: () => go(checklistLogsView()) },
     ];
@@ -1172,6 +1173,49 @@
     host.append(feed);
   }
   const num0 = (x) => Number(x || 0);
+  const whoName = (id) => { const p = state.profiles.find(u => u.id === id); return p ? labelOf(p) : '—'; };
+
+  // Render a pre-built, scoped event list as the shared "Latest activity" feed.
+  // (Overview builds its own multi-surface feed in renderActivityFeed; the other
+  // tabs feed this their own already-fetched rows so the look stays identical.)
+  function renderEventFeed(host, ev) {
+    ev.sort((a, b) => b.ts - a.ts);
+    host.append(el('div', { class: 'kpi-section-h' }, t('latestActivity')));
+    if (!ev.length) {
+      host.append(el('div', { class: 'kpi-card' }, el('p', { class: 'miss-sub' }, t('noActivityYet'))));
+      return;
+    }
+    const feed = el('div', { class: 'act-feed' });
+    ev.slice(0, 18).forEach(e => feed.append(el('div', { class: `act-row act-${e.type}` }, [
+      el('span', { class: 'act-ico' }, e.ico),
+      el('div', { class: 'act-main' }, [
+        el('div', { class: 'act-title' }, e.title),
+        el('div', { class: 'act-sub' }, e.sub),
+      ]),
+      el('span', { class: 'time-pill' }, fmt(new Date(e.ts).toISOString())),
+    ])));
+    host.append(feed);
+  }
+
+  // Point-in-time incident workload — drives the "RIGHT NOW" live cards on the
+  // incidents + admin-performance tabs (mirrors overview's live trio).
+  async function liveIncidentState() {
+    const [backlog, unassigned, oldestRow] = await Promise.all([
+      countRows(db.from('incidents').select('id', { count: 'exact', head: true }).neq('status', 'resolved')),
+      countRows(db.from('incidents').select('id', { count: 'exact', head: true }).eq('status', 'open').is('assigned_to', null)),
+      db.from('incidents').select('created_at').neq('status', 'resolved').order('created_at', { ascending: true }).limit(1),
+    ]);
+    const oldestDays = oldestRow.data?.[0]
+      ? Math.floor((Date.now() - new Date(oldestRow.data[0].created_at)) / DAYMS) : 0;
+    return { backlog, unassigned, oldestDays };
+  }
+  function liveStateCards(s) {
+    return el('div', { class: 'kpi-grid' }, [
+      metricCard({ label: t('openBacklog'), value: s.backlog, live: true }),
+      metricCard({ label: t('unassigned'), value: s.unassigned, live: true }),
+      metricCard({ label: t('oldestOpen'), value: s.oldestDays + 'd', live: true }),
+    ]);
+  }
 
   // ── INCIDENTS ───────────────────────────────────────────────
   async function renderIncidentsKpi(host, period, cur, prev, status = 'all') {
@@ -1198,6 +1242,12 @@
       countRows(withStatus(db.from('incidents').select('id', { count: 'exact', head: true }).eq('status', 'resolved').gte('resolved_at', prev.start).lt('resolved_at', prev.end))),
     ]);
 
+    // ── Right now (live, point-in-time workload) ──
+    host.append(el('div', { class: 'kpi-section-h' }, t('rightNow')));
+    host.append(liveStateCards(await liveIncidentState()));
+
+    // ── In this period (vs the previous equal-length window) ──
+    host.append(el('div', { class: 'kpi-section-h' }, t('inThisPeriod')));
     host.append(el('div', { class: 'kpi-grid' }, [
       metricCard({ label: t('reported'), value: repCur, delta: pctChange(repCur, repPrev), good: isGood(repCur, repPrev, 'down') }),
       metricCard({ label: t('resolved'), value: resCur, delta: pctChange(resCur, resPrev), good: isGood(resCur, resPrev, 'up') }),
@@ -1220,6 +1270,20 @@
     host.append(el('div', { class: 'kpi-card', style: 'margin-top:14px' }, [
       el('div', { class: 'kpi-label', style: 'margin-bottom:10px' }, t('reportsByWorstConsequence')), bar, legend,
     ]));
+
+    // ── Latest activity — incidents filed + resolved in this window ──
+    const feedRows = (q) => q.then(r => r.data || [], () => []);
+    const [incsReported, incsResolved] = await Promise.all([
+      feedRows(withStatus(db.from('incidents').select('report_type,is_anonymous,reporter_id,created_at'))
+        .gte('created_at', cur.start).lt('created_at', cur.end).order('created_at', { ascending: false }).limit(14)),
+      feedRows(withStatus(db.from('incidents').select('report_type,assigned_to,resolved_at').eq('status', 'resolved'))
+        .gte('resolved_at', cur.start).lt('resolved_at', cur.end).order('resolved_at', { ascending: false }).limit(14)),
+    ]);
+    const reportTitle = { incident: t('actIncidentReported'), hazard: t('actHazardReported'), suggestion: t('actSuggestionSent') };
+    const ev = [];
+    incsReported.forEach(r => r.created_at && ev.push({ ts: +new Date(r.created_at), type: r.report_type || 'incident', ico: '📣', title: reportTitle[r.report_type || 'incident'] || reportTitle.incident, sub: r.is_anonymous ? t('anonymous') : whoName(r.reporter_id) }));
+    incsResolved.forEach(r => r.resolved_at && ev.push({ ts: +new Date(r.resolved_at), type: 'resolved', ico: '✅', title: t('actReportResolved'), sub: `${typeLabel(r.report_type)}${r.assigned_to ? ' · ' + whoName(r.assigned_to) : ''}` }));
+    renderEventFeed(host, ev);
   }
 
   // ── CHECKLISTS (quota model) ────────────────────────────────
@@ -1293,6 +1357,29 @@
       drillHost.append(card);
     };
 
+    // ── Right now (live, today's quota state for the selected scope) ──
+    const todayB = todayBounds();
+    const todayDow = new Date().getDay();
+    const dueToday = scope.reduce((s, c) => {
+      const set = new Set((c.quota_weekdays || [0, 1, 2, 3, 4, 5, 6]).map(Number));
+      return s + (set.has(todayDow) ? c.daily_quota : 0);
+    }, 0);
+    const doneTodayQ = db.from('checklist_runs').select('id', { count: 'exact', head: true })
+      .eq('completed', true).gte('submitted_at', todayB.start).lt('submitted_at', todayB.end);
+    const doneToday = num0(await countRows(scopeIds.length
+      ? doneTodayQ.in('checklist_id', scopeIds)
+      : doneTodayQ.eq('checklist_id', '00000000-0000-0000-0000-000000000000')));
+    const pendingToday = Math.max(0, dueToday - doneToday);
+    host.append(el('div', { class: 'kpi-section-h' }, t('rightNow')));
+    host.append(el('div', { class: 'kpi-grid' }, [
+      metricCard({ label: t('activeChecklists'), value: scope.length, live: true }),
+      metricCard({ label: t('dueToday'), value: dueToday, live: true }),
+      metricCard({ label: t('completedToday'), value: doneToday, live: true }),
+      metricCard({ label: t('pendingToday'), value: pendingToday, live: true }),
+    ]));
+
+    // ── In this period (vs the previous equal-length window) ──
+    host.append(el('div', { class: 'kpi-section-h' }, t('inThisPeriod')));
     host.append(el('div', { class: 'kpi-grid' }, [
       metricCard({ label: t('checklistsCompletedInPeriod'), value: completions, delta: pctChange(completions, evPrev.length), good: isGood(completions, evPrev.length, 'up') }),
       metricCard({ label: t('completionRate'), value: rateCur + '%', delta: pctChange(rateCur, ratePrev), good: isGood(rateCur, ratePrev, 'up') }),
@@ -1371,6 +1458,13 @@
 
     split.append(latestCard, expCard);
     host.append(split);
+
+    // ── Latest activity — checklist submissions in this window/scope ──
+    const feedEv = periodRuns.slice(0, 18).map(r => ({
+      ts: +new Date(r.submitted_at), type: 'checklist', ico: '☑️',
+      title: t('actChecklistDone'), sub: `${titleOf(r.checklist_id)} · ${userName(r.user_id)}`,
+    }));
+    renderEventFeed(host, feedEv);
   }
 
   async function renderAdminPerformanceKpi(host, adminId) {
@@ -1414,6 +1508,13 @@
       ? stats.reduce((a, s) => ({ assigned: a.assigned + s.assigned, completed: a.completed + s.completed, completedToday: a.completedToday + s.completedToday }), { assigned: 0, completed: 0, completedToday: 0 })
       : (stats.find(x => x.id === adminId) || { assigned: 0, completed: 0, completedToday: 0 });
     const completionRate = pick.assigned ? Math.round(pick.completed / pick.assigned * 100) : 0;
+
+    // ── Right now (live, point-in-time workload waiting on admins) ──
+    host.append(el('div', { class: 'kpi-section-h' }, t('rightNow')));
+    host.append(liveStateCards(await liveIncidentState()));
+
+    // ── Workload (totals for the selected admin / everyone) ──
+    host.append(el('div', { class: 'kpi-section-h' }, t('kpiWorkload')));
     host.append(el('div', { class: 'kpi-grid' }, [
       metricCard({ label: t('assignedReports'), value: pick.assigned }),
       metricCard({ label: t('completedTotal'), value: pick.completed }),
@@ -1437,6 +1538,19 @@
       ]));
     });
     host.append(chart);
+
+    // ── Latest activity — most recent resolutions by admins ──
+    const feedRows = (q) => q.then(r => r.data || [], () => []);
+    let rq = db.from('incidents').select('report_type,assigned_to,resolved_at')
+      .eq('status', 'resolved').not('resolved_at', 'is', null).not('assigned_to', 'is', null)
+      .order('resolved_at', { ascending: false }).limit(18);
+    if (adminId !== 'all') rq = rq.eq('assigned_to', adminId);
+    const resolvedRows = await feedRows(rq);
+    const ev = resolvedRows.map(r => ({
+      ts: +new Date(r.resolved_at), type: 'resolved', ico: '✅',
+      title: t('actReportResolved'), sub: `${typeLabel(r.report_type)} · ${whoName(r.assigned_to)}`,
+    }));
+    renderEventFeed(host, ev);
   }
 
   // ── shared incident helpers ─────────────────────────────────
@@ -4866,6 +4980,200 @@
       el('div', {}, title), el('div', { class: 'sub' }, sub)]);
   }
   function truncate(s, n) { return s && s.length > n ? s.slice(0, n) + '…' : (s || ''); }
+
+  // ── COMMUNICATIONS (admin: compose News / private Messages, see read receipts) ──
+  // The set of users a communication targets — drives the read-statistic denominator.
+  function communicationTargetUsers(comm) {
+    if (comm.kind === 'message') return [...new Set(comm.recipient_ids || [])];
+    if (comm.audience === 'all') return state.profiles.map(p => p.id);
+    const want = new Set(comm.department_ids || []);
+    return state.profiles.filter(p => departmentIdsForUser(p.id).some(d => want.has(d))).map(p => p.id);
+  }
+  function commAudienceText(comm) {
+    if (comm.kind === 'message') {
+      const names = (comm.recipient_ids || []).map(id => { const p = state.profiles.find(x => x.id === id); return p ? labelOf(p) : null; }).filter(Boolean);
+      return names.length <= 2 ? (names.join(', ') || t('recipients')) : `${names.length} ${t('recipients').toLowerCase()}`;
+    }
+    if (comm.audience === 'all') return t('audienceEveryone');
+    const names = (comm.department_ids || []).map(id => (state.departments.find(d => d.id === id) || {}).name).filter(Boolean);
+    return names.join(', ') || t('sentToDepartments');
+  }
+  const commFileIcon = (a) => /image\//.test(a.type || '') ? '🖼️' : /\.pdf$/i.test(a.name || '') ? '📕' : /\.(xlsx?|csv)$/i.test(a.name || '') ? '📊' : '📄';
+
+  function communicationsView() {
+    return {
+      title: t('communications'), tab: 'groups', side: 'communications',
+      async render(app) {
+        await loadProfiles(); await loadDepartments(); await loadUserDepartments();
+        app.append(el('div', { class: 'card section-head comm-compose-bar' }, [
+          el('h3', {}, t('communications')),
+          el('div', { class: 'comm-compose-actions' }, [
+            el('button', { class: 'btn btn-primary', onclick: () => go(communicationCompose('news')) }, '＋ ' + t('newNews')),
+            el('button', { class: 'btn', onclick: () => go(communicationCompose('message')) }, '＋ ' + t('newMessage')),
+          ]),
+        ]));
+        const res = await db.from('communications').select('*').order('created_at', { ascending: false });
+        if (res.error) { app.append(emptyState(t('communications'), t('runCommunicationsMigration'))); return; }
+        const comms = res.data || [];
+        const ids = comms.map(c => c.id);
+        const { data: readRows = [] } = ids.length
+          ? await db.from('communication_reads').select('communication_id,user_id').in('communication_id', ids)
+          : { data: [] };
+        const readByComm = new Map();
+        (readRows || []).forEach(r => {
+          if (!readByComm.has(r.communication_id)) readByComm.set(r.communication_id, new Set());
+          readByComm.get(r.communication_id).add(r.user_id);
+        });
+        const thumbs = await signedUrls('communications', comms.map(c => c.image_path), 600);
+        renderCommAdminSection(app, t('news'), comms.filter(c => c.kind === 'news'), readByComm, thumbs);
+        renderCommAdminSection(app, t('messages'), comms.filter(c => c.kind === 'message'), readByComm, thumbs);
+      },
+    };
+  }
+
+  function renderCommAdminSection(app, title, list, readByComm, thumbs) {
+    app.append(el('div', { class: 'kpi-section-h' }, title));
+    if (!list.length) { app.append(el('div', { class: 'kpi-card' }, el('p', { class: 'miss-sub' }, t('noCommunications')))); return; }
+    const wrap = el('div', { class: 'comm-admin-list' });
+    list.forEach(c => {
+      const target = communicationTargetUsers(c);
+      const read = readByComm.get(c.id) || new Set();
+      const readCount = target.filter(id => read.has(id)).length;
+      const url = thumbs.get(c.image_path);
+      wrap.append(el('div', { class: 'comm-admin-row', onclick: () => go(communicationDetailAdmin(c)) }, [
+        el('div', { class: 'comm-thumb' }, url ? el('img', { src: url, alt: '' }) : el('span', { class: 'comm-thumb-ico' }, c.kind === 'news' ? '📰' : '✉')),
+        el('div', { class: 'comm-main' }, [
+          el('div', { class: 'comm-title' }, c.title || (c.body || '').slice(0, 60) || (c.kind === 'news' ? t('news') : t('messages'))),
+          el('div', { class: 'comm-sub' }, `${commAudienceText(c)} · ${fmt(c.created_at)}`),
+        ]),
+        el('span', { class: 'comm-read-pill' }, t('readByCount', { read: readCount, total: target.length })),
+      ]));
+    });
+    app.append(wrap);
+  }
+
+  function communicationDetailAdmin(comm) {
+    return {
+      title: comm.title || (comm.kind === 'news' ? t('news') : t('messages')), tab: 'groups', side: 'communications',
+      async render(app) {
+        await loadProfiles();
+        const media = await signedUrls('communications', [comm.image_path, ...(comm.attachments || []).map(a => a.path)], 600);
+        const card = el('div', { class: 'card comm-detail' });
+        if (comm.image_path && media.get(comm.image_path)) card.append(el('img', { src: media.get(comm.image_path), class: 'comm-detail-img', alt: '' }));
+        if (comm.title) card.append(el('h2', { class: 'comm-detail-title' }, comm.title));
+        if (comm.body) card.append(el('p', { class: 'comm-detail-body' }, comm.body));
+        if ((comm.attachments || []).length) {
+          card.append(el('div', { class: 'comm-attach-list' }, comm.attachments.map(a =>
+            el('button', { class: 'btn btn-ghost comm-attach', onclick: () => { const u = media.get(a.path); if (u) window.open(u, '_blank'); } }, [
+              el('span', {}, commFileIcon(a)), el('span', {}, a.name || 'file'),
+            ]))));
+        }
+        app.append(card);
+
+        const target = communicationTargetUsers(comm);
+        const { data: readRows = [] } = await db.from('communication_reads').select('user_id,read_at').eq('communication_id', comm.id);
+        const readMap = new Map((readRows || []).map(r => [r.user_id, r.read_at]));
+        const readCount = target.filter(id => readMap.has(id)).length;
+        app.append(el('div', { class: 'kpi-section-h' }, `${t('readReceipts')} · ${t('readByCount', { read: readCount, total: target.length })}`));
+        const listHost = el('div', { class: 'comm-read-list' });
+        target.map(id => state.profiles.find(p => p.id === id)).filter(Boolean)
+          .sort((a, b) => (readMap.has(b.id) ? 1 : 0) - (readMap.has(a.id) ? 1 : 0) || labelOf(a).localeCompare(labelOf(b)))
+          .forEach(p => {
+            const at = readMap.get(p.id);
+            listHost.append(el('div', { class: 'comm-read-row' }, [
+              el('span', { class: 'grow' }, labelOf(p)),
+              at ? el('span', { class: 'time-pill' }, fmt(at)) : el('span', { class: 'pill' }, t('notYetRead')),
+            ]));
+          });
+        if (!target.length) listHost.append(el('p', { class: 'miss-sub' }, t('notYetRead')));
+        app.append(listHost);
+      },
+    };
+  }
+
+  function communicationCompose(kind) {
+    const isNews = kind === 'news';
+    return {
+      title: isNews ? t('newNews') : t('newMessage'), tab: 'groups', side: 'communications',
+      async render(app) {
+        await loadProfiles(); await loadDepartments(); await loadUserDepartments();
+        const title = el('input', { type: 'text', placeholder: t('commTitle') });
+        const body = el('textarea', { placeholder: t('commBody') });
+        const image = el('input', { type: 'file', accept: 'image/*' });
+        const files = el('input', { type: 'file', multiple: 'multiple' });
+
+        const audSel = el('select', { class: 'kpi-filter' }, [opt('all', t('audienceEveryone')), opt('department', t('audienceDepartments'))]);
+        const deptBox = el('div', { class: 'comm-pick hidden' });
+        state.departments.forEach(d => deptBox.append(el('label', { class: 'check-item' }, [el('input', { type: 'checkbox', value: d.id }), el('span', {}, d.name)])));
+        audSel.addEventListener('change', () => deptBox.classList.toggle('hidden', audSel.value !== 'department'));
+
+        const userBox = el('div', { class: 'comm-pick' });
+        state.profiles.filter(p => p.id !== state.profile.id).forEach(p =>
+          userBox.append(el('label', { class: 'check-item' }, [el('input', { type: 'checkbox', value: p.id }), el('span', {}, labelOf(p))])));
+
+        const sendBtn = el('button', { class: 'btn btn-primary comm-send', onclick: send }, t('send'));
+        app.append(el('div', { class: 'card' }, [
+          labeled(t('commTitle'), title),
+          labeled(t('commBody'), body),
+          labeled(t('commImage'), image),
+          labeled(t('commAttachments'), files),
+          isNews
+            ? el('div', {}, [labeled(t('broadcastAudience'), audSel), deptBox])
+            : el('div', {}, [el('div', { class: 'muted', style: 'margin:6px 0 4px' }, t('selectRecipients')), userBox]),
+          sendBtn,
+        ]));
+
+        async function send() {
+          const titleVal = title.value.trim();
+          const bodyVal = body.value.trim();
+          if (!titleVal && !bodyVal) return toast(t('messageBodyRequired'), 'err');
+          let audience = 'all', departmentIds = [], recipientIds = [];
+          if (isNews) {
+            audience = audSel.value;
+            if (audience === 'department') {
+              departmentIds = [...deptBox.querySelectorAll('input:checked')].map(x => x.value);
+              if (!departmentIds.length) return toast(t('pickAtLeastOneDepartment'), 'err');
+            }
+          } else {
+            audience = 'users';
+            recipientIds = [...userBox.querySelectorAll('input:checked')].map(x => x.value);
+            if (!recipientIds.length) return toast(t('pickAtLeastOneRecipient'), 'err');
+          }
+          sendBtn.disabled = true; sendBtn.textContent = t('sending');
+          try {
+            const uid = () => (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`);
+            const safe = (n) => (n || 'file').replace(/[^\w.\-]+/g, '_');
+            let imagePath = null;
+            if (image.files[0]) {
+              const f = image.files[0];
+              const path = `${kind}/${uid()}-${safe(f.name)}`;
+              const { error } = await db.storage.from('communications').upload(path, f);
+              if (error) throw error;
+              imagePath = path;
+            }
+            const attachments = [];
+            for (const f of [...files.files]) {
+              const path = `${kind}/${uid()}-${safe(f.name)}`;
+              const { error } = await db.storage.from('communications').upload(path, f);
+              if (error) throw error;
+              attachments.push({ path, name: f.name, type: f.type, size: f.size });
+            }
+            const { error } = await db.from('communications').insert({
+              author_id: state.profile.id, kind, title: titleVal || null, body: bodyVal || null,
+              image_path: imagePath, attachments, audience,
+              department_ids: departmentIds, recipient_ids: recipientIds,
+            });
+            if (error) throw error;
+            toast(t('communicationSent'));
+            go(communicationsView(), { reset: true });
+          } catch (err) {
+            sendBtn.disabled = false; sendBtn.textContent = t('send');
+            toast(err.message || String(err), 'err');
+          }
+        }
+      },
+    };
+  }
 
   function openModal(title, build) {
     const bg = el('div', { class: 'modal-bg', onclick: e => { if (e.target === bg) close(); } });
