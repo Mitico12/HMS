@@ -425,58 +425,12 @@
     });
   }
 
-  function renderSortableHomeTiles(host, cards, storageKey) {
-    const saved = JSON.parse(localStorage.getItem(storageKey) || '[]');
-    const rank = new Map(saved.map((id, idx) => [id, idx]));
-    cards.sort((a, b) => (rank.get(a.id) ?? 999) - (rank.get(b.id) ?? 999));
-    let dragIdx = null;
-    let didDrag = false;
-    const draw = () => {
-      host.innerHTML = '';
-      cards.forEach((card, idx) => {
-        const handle = el('span', { class: 'drag-handle tile-drag', draggable: 'true', title: t('dragReorder') }, '⠿');
-        const tile = el('button', { class: 'tile', onclick: () => {
-          if (didDrag) { didDrag = false; return; }
-          card.open();
-        } }, [
-          handle,
-          el('span', { class: 'glyph' }, card.glyph),
-          el('div', {}, [
-            el('div', { class: 't-name' }, card.name),
-            el('div', { class: 't-meta' }, card.meta),
-          ]),
-        ]);
-        if (card.flag) tile.append(el('span', { class: 'tile-flag', title: t('assignedToComplete') }, '⚑'));
-        handle.addEventListener('click', e => e.stopPropagation());
-        handle.addEventListener('dragstart', e => {
-          dragIdx = idx;
-          didDrag = true;
-          e.dataTransfer.effectAllowed = 'move';
-          e.dataTransfer.setData('text/plain', card.id);
-          tile.classList.add('dragging');
-        });
-        handle.addEventListener('dragend', () => { dragIdx = null; tile.classList.remove('dragging'); });
-        tile.addEventListener('dragover', e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; });
-        tile.addEventListener('drop', e => {
-          e.preventDefault();
-          if (dragIdx === null || dragIdx === idx) return;
-          const [moved] = cards.splice(dragIdx, 1);
-          cards.splice(idx, 0, moved);
-          localStorage.setItem(storageKey, JSON.stringify(cards.map(c => c.id)));
-          dragIdx = null;
-          draw();
-        });
-        host.append(tile);
-      });
-    };
-    draw();
-  }
+
 
   async function renderUserKpiDashboard(app) {
     const periodKey = 'userKpiPeriod';
     const period = kpiPeriod(periodKey);
     const { start, end } = periodBounds(period);
-    const periodText = periodLabel(period);
     const completed = await countRows(db.from('checklist_runs').select('id', { count: 'exact', head: true })
       .eq('user_id', state.profile.id).eq('completed', true).gte('submitted_at', start).lt('submitted_at', end));
     const todo = await loadWorkerChecklistTodo();
@@ -484,8 +438,11 @@
       { id: 'completed', label: t('checklistsCompletedInPeriod'), value: completed },
       { id: 'todo', label: t('checklistsToDo'), value: todo.items.length },
     ];
-    renderKpiToolbar(app, 'userKpiVisible', periodKey, cards, () => go(homeView(), { reset: true }));
-    renderSortableKpiGrid(app, 'userKpiOrder', visibleKpiCards(cards, 'userKpiVisible'), { periodText });
+    renderKpiToolbar(app, 'userKpiVisible', cards, () => go(homeView(), { reset: true }));
+    renderSortableKpiGrid(app, 'userKpiOrder', visibleKpiCards(cards, 'userKpiVisible'), {
+      periodKey,
+      refreshHome: () => go(homeView(), { reset: true })
+    });
     renderWorkerChecklistTodo(app, todo);
   }
 
@@ -603,8 +560,7 @@
     return selected === 'all' ? cards : cards.filter(card => card.id === selected);
   }
 
-  function renderKpiToolbar(host, filterKey, periodKey, cards, refreshHome) {
-    const period = kpiPeriod(periodKey);
+  function renderKpiToolbar(host, filterKey, cards, refreshHome) {
     const filter = el('select', { class: 'kpi-filter', onchange: e => {
       localStorage.setItem(filterKey, e.target.value);
       refreshHome();
@@ -614,29 +570,9 @@
     ]);
     const selected = localStorage.getItem(filterKey) || 'all';
     filter.value = cards.some(card => card.id === selected) ? selected : 'all';
-    const from = el('input', { type: 'date', value: period.from });
-    const until = el('input', { type: 'date', value: period.until });
-    const panel = el('div', { class: 'kpi-date-panel hidden' }, [
-      labeled(t('dateFrom'), from),
-      labeled(t('dateUntil'), until),
-      el('div', { class: 'kpi-date-actions' }, [
-        el('button', { class: 'btn btn-ghost', onclick: () => {
-          localStorage.removeItem(periodKey);
-          refreshHome();
-        } }, t('today')),
-        el('button', { class: 'btn btn-primary', onclick: () => saveKpiPeriod(periodKey, from.value, until.value, refreshHome) }, t('apply')),
-      ]),
-    ]);
-    const calendar = el('button', { class: 'iconbtn kpi-calendar-btn', title: t('dashboardPeriod'), onclick: () => {
-      panel.classList.toggle('hidden');
-    } }, '📅');
-    host.append(el('div', { class: 'kpi-control-wrap' }, [
-      el('div', { class: 'kpi-toolbar' }, [
-        el('div', { class: 'kpi-select-wrap' }, filter),
-        el('div', { class: 'kpi-period-chip' }, periodLabel(period)),
-        calendar,
-      ]),
-      panel,
+
+    host.append(el('div', { class: 'kpi-toolbar-row' }, [
+      el('div', { class: 'kpi-select-wrap' }, filter),
     ]));
   }
 
@@ -677,7 +613,7 @@
     const draw = () => {
       grid.innerHTML = '';
       cards.forEach((card, idx) => {
-        const node = kpiCard(card.label, card.value, options.periodText);
+        const node = kpiCard(card, card.value, options);
         node.setAttribute('draggable', 'true');
         node.addEventListener('dragstart', e => {
           dragIdx = idx;
@@ -708,12 +644,53 @@
     host.append(grid);
   }
 
-  function kpiCard(label, value, periodText = '') {
-    return el('div', { class: 'kpi-card', title: t('dashboardPeriod') }, [
+  function kpiCard(card, value, options = {}) {
+    if (card.id === 'completed' && options.periodKey && options.refreshHome) {
+      const period = kpiPeriod(options.periodKey);
+      const from = el('input', { type: 'date', value: period.from });
+      const until = el('input', { type: 'date', value: period.until });
+      const panel = el('div', { class: 'kpi-date-panel hidden' }, [
+        labeled(t('dateFrom'), from),
+        labeled(t('dateUntil'), until),
+        el('div', { class: 'kpi-date-actions' }, [
+          el('button', { class: 'btn btn-ghost btn-sm', onclick: e => {
+            e.stopPropagation();
+            localStorage.removeItem(options.periodKey);
+            options.refreshHome();
+          } }, t('today')),
+          el('button', { class: 'btn btn-primary btn-sm', onclick: e => {
+            e.stopPropagation();
+            saveKpiPeriod(options.periodKey, from.value, until.value, options.refreshHome);
+          } }, t('apply')),
+        ]),
+      ]);
+
+      const calendarBtn = el('button', { class: 'iconbtn kpi-card-calendar-btn', title: t('dashboardPeriod'), onclick: e => {
+        e.stopPropagation();
+        panel.classList.toggle('hidden');
+      } }, '📅');
+
+      const periodText = periodLabel(period);
+      const periodChip = el('span', { class: 'kpi-period-chip clickable', onclick: e => {
+        e.stopPropagation();
+        panel.classList.toggle('hidden');
+      } }, periodText);
+
+      return el('div', { class: 'kpi-card kpi-card-completed', style: 'position: relative;' }, [
+        el('span', { class: 'drag-handle kpi-drag', title: t('dragReorder') }, '⠿'),
+        el('div', { class: 'kpi-card-header' }, [
+          el('div', { class: 'kpi-value' }, value == null ? '-' : String(value)),
+          el('div', { class: 'kpi-card-controls' }, [periodChip, calendarBtn]),
+        ]),
+        el('div', { class: 'kpi-label' }, card.label),
+        panel,
+      ]);
+    }
+
+    return el('div', { class: 'kpi-card' }, [
       el('span', { class: 'drag-handle kpi-drag', title: t('dragReorder') }, '⠿'),
       el('div', { class: 'kpi-value' }, value == null ? '-' : String(value)),
-      el('div', { class: 'kpi-label' }, label),
-      periodText ? el('div', { class: 'kpi-period' }, periodText) : null,
+      el('div', { class: 'kpi-label' }, card.label),
     ]);
   }
 
