@@ -24,12 +24,15 @@
 
   <script type="module">
     import { db, currentProfile, el, $, toast, initTheme, themeToggleButton, initLanguage, languageSelect, t } from './config.js';
+    import { navigateShell, replaceShell, setupPageTransition, warmAppShell } from './app-shell.js';
 
     initTheme();
     initLanguage();
+    setupPageTransition();
+    warmAppShell();
     const screen = $('#screen');
     const isAdmin = (profile) => ['admin', 'super_admin'].includes(profile?.role);
-    const openPage = (page) => location.replace(new URL(page, location.href).href);
+    const openPage = (page) => replaceShell(page);
     const continueFor = (profile) => isAdmin(profile) ? showAdminChoice(profile) : openPage('./user.html');
 
     (async function boot() {
@@ -57,7 +60,7 @@
           form,
           el('div', { class: 'launch-foot muted' }, [
             document.createTextNode(t('needAccount')),
-            el('a', { href: './user.html' }, t('createOne')),
+            el('a', { href: './user.html', onclick: e => { e.preventDefault(); navigateShell('./user.html'); } }, t('createOne')),
           ]),
         ])
       ));

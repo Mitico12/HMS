@@ -98,6 +98,32 @@ body:has(.app-shell) {
   padding: 88px 0 36px;
 }
 
+html.page-ready body {
+  transition: opacity .16s ease, transform .16s ease, background-color .2s ease, color .2s ease;
+}
+
+html.page-arriving body {
+  opacity: 0;
+  transform: translateY(6px);
+}
+
+html.page-leaving body {
+  opacity: 0;
+  transform: translateY(-4px);
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html.page-ready body {
+    transition: none;
+  }
+
+  html.page-arriving body,
+  html.page-leaving body {
+    transform: none;
+  }
+}
+
 :root[data-theme="dark"] body {
   background: linear-gradient(180deg, #111c31 0%, var(--bg) 48%, #0b1222 100%);
 }
@@ -126,6 +152,126 @@ h1, h2, h3, p {
   max-width: 1180px;
   margin: 0 auto 0 300px;
   padding: 0 32px;
+}
+
+.route-surface {
+  will-change: opacity, transform;
+  transition: opacity .3s cubic-bezier(.21, .6, .35, 1), transform .3s cubic-bezier(.21, .6, .35, 1);
+}
+
+.route-surface.route-forward:not(.route-live) {
+  opacity: 0;
+  transform: translateX(10px);
+}
+
+.route-surface.route-back:not(.route-live) {
+  opacity: 0;
+  transform: translateX(-10px);
+}
+
+.route-surface.route-replace:not(.route-live) {
+  opacity: 0;
+  transform: translateY(6px);
+}
+
+/* Refresh is an in-place data reload, not a navigation: a soft, transform-free
+   fade. No scale — that caused subpixel shimmer ("vibration") on every reload. */
+.route-surface.route-refresh:not(.route-live) {
+  opacity: .6;
+  transform: none;
+  transition: opacity .18s ease;
+}
+
+/* #app is the stable stage; the animated surface and the skeleton both live
+   inside it (the surface is parked at display:none while the skeleton shows). */
+.route-stage {
+  position: relative;
+}
+
+.route-skeleton {
+  display: grid;
+  gap: 14px;
+  transition: opacity .2s ease;
+}
+
+/* On reveal the skeleton fades fully out before the real content animates in —
+   a clean sequential swap, so the incoming items never displace it. */
+.route-skeleton.route-skeleton-leaving {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.skeleton-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  gap: 14px;
+}
+
+.skeleton-card {
+  min-height: 148px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--paper) 82%, var(--paper-2));
+  padding: 16px;
+  display: grid;
+  gap: 12px;
+  align-content: start;
+  box-shadow: var(--shadow-soft);
+}
+
+.skeleton-line,
+.skeleton-block {
+  overflow: hidden;
+  border-radius: 999px;
+  background:
+    linear-gradient(100deg, transparent 0%, color-mix(in srgb, white 34%, transparent) 48%, transparent 96%),
+    color-mix(in srgb, var(--line) 72%, var(--paper));
+  background-size: 220% 100%, 100% 100%;
+  animation: skeleton-sheen 1.05s ease-in-out infinite;
+}
+
+.skeleton-line {
+  height: 13px;
+  width: 72%;
+}
+
+.skeleton-line.short {
+  width: 46%;
+}
+
+.skeleton-title {
+  width: min(320px, 62%);
+  height: 18px;
+}
+
+.skeleton-block {
+  height: 68px;
+  border-radius: 8px;
+}
+
+@keyframes skeleton-sheen {
+  from { background-position: 180% 0, 0 0; }
+  to { background-position: -60% 0, 0 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .route-surface {
+    transition: none;
+    transform: none !important;
+  }
+
+  .route-surface:not(.route-live) {
+    opacity: 1;
+  }
+
+  .skeleton-line,
+  .skeleton-block {
+    animation: none;
+  }
+
+  .route-skeleton {
+    transition: none;
+  }
 }
 
 .sidebar {
@@ -1804,6 +1950,11 @@ input[type="checkbox"]:focus, input[type="radio"]:focus {
 .cl-split { display: grid; grid-template-columns: 1.4fr 1fr; gap: 14px; margin-top: 14px; align-items: start; }
 .cl-split .kpi-card { margin: 0; }
 @media (max-width: 760px) { .cl-split { grid-template-columns: 1fr; } }
+
+/* Even split used in the user profile (assigned ⟷ latest submitted). */
+.profile-split { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 4px; align-items: start; }
+.profile-split .kpi-card { margin: 0; }
+@media (max-width: 760px) { .profile-split { grid-template-columns: 1fr; } }
 .exp-row { padding: 9px 0; border-top: 1px solid var(--line); cursor: pointer; }
 .exp-row:first-of-type { border-top: 0; }
 .exp-head { display: flex; align-items: baseline; gap: 8px; }

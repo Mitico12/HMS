@@ -48,9 +48,12 @@
   import { db, requireSession, currentProfile, el, $, fmt, toast, newAuthClient, initTheme, themeToggleButton, initLanguage, languageSelect, currentLanguage, t,
            roleRank, isAdminPlus, isSuperPlus, isSysadmin, canViewChecklistLogs, canAccessVarsling, isSuspended } from './config.js';
   import { coursesGroupView, courseBuild, courseResults } from './courses.js';
+  import { navigateShell, setupPageTransition, warmAppShell } from './app-shell.js';
 
   initTheme();
   initLanguage();
+  setupPageTransition();
+  warmAppShell();
   const screen = $('#screen');
   const state = { profile: null, groups: [], profiles: [], departments: [], userDepartments: new Map(), groupDeleteRequests: [] };
   const DATA_TTL = 30000;
@@ -471,7 +474,7 @@
         el('button', { class: 'btn btn-ghost btn-block', style: 'margin-top:12px', onclick: signOut }, 'Sign out')
       )));
   }
-  function goIndex() { location.href = new URL('./index.html', location.href).href; }
+  function goIndex() { navigateShell('./index.html'); }
   async function signOut() { await db.auth.signOut(); goIndex(); }
 
   // ── app shell ──────────────────────────────────────────
@@ -531,7 +534,7 @@
           el('span', { class: 'workspace-role' }, roleName(state.profile.role)),
         ]),
         el('div', { class: 'workspace-switch' }, [
-          el('button', { onclick: () => location.href = new URL('./user.html', location.href).href }, t('workerApp')),
+          el('button', { onclick: () => navigateShell('./user.html') }, t('workerApp')),
           el('button', { class: 'active', onclick: () => go(homeView(), { reset: true }) }, t('adminConsole')),
         ]),
       ]),
@@ -635,14 +638,21 @@
   }
 
   // ── view stack / router ────────────────────────────────
+  let routeMotion = 'forward';
+  let paintToken = 0;
+  const ROUTE_MIN_LOAD = 320; // ms the skeleton stays up on a group switch, so it never flashes
   function go(view, { reset = false } = {}) {
+    routeMotion = reset ? 'replace' : 'forward';
     if (reset) viewStack.length = 0;
     viewStack.push(view);
     paint();
   }
-  function back() { if (viewStack.length > 1) { viewStack.pop(); paint(); } }
+  function back() { if (viewStack.length > 1) { routeMotion = 'back'; viewStack.pop(); paint(); } }
 
-  function paint() {
+  async function paint() {
+    const token = ++paintToken;
+    const motion = routeMotion;
+    routeMotion = 'forward';
     const view = viewStack[viewStack.length - 1];
     const bar = $('#topbar'); bar.innerHTML = '';
     bar.append(el('button', { class: 'iconbtn mobile-menu-btn', title: 'Open navigation', 'aria-label': 'Open navigation', 'aria-expanded': String(mobileSidebarOpen), onclick: toggleMobileSidebar }, '\u2630'));
@@ -653,13 +663,72 @@
     bar.append(themeToggleButton());
     bar.append(el('button', { class: 'iconbtn', title: t('signOut'), onclick: signOut }, '⏻'));
     if (view.action) (Array.isArray(view.action) ? view.action : [view.action]).filter(Boolean).forEach(a => bar.append(a));
-    const app = $('#app'); app.innerHTML = ''; app.className = 'wrap';
+    const app = $('#app'); app.innerHTML = ''; app.className = 'wrap route-stage';
+    const surface = el('div', { class: `route-surface route-${motion}` });
+    app.append(surface);
     renderBotnav(view.tab || 'groups');
     renderSidebar(view.side || view.tab || 'analytics');
     setMobileSidebar(mobileSidebarOpen);
-    view.render(app);
+
+    // Entering a group shows the skeleton immediately and holds it for a minimum
+    // beat (ROUTE_MIN_LOAD) so the transition reads as deliberate, never a flash.
+    // Other views only fall back to a skeleton if they're still empty after 90ms.
+    // The skeleton lives outside the surface so the surface's opacity gate can't
+    // hide it; the surface is parked (display:none) while it loads.
+    let skeleton = null;
+    const enterGroup = view.minLoad && motion !== 'refresh';
+    const showSkeleton = () => {
+      if (token !== paintToken || skeleton || surface.childElementCount) return;
+      skeleton = routeSkeleton();
+      surface.style.display = 'none';
+      app.append(skeleton);
+    };
+    if (enterGroup) showSkeleton();
+    const skeletonTimer = enterGroup ? null : setTimeout(showSkeleton, 90);
+    const startedAt = performance.now();
+    try {
+      const rendered = view.render(surface);
+      if (rendered && typeof rendered.then === 'function') await rendered;
+    } finally {
+      if (skeletonTimer) clearTimeout(skeletonTimer);
+      if (token === paintToken) {
+        const reduceMotion = !!window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches;
+        if (enterGroup && skeleton && !reduceMotion) {
+          const elapsed = performance.now() - startedAt;
+          if (elapsed < ROUTE_MIN_LOAD) await new Promise(r => setTimeout(r, ROUTE_MIN_LOAD - elapsed));
+        }
+        if (token === paintToken) {
+          const reveal = () => {
+            if (token !== paintToken) return;
+            surface.style.display = '';
+            requestAnimationFrame(() => surface.classList.add('route-live'));
+          };
+          if (skeleton) {
+            // Fade the skeleton fully out first, then bring the content in — a clean
+            // sequential swap so the appearing items never push the skeleton around.
+            const sk = skeleton;
+            sk.classList.add('route-skeleton-leaving');
+            setTimeout(() => { sk.remove(); reveal(); }, 210);
+          } else {
+            reveal();
+          }
+        }
+      }
+    }
   }
-  const refresh = () => paint();
+  function refresh() { routeMotion = 'refresh'; paint(); }
+
+  function routeSkeleton() {
+    return el('div', { class: 'route-skeleton', 'aria-hidden': 'true' }, [
+      el('div', { class: 'skeleton-line skeleton-title' }),
+      el('div', { class: 'skeleton-grid' }, Array.from({ length: 6 }, () =>
+        el('div', { class: 'skeleton-card' }, [
+          el('div', { class: 'skeleton-line' }),
+          el('div', { class: 'skeleton-line short' }),
+          el('div', { class: 'skeleton-block' }),
+        ]))),
+    ]);
+  }
 
   // helper: a small labeled field wrapper for forms
   function labeled(text, inputEl, required = false) {
@@ -2185,6 +2254,7 @@
       : g.kind === 'procedures' ? 'procedures'
       : g.kind === 'courses' ? 'courses'
       : `group:${g.id}`;
+    view.minLoad = true; // entering a group runs the deliberate load window
     return view;
   }
 
@@ -4353,6 +4423,7 @@
         const allRequests = await loadProfileChangeRequests(id, false);
         const logs = await loadEmailLog(id);
         const courseStatus = await loadUserCourseStatus(id);
+        const checklistStatus = await loadUserChecklistStatus(id);
 
         app.append(el('div', { class: 'card' }, [
           el('div', { class: 'section-head' }, [el('h3', {}, labelOf(p)), ...accessControls(p)]),
@@ -4379,6 +4450,7 @@
         }
 
         app.append(userCoursesCard(p, courseStatus));
+        app.append(userChecklistsCard(p, checklistStatus));
 
         app.append(el('div', { class: 'card' }, [
           el('h3', {}, 'Pending profile changes'),
@@ -4477,6 +4549,111 @@
     const { error } = await db.from('course_assignments').delete().eq('id', assignmentId);
     if (error) return toast(error.message, 'err');
     toast(t('assignmentRemoved'));
+    refresh();
+  }
+
+  async function loadUserChecklistStatus(userId) {
+    const { data: checklists = [] } = await db.from('checklists')
+      .select('id,title,daily_quota,quota_weekdays').order('title');
+    const { data: runs = [] } = await db.from('checklist_runs')
+      .select('id,checklist_id,submitted_at,completed')
+      .eq('user_id', userId).not('submitted_at', 'is', null)
+      .order('submitted_at', { ascending: false });
+    let assignments = [];
+    const aq = await db.from('checklist_assignments').select('*')
+      .eq('user_id', userId).order('assigned_at', { ascending: false });
+    if (!aq.error) assignments = aq.data || [];
+    return { checklists: checklists || [], runs: runs || [], assignments };
+  }
+
+  function userChecklistsCard(user, status) {
+    const { checklists, runs, assignments } = status;
+    const titleOf = (id) => checklists.find(c => c.id === id)?.title || '—';
+    const today = localDateString(new Date());
+    const completedRuns = runs.filter(r => r.completed);
+    const dailyComplete = completedRuns.filter(r => localDateString(new Date(r.submitted_at)) === today).length;
+    const assignedIds = new Set(assignments.map(a => a.checklist_id));
+    const unassigned = checklists.filter(c => !assignedIds.has(c.id));
+
+    // Left half — what this user has been assigned to do, plus an "assign more" popup.
+    const assignedPanel = el('div', { class: 'kpi-card' });
+    assignedPanel.append(el('div', { class: 'section-head', style: 'margin-bottom:8px' }, [
+      el('div', { class: 'kpi-label' }, 'Assigned to do'),
+      el('button', { class: 'btn btn-ghost btn-sm', onclick: () => openAssignChecklistsModal(user.id, unassigned) }, '+ Assign'),
+    ]));
+    if (!assignments.length) assignedPanel.append(el('p', { class: 'miss-sub' }, 'Nothing assigned yet.'));
+    else assignments.forEach(a => {
+      const last = runs.find(r => r.checklist_id === a.checklist_id);
+      assignedPanel.append(el('div', { class: 'miss-row' }, [
+        el('div', { class: 'miss-top' }, [
+          el('span', { style: 'flex:1' }, titleOf(a.checklist_id)),
+          el('button', { class: 'btn btn-ghost btn-sm', onclick: () => unassignChecklist(a.id) }, 'Remove'),
+        ]),
+        el('p', { class: 'miss-sub' }, `Assigned ${fmt(a.assigned_at)}${last ? ` · last ${fmt(last.submitted_at)}` : ' · no submissions'}`),
+      ]));
+    });
+
+    // Right half — the user's most recent submissions.
+    const latestPanel = el('div', { class: 'kpi-card' });
+    latestPanel.append(el('div', { class: 'kpi-label', style: 'margin-bottom:8px' }, 'Latest submitted'));
+    if (!runs.length) latestPanel.append(el('p', { class: 'miss-sub' }, 'No submissions yet.'));
+    else runs.slice(0, 8).forEach(r => latestPanel.append(el('div', { class: 'miss-row' }, [
+      el('div', { class: 'miss-top' }, [
+        el('span', { style: 'flex:1' }, titleOf(r.checklist_id)),
+        el('span', { class: 'time-pill' }, fmt(r.submitted_at)),
+      ]),
+      el('p', { class: 'miss-sub' }, r.completed ? '✓ Completed' : 'In progress'),
+    ])));
+
+    return el('div', { class: 'card' }, [
+      el('div', { class: 'section-head' }, [
+        el('h3', {}, 'Checklists'),
+        el('span', { class: 'muted' }, `${completedRuns.length} completed`),
+      ]),
+      el('div', { class: 'kpi-grid', style: 'margin-bottom:4px' }, [
+        metricCard({ label: 'Assigned', value: assignments.length }),
+        metricCard({ label: 'Daily complete', value: dailyComplete }),
+        metricCard({ label: 'Total complete', value: completedRuns.length }),
+      ]),
+      el('div', { class: 'profile-split' }, [assignedPanel, latestPanel]),
+    ]);
+  }
+
+  function openAssignChecklistsModal(userId, unassigned) {
+    openModal('Assign checklists', (body, close) => {
+      if (!unassigned.length) {
+        body.append(el('p', { class: 'muted', style: 'margin-top:0' }, 'All checklists are already assigned.'));
+        return;
+      }
+      body.append(el('p', { class: 'muted', style: 'margin-top:0' }, 'Pick the checklists this user should complete.'));
+      const picked = new Set();
+      unassigned.forEach(c => {
+        const box = el('input', { type: 'checkbox', value: c.id });
+        box.addEventListener('change', () => box.checked ? picked.add(c.id) : picked.delete(c.id));
+        body.append(el('label', { class: 'check-item' }, [box, el('span', {}, c.title)]));
+      });
+      body.append(el('button', { class: 'btn btn-primary btn-block', style: 'margin-top:14px', onclick: () => {
+        if (!picked.size) return toast('Choose at least one checklist', 'err');
+        close();
+        assignChecklists(userId, [...picked]);
+      } }, 'Assign selected'));
+    });
+  }
+
+  async function assignChecklists(userId, checklistIds) {
+    if (!checklistIds.length) return toast('Choose at least one checklist', 'err');
+    const rows = checklistIds.map(id => ({ user_id: userId, checklist_id: id, assigned_by: state.profile.id }));
+    const { error } = await db.from('checklist_assignments').insert(rows);
+    if (error) return toast(error.message + ' — run migration_checklist_assignments.sql first.', 'err');
+    toast('Checklist assigned');
+    refresh();
+  }
+
+  async function unassignChecklist(assignmentId) {
+    if (!confirm('Remove this checklist assignment?')) return;
+    const { error } = await db.from('checklist_assignments').delete().eq('id', assignmentId);
+    if (error) return toast(error.message, 'err');
+    toast('Assignment removed');
     refresh();
   }
 

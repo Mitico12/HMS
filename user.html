@@ -24,9 +24,12 @@
   <script type="module">
   import { db, requireSession, el, $, fmt, toast, initTheme, themeToggleButton, initLanguage, languageSelect, t, roleRank } from './config.js';
   import { courseListView } from './courses.js';
+  import { navigateShell, setupPageTransition, warmAppShell } from './app-shell.js';
 
   initTheme();
   initLanguage();
+  setupPageTransition();
+  warmAppShell();
   const screen = $('#screen');
   const state = { profile: null, groups: [], assignedCourseGroups: new Set(), departmentIds: new Set() };
   const DATA_TTL = 30000;
@@ -165,7 +168,7 @@
     render();
     screen.append(el('div', { class: 'auth-screen' }, card));
   }
-  function goIndex() { location.href = new URL('./index.html', location.href).href; }
+  function goIndex() { navigateShell('./index.html'); }
   async function signOut() { await db.auth.signOut(); goIndex(); }
 
   // ── shell + router ─────────────────────────────────────
@@ -229,7 +232,7 @@
           el('button', {
             disabled: isAdmin ? null : 'disabled',
             title: isAdmin ? t('adminConsole') : 'Admin access required',
-            onclick: () => { if (isAdmin) location.href = new URL('./admin.html', page).href; },
+            onclick: () => { if (isAdmin) navigateShell('./admin.html', page); },
           }, 'Admin Console'),
         ]),
       ]),
@@ -296,9 +299,20 @@
       item.flag ? el('span', { class: 'sidebar-flag', title: t('assignedToComplete') }, '⚑') : null,
     ]);
   }
-  function go(view, { reset = false } = {}) { if (reset) viewStack.length = 0; viewStack.push(view); paint(); }
-  function back() { if (viewStack.length > 1) { viewStack.pop(); paint(); } }
-  function paint() {
+  let routeMotion = 'forward';
+  let paintToken = 0;
+  const ROUTE_MIN_LOAD = 320; // ms the skeleton stays up on a group switch, so it never flashes
+  function go(view, { reset = false } = {}) {
+    routeMotion = reset ? 'replace' : 'forward';
+    if (reset) viewStack.length = 0;
+    viewStack.push(view);
+    paint();
+  }
+  function back() { if (viewStack.length > 1) { routeMotion = 'back'; viewStack.pop(); paint(); } }
+  async function paint() {
+    const token = ++paintToken;
+    const motion = routeMotion;
+    routeMotion = 'forward';
     const view = viewStack[viewStack.length - 1];
     const bar = $('#topbar'); bar.innerHTML = '';
     bar.append(el('button', { class: 'iconbtn mobile-menu-btn', title: 'Open navigation', 'aria-label': 'Open navigation', 'aria-expanded': String(mobileSidebarOpen), onclick: toggleMobileSidebar }, '\u2630'));
@@ -308,13 +322,72 @@
     bar.append(themeToggleButton());
     bar.append(el('button', { class: 'iconbtn', title: t('signOut'), onclick: signOut }, '⏻'));
     if (view.action) bar.append(view.action);
-    const app = $('#app'); app.innerHTML = ''; app.className = 'wrap';
+    const app = $('#app'); app.innerHTML = ''; app.className = 'wrap route-stage';
+    const surface = el('div', { class: `route-surface route-${motion}` });
+    app.append(surface);
     renderBotnav(view.tab || 'groups');
     renderSidebar(view.side || view.tab || 'groups');
     setMobileSidebar(mobileSidebarOpen);
-    view.render(app);
+
+    // Entering a group shows the skeleton immediately and holds it for a minimum
+    // beat (ROUTE_MIN_LOAD) so the transition reads as deliberate, never a flash.
+    // Other views only fall back to a skeleton if they're still empty after 90ms.
+    // The skeleton lives outside the surface so the surface's opacity gate can't
+    // hide it; the surface is parked (display:none) while it loads.
+    let skeleton = null;
+    const enterGroup = view.minLoad && motion !== 'refresh';
+    const showSkeleton = () => {
+      if (token !== paintToken || skeleton || surface.childElementCount) return;
+      skeleton = routeSkeleton();
+      surface.style.display = 'none';
+      app.append(skeleton);
+    };
+    if (enterGroup) showSkeleton();
+    const skeletonTimer = enterGroup ? null : setTimeout(showSkeleton, 90);
+    const startedAt = performance.now();
+    try {
+      const rendered = view.render(surface);
+      if (rendered && typeof rendered.then === 'function') await rendered;
+    } finally {
+      if (skeletonTimer) clearTimeout(skeletonTimer);
+      if (token === paintToken) {
+        const reduceMotion = !!window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches;
+        if (enterGroup && skeleton && !reduceMotion) {
+          const elapsed = performance.now() - startedAt;
+          if (elapsed < ROUTE_MIN_LOAD) await new Promise(r => setTimeout(r, ROUTE_MIN_LOAD - elapsed));
+        }
+        if (token === paintToken) {
+          const reveal = () => {
+            if (token !== paintToken) return;
+            surface.style.display = '';
+            requestAnimationFrame(() => surface.classList.add('route-live'));
+          };
+          if (skeleton) {
+            // Fade the skeleton fully out first, then bring the content in — a clean
+            // sequential swap so the appearing items never push the skeleton around.
+            const sk = skeleton;
+            sk.classList.add('route-skeleton-leaving');
+            setTimeout(() => { sk.remove(); reveal(); }, 210);
+          } else {
+            reveal();
+          }
+        }
+      }
+    }
   }
-  const refresh = () => paint();
+  function refresh() { routeMotion = 'refresh'; paint(); }
+
+  function routeSkeleton() {
+    return el('div', { class: 'route-skeleton', 'aria-hidden': 'true' }, [
+      el('div', { class: 'skeleton-line skeleton-title' }),
+      el('div', { class: 'skeleton-grid' }, Array.from({ length: 6 }, () =>
+        el('div', { class: 'skeleton-card' }, [
+          el('div', { class: 'skeleton-line' }),
+          el('div', { class: 'skeleton-line short' }),
+          el('div', { class: 'skeleton-block' }),
+        ]))),
+    ]);
+  }
   function labeled(text, inputEl, required = false) {
     return el('label', { class: 'field' },
       [el('span', {}, [text, required ? el('span', { class: 'req' }, ' *') : null]), inputEl]);
@@ -652,6 +725,7 @@
       g.kind === 'courses' ? courseListView(g, { go, back, state }) :
       proceduresGroupView(g);
     view.side = `group:${g.id}`;
+    view.minLoad = true; // entering a group runs the deliberate load window
     return view;
   }
 
