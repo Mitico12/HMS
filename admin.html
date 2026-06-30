@@ -52,7 +52,7 @@
   initTheme();
   initLanguage();
   const screen = $('#screen');
-  const state = { profile: null, groups: [], profiles: [], groupDeleteRequests: [] };
+  const state = { profile: null, groups: [], profiles: [], departments: [], userDepartments: new Map(), groupDeleteRequests: [] };
   const viewStack = [];                 // each entry: { title, render }
   let mobileSidebarOpen = false;
 
@@ -65,6 +65,8 @@
     if (res.profile.is_suspended) return showSuspended(res.profile); // under sys-admin review
     state.profile = res.profile;
     await loadProfiles();
+    await loadDepartments();
+    await loadUserDepartments();
     await loadGroupDeleteRequests();
     showApp();
     // Safety reps (verneombud) are limited to the Checklist Logs section.
@@ -239,6 +241,55 @@
     }
     state.profiles = (withUsername.data || []).map(p => ({ ...p, mobile_number: p.mobile_number || '' }));
   }
+  async function loadDepartments() {
+    const { data, error } = await db.from('departments').select('*').order('name');
+    state.departments = error ? [] : (data || []);
+    return state.departments;
+  }
+  async function loadUserDepartments() {
+    const { data, error } = await db.from('user_departments').select('user_id,department_id');
+    state.userDepartments = new Map();
+    if (!error) {
+      for (const row of data || []) {
+        if (!state.userDepartments.has(row.user_id)) state.userDepartments.set(row.user_id, new Set());
+        state.userDepartments.get(row.user_id).add(row.department_id);
+      }
+    }
+    return state.userDepartments;
+  }
+  const departmentName = (id) => state.departments.find(d => d.id === id)?.name || 'Department';
+  const generalDepartmentId = () => state.departments.find(d => (d.name || '').toLowerCase() === 'general')?.id || state.departments[0]?.id || null;
+  const departmentIdsForUser = (id) => [...(state.userDepartments.get(id) || new Set())];
+  const departmentLabelsForUser = (id) => {
+    const labels = departmentIdsForUser(id).map(departmentName).filter(Boolean);
+    return labels.length ? labels.join(', ') : 'General';
+  };
+  const normalizeDepartmentIds = (ids) => Array.isArray(ids) ? ids.filter(Boolean) : [];
+  function departmentPicker(selectedIds = []) {
+    const picked = new Set(normalizeDepartmentIds(selectedIds));
+    if (!picked.size) {
+      const general = generalDepartmentId();
+      if (general) picked.add(general);
+    }
+    const wrap = el('div', { class: 'department-picker' });
+    if (!state.departments.length) {
+      wrap.append(el('p', { class: 'muted' }, 'Run the departments migration to enable department visibility.'));
+      return { field: el('div', { class: 'field' }, [el('span', {}, t('departments')), wrap]), get: () => [] };
+    }
+    for (const d of state.departments) {
+      const box = el('input', { type: 'checkbox', value: d.id });
+      box.checked = picked.has(d.id);
+      wrap.append(el('label', { class: 'check-item department-option' }, [box, el('span', {}, d.name)]));
+    }
+    return {
+      field: el('div', { class: 'field' }, [
+        el('span', {}, t('visibleToDepartments')),
+        wrap,
+        el('div', { class: 'muted', style: 'font-size:.78rem' }, t('departmentsHint')),
+      ]),
+      get: () => [...wrap.querySelectorAll('input:checked')].map(i => i.value),
+    };
+  }
   const nameOf = (id) => state.profiles.find(p => p.id === id)?.full_name || '—';
   const emailOf = (id) => state.profiles.find(p => p.id === id)?.email || '';
   const labelOf = (p) => p?.full_name || p?.username || p?.email || 'Unnamed user';
@@ -400,14 +451,10 @@
       { id: 'procedures', ic: '▤', label: t('procedureSubmissions'), open: () => openKind('procedures') },
       { id: 'courses', ic: '▣', label: t('manageCourses'), open: () => openKind('courses') },
       { id: 'users', ic: 'U', label: t('accounts'), count: pendingAccounts, open: () => go(usersView()) },
+      { id: 'departments', ic: 'D', label: t('departments'), open: () => go(departmentsView()) },
     ] : [
       { id: 'logs', ic: '☑', label: t('checklistLogs'), open: () => go(checklistLogsView()) },
     ];
-    // Varsling (whistleblowing) reports live in their own confidential list,
-    // visible in the management panel to superusers and above.
-    if (isSuperPlus(state.profile)) {
-      fixed.push({ id: 'varsling', ic: '🔒', label: t('varsling'), open: () => go(varslingListView()) });
-    }
     for (const item of fixed) nav.append(sidebarButton(item, active));
     const hidden = hiddenGroupIds();
     const extras = isAdmin
@@ -1832,15 +1879,18 @@
         opt('documents', t('documents')),
         opt('courses', t('courses')),
       ]);
+      const visibility = departmentPicker();
       body.append(
         labeled(t('name'), name, true),
         labeled(t('icon'), icon),
         labeled(t('type'), kind),
+        visibility.field,
         el('button', { class: 'btn btn-primary btn-block', onclick: async () => {
           if (!name.value.trim()) return toast(t('nameRequired'), 'err');
           const sort_order = (state.groups.at(-1)?.sort_order || 0) + 1;
           const { error } = await db.from('groups').insert({
-            name: name.value.trim(), icon: icon.value.trim() || '📁', kind: kind.value, sort_order });
+            name: name.value.trim(), icon: icon.value.trim() || '📁', kind: kind.value, sort_order,
+            department_ids: visibility.get() });
           if (error) return toast(error.message, 'err');
           close(); toast(t('groupAdded')); go(homeView(), { reset: true });
         } }, t('addGroup')),
@@ -1875,12 +1925,19 @@
     if (kind === 'procedure') return s.includes('meeting') ? '🧑‍🏫' : s.includes('tour') ? '🏭' : '🧭';
     return '📁';
   }
+  const libraryKindLabel = (kind) => ({
+    checklist: t('checklists'),
+    course: t('courses'),
+    document: t('documents'),
+    procedure: t('procedures'),
+  }[kind] || kind);
   function libraryCard({ kind, title, meta, sub, image, icon, onclick, actions = [], handle = null, className = '' }) {
     const art = image
       ? el('div', { class: 'library-art' }, el('img', { src: image, alt: title }))
       : el('div', { class: 'library-art' }, el('span', { class: 'library-icon' }, icon || libraryIcon(kind, title)));
-    const card = el('div', { class: `library-card ${className}`.trim(), onclick, style: onclick ? 'cursor:pointer' : '' }, [
+    const card = el('div', { class: `library-card library-card-kind-${kind} ${className}`.trim(), onclick, style: onclick ? 'cursor:pointer' : '' }, [
       handle,
+      el('div', { class: 'library-kind' }, libraryKindLabel(kind)),
       el('div', { class: 'library-title' }, title),
       art,
       el('div', {}, [
@@ -1940,7 +1997,7 @@
       g.kind === 'checklist' ? checklistGroupView(g) :
       g.kind === 'reports' ? reportsGroupView(g) :
       g.kind === 'documents' ? documentsGroupView(g) :
-      g.kind === 'courses' ? coursesGroupView(g, { go, back, state }) :
+      g.kind === 'courses' ? coursesGroupView(g, { go, back, state, departmentPicker }) :
       proceduresGroupView(g);
     view.side = g.kind === 'reports' ? 'incidents'
       : g.kind === 'procedures' ? 'procedures'
@@ -2015,6 +2072,7 @@
         let items = (existing?.items || []).map(i => ({ ...i }));
         const quota = el('input', { type: 'number', min: '0', step: '1',
           value: existing?.daily_quota ?? 0, placeholder: '0' });
+        const visibility = departmentPicker(existing?.department_ids);
 
         const WEEKDAYS = [['1','Mon'],['2','Tue'],['3','Wed'],['4','Thu'],['5','Fri'],['6','Sat'],['0','Sun']];
         const quotaDays = new Set((existing?.quota_weekdays ?? [0,1,2,3,4,5,6]).map(Number));
@@ -2117,6 +2175,7 @@
         app.append(
           labeled(t('title'), title, true),
           labeled(t('profileImage'), logoPicker(logo)),
+          visibility.field,
           labeled(t('dailyQuota'), quota),
           labeled(t('quotaDays'), dayRow),
           list,
@@ -2155,6 +2214,7 @@
             items: clean,
             image: logo.image || null,
             icon: logo.icon || null,
+            department_ids: visibility.get(),
             daily_quota: Math.max(0, parseInt(quota.value, 10) || 0),
             quota_weekdays: [...quotaDays].sort((a, b) => a - b),
           };
@@ -2247,28 +2307,14 @@
         await loadProfiles();
         const data = await fetchActiveReports();
         const openByType = { incident: 0, hazard: 0, suggestion: 0 };
-        data.filter(i => i.status !== 'resolved').forEach(i => {
+        data.filter(i => i.status === 'open').forEach(i => {
           const type = i.report_type || 'incident';
           if (Object.prototype.hasOwnProperty.call(openByType, type)) openByType[type] += 1;
         });
         const canSeeVarsling = isSuperPlus(state.profile) && canAccessVarsling(state.profile);
         const openVarslingCount = canSeeVarsling
-          ? await countRows(db.from('varslinger').select('id', { count: 'exact', head: true }).neq('status', 'resolved'))
+          ? await countRows(db.from('varslinger').select('id', { count: 'exact', head: true }).eq('status', 'open'))
           : null;
-        const indicator = (type, label, count, open) => el('button', {
-          class: `report-type-indicator report-type-indicator-${type}`,
-          onclick: open,
-        }, [
-          el('span', {}, label),
-          el('strong', {}, String(count || 0)),
-          el('small', {}, t('open')),
-        ]);
-        const indicatorBar = el('div', { class: 'report-type-indicators' }, [
-          indicator('incident', t('reportTypeIncidents'), openByType.incident, () => { filters.type = 'incident'; filters.status = 'all'; markActive(typeChips, 'incident'); markActive(statusChips, 'all'); apply(); }),
-          indicator('hazard', t('reportTypeHazards'), openByType.hazard, () => { filters.type = 'hazard'; filters.status = 'all'; markActive(typeChips, 'hazard'); markActive(statusChips, 'all'); apply(); }),
-          indicator('suggestion', t('reportTypeSuggestions'), openByType.suggestion, () => { filters.type = 'suggestion'; filters.status = 'all'; markActive(typeChips, 'suggestion'); markActive(statusChips, 'all'); apply(); }),
-          canSeeVarsling ? indicator('varsling', t('varsling'), openVarslingCount || 0, () => go(varslingListView())) : null,
-        ]);
 
         const filters = { status: 'all', type: 'incident', assignee: 'all', reporter: 'all' };
         let currentRows = data.slice();
@@ -2280,14 +2326,15 @@
           ['hazard', t('reportTypeHazards')],
           ['suggestion', t('reportTypeSuggestions')],
         ].forEach(([key, label]) => {
-          const chip = el('button', { class: 'chip', onclick: () => {
+          const chip = el('button', { class: `chip report-type-chip report-type-chip-${key}`, onclick: () => {
             filters.type = key; markActive(typeChips, key); apply();
-          } }, label);
+          } }, [label, openByType[key] ? el('span', { class: 'report-type-count' }, String(openByType[key])) : null]);
           typeChips[key] = chip;
           typeBar.append(chip);
         });
         if (canSeeVarsling) {
-          typeBar.append(el('button', { class: 'chip', onclick: () => go(varslingListView()) }, t('varsling')));
+          typeBar.append(el('button', { class: 'chip report-type-chip report-type-chip-varsling', onclick: () => go(varslingListView()) },
+            [t('varsling'), openVarslingCount ? el('span', { class: 'report-type-count' }, String(openVarslingCount)) : null]));
         }
 
         // Status chips — now with a visible active state.
@@ -2321,7 +2368,6 @@
         ]);
 
         app.append(el('div', { style: 'display:grid;gap:10px;margin-bottom:14px' }, [
-          indicatorBar,
           el('div', { style: 'display:flex;gap:8px 14px;flex-wrap:wrap;align-items:center' }, [
             typeBar,
             el('span', { class: 'filter-divider' }),
@@ -3130,10 +3176,12 @@
       title: groupName(g), tab: 'groups',
       render(app) {
         const file = el('input', { type: 'file' });
+        const visibility = departmentPicker(g.department_ids);
         const listHost = el('div', { class: 'library-grid' });
         app.append(el('div', { class: 'card' }, [
           el('h3', {}, t('uploadDocument')),
           file,
+          visibility.field,
           el('button', { class: 'btn btn-primary', style: 'margin-top:12px', onclick: upload }, t('upload')),
         ]), listHost);
         loadDocs();
@@ -3189,7 +3237,7 @@
           if (upErr) return toast(upErr.message, 'err');
           const { error } = await db.from('documents').insert({
             group_id: g.id, name: f.name, storage_path: path, mime_type: f.type, size_bytes: f.size,
-            uploaded_by: state.profile.id });
+            department_ids: visibility.get(), uploaded_by: state.profile.id });
           if (error) return toast(error.message, 'err');
           file.value = ''; toast(t('uploaded')); loadDocs();
         }
@@ -3275,6 +3323,7 @@
         const title = el('input', { type: 'text', value: existing?.title || '', placeholder: 'Procedure title' });
         const desc = el('textarea', { placeholder: 'Short description (optional)' }); desc.value = existing?.description || '';
         const logo = { image: existing?.image || null, icon: existing?.icon || null };
+        const visibility = departmentPicker(existing?.department_ids);
         let fields = (existing?.fields || []).map(f => ({ ...f }));
         let dragIdx = null;
         const list = el('div', {});
@@ -3356,7 +3405,7 @@
         };
         draw();
         app.append(
-          labeled(t('title'), title, true), labeled(t('profileImage'), logoPicker(logo)), labeled(t('description'), desc), list,
+          labeled(t('title'), title, true), labeled(t('profileImage'), logoPicker(logo)), visibility.field, labeled(t('description'), desc), list,
           el('button', { class: 'btn btn-ghost btn-block', style: 'margin-bottom:16px', onclick: () => {
             fields.push({ key: crypto.randomUUID(), type: 'short', label: '', required: false, options: [] }); draw();
           } }, t('addField')),
@@ -3381,7 +3430,8 @@
           const clean = cleanProcFields();
           if (!title.value.trim() || !clean.length) return toast(t('addTitleAndField'), 'err');
           const payload = { group_id: g.id, title: title.value.trim(), description: desc.value.trim() || null,
-            fields: clean, is_draft, image: logo.image || null, icon: logo.icon || null, created_by: state.profile.id };
+            fields: clean, is_draft, image: logo.image || null, icon: logo.icon || null,
+            department_ids: visibility.get(), created_by: state.profile.id };
           const q = existing ? db.from('procedures').update(payload).eq('id', existing.id)
                              : db.from('procedures').insert(payload);
           const { error } = await q;
@@ -3684,7 +3734,7 @@
   // ════════════════════════════════════════════════════════
   function varslingListView() {
     return {
-      title: t('varsling'), tab: 'groups', side: 'varsling',
+      title: t('varsling'), tab: 'groups', side: 'incidents',
       async render(app) {
         if (!isSuperPlus(state.profile) && !canAccessVarsling(state.profile)) { app.append(emptyState(t('varsling'), 'No access.')); return; }
         await loadProfiles();
@@ -3715,7 +3765,7 @@
 
   function varslingDetailView(id) {
     return {
-      title: t('varsling'), tab: 'groups', side: 'varsling',
+      title: t('varsling'), tab: 'groups', side: 'incidents',
       async render(app) {
         if (!isSuperPlus(state.profile) && !canAccessVarsling(state.profile)) { app.append(emptyState(t('varsling'), 'No access.')); return; }
         await loadProfiles();
@@ -3854,6 +3904,71 @@
     };
   }
 
+  function departmentsView() {
+    return {
+      title: t('departments'), tab: 'groups', side: 'departments',
+      async render(app) {
+        await loadProfiles();
+        await loadDepartments();
+        await loadUserDepartments();
+        const name = el('input', { type: 'text', placeholder: t('departmentName') });
+        app.append(el('div', { class: 'card departments-create' }, [
+          el('h3', {}, t('departments')),
+          el('p', { class: 'muted' }, t('departmentsAdminHint')),
+          labeled(t('name'), name, true),
+          el('button', { class: 'btn btn-primary', onclick: async () => {
+            const clean = name.value.trim();
+            if (!clean) return toast(t('nameRequired'), 'err');
+            const { error } = await db.from('departments').insert({ name: clean });
+            if (error) return toast(error.message, 'err');
+            name.value = '';
+            toast(t('saved'));
+            go(departmentsView(), { reset: true });
+          } }, t('add')),
+        ]));
+        if (!state.departments.length) {
+          app.append(emptyState(t('departments'), 'Run the departments migration first.'));
+          return;
+        }
+        const grid = el('div', { class: 'department-grid' });
+        app.append(grid);
+        for (const d of state.departments) {
+          const isGeneral = (d.name || '').toLowerCase() === 'general';
+          const users = el('div', { class: 'department-users' });
+          const card = el('div', { class: 'card department-card' }, [
+            el('div', { class: 'section-head' }, [
+              el('h3', {}, d.name),
+              isGeneral ? el('span', { class: 'pill' }, 'Default') : null,
+            ]),
+            el('p', { class: 'muted' }, isGeneral ? t('generalDepartmentHint') : t('departmentMembershipHint')),
+            users,
+          ]);
+          grid.append(card);
+          for (const p of state.profiles) {
+            const box = el('input', { type: 'checkbox' });
+            box.checked = isGeneral || departmentIdsForUser(p.id).includes(d.id);
+            box.disabled = isGeneral;
+            box.addEventListener('change', async () => {
+              if (box.checked) {
+                const { error } = await db.from('user_departments').insert({ user_id: p.id, department_id: d.id });
+                if (error) { box.checked = false; return toast(error.message, 'err'); }
+              } else {
+                const { error } = await db.from('user_departments').delete().eq('user_id', p.id).eq('department_id', d.id);
+                if (error) { box.checked = true; return toast(error.message, 'err'); }
+              }
+              await loadUserDepartments();
+              toast(t('saved'));
+            });
+            users.append(el('label', { class: 'check-item department-user' }, [
+              box,
+              el('span', {}, labelOf(p)),
+            ]));
+          }
+        }
+      },
+    };
+  }
+
   // Map any role (incl. legacy super_admin) to its colour-class suffix.
   const roleClass = (r) => 'role-' + (r === 'super_admin' ? 'sysadmin' : r);
 
@@ -3862,6 +3977,7 @@
       p.email || 'No email',
       p.username ? `@${p.username}` : null,
       p.mobile_number || null,
+      departmentLabelsForUser(p.id),
       roleName(p.role).toLowerCase(),
       p.role === 'user' ? (p.is_verified ? 'approved' : 'awaiting approval') : null,
     ].filter(Boolean).join(' · ');
@@ -4012,6 +4128,7 @@
             kv('Username', p.username ? `@${p.username}` : '—'),
             kv('Email', p.email || '—'),
             kv('Mobile', p.mobile_number || '—'),
+            kv(t('departments'), departmentLabelsForUser(p.id)),
             kv('Access', `${roleName(p.role)}${p.role === 'user' ? (p.is_verified ? ' · approved' : ' · awaiting approval') : ''}`),
           ]),
         ]));
@@ -4258,8 +4375,10 @@
             const { error: vErr } = await db.rpc('set_verification', { target: id, verified: true });
             if (vErr) return toast(vErr.message, 'err');
           }
+          const general = generalDepartmentId();
+          if (general) await db.from('user_departments').insert({ user_id: id, department_id: general });
           toast(t('userAddedTempPassword'));
-          close(); await loadProfiles(); refresh();
+          close(); await loadProfiles(); await loadUserDepartments(); refresh();
         } }, 'Create user'),
       );
     });

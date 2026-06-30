@@ -575,6 +575,13 @@ const TEXT = {
     hideGroup: 'Hide group',
     groupHidden: 'Group hidden.',
     groupRestored: 'Group restored.',
+    departments: 'Departments',
+    departmentName: 'Department name',
+    departmentsAdminHint: 'Manage departments and assign workers below.',
+    visibleToDepartments: 'Visible to departments',
+    departmentsHint: 'If none are checked, this item is visible to everyone.',
+    generalDepartmentHint: 'Default department. Every user belongs to this department.',
+    departmentMembershipHint: 'Select which users belong to this department.',
   },
   no: {
     accounts: 'Kontoer',
@@ -1044,6 +1051,13 @@ const TEXT = {
     username: 'Brukernavn',
     usernameEmailRequired: 'Brukernavn og e-post er pakrevd.',
     usernameTaken: 'Brukernavnet er opptatt.',
+    departments: 'Avdelinger',
+    departmentName: 'Avdelingsnavn',
+    departmentsAdminHint: 'Administrer avdelinger og tildel ansatte nedenfor.',
+    visibleToDepartments: 'Synlig for avdelinger',
+    departmentsHint: 'Hvis ingen er valgt, er dette elementet synlig for alle.',
+    generalDepartmentHint: 'Standardavdeling. Alle brukere tilhorer denne avdelingen.',
+    departmentMembershipHint: 'Velg hvilke brukere som tilhorer denne avdelingen.',
   },
 };
 

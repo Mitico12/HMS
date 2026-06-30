@@ -31,6 +31,18 @@
 --
 --  NOTE: section 21 (dedupe_default_groups) is a one-time data cleanup; it is a
 --  harmless no-op on a fresh database.
+--
+--  Sections numbered 22+ are security/feature patches added AFTER the initial
+--  consolidation; they are appended in apply-order and are also kept as their own
+--  runnable migration_*.sql files so an already-migrated project can apply just
+--  the new one:
+--    22  migration_secure_course_grading.sql  (server-side quiz grading; audit V2)
+--    23  migration_strict_verification.sql    (strict-rank approve/revoke; audit R1)
+--    24  migration_lock_profile_columns.sql   (privileged cols RPC-only; audit V3)
+--    25  migration_lock_submission_logs.sql   (checklist/procedure logs insert-only; R2)
+--    26  migration_checklist_photos_storage.sql (checklist photos -> Storage; R3)
+--    27  migration_incident_addenda_escalation.sql (worker addenda & escalation; Cat A)
+--    28  migration_departments.sql            (departments and visibility controls)
 -- ============================================================================
 
 
@@ -2087,3 +2099,500 @@ where not exists (
   select 1 from groups g
   where lower(g.name) = lower(v.name) and g.kind = v.kind
 );
+
+
+-- ============================================================================
+-- == SECTION 22 :  migration_secure_course_grading.sql  (security fix, added post-consolidation 2026-06-29)
+-- ============================================================================
+
+-- migration_secure_course_grading.sql
+-- SECURITY FIX (audit V2 — client-side grading / compliance spoofing).
+--
+-- Before: courses.js graded the quiz in the browser and the client wrote
+-- score + passed straight into course_submissions. The csub_own policy
+-- (for all ... with check user_id = auth.uid()) let any worker POST
+-- { score:100, passed:true } without answering anything — a real HSE
+-- compliance/liability hole.
+--
+-- After: the client submits only the raw answers. submit_course() runs in the
+-- database (security definer), grades against the stored answer key using the
+-- exact same rules as the old client grader, and writes the verified row.
+-- Direct client INSERT/UPDATE on course_submissions is removed; reads stay.
+--
+-- Safe to run more than once.
+
+-- 1) Server-side grade + insert ----------------------------------------------
+create or replace function submit_course(p_course_id uuid, p_answers jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  uid       uuid := auth.uid();
+  c         record;
+  q         jsonb;
+  qtype     text;
+  expected  jsonb;
+  ans       jsonb;
+  ans_txt   text;
+  pts       numeric;
+  total     numeric := 0;
+  earned    numeric := 0;
+  ok        boolean;
+  n         numeric;
+  mn        numeric;
+  mx        numeric;
+  score_i   int;
+  passed_b  boolean;
+begin
+  if uid is null then raise exception 'Not authenticated'; end if;
+
+  select id,
+         coalesce(questions, '[]'::jsonb)      as questions,
+         coalesce(pass_threshold, 100)         as pass_threshold,
+         coalesce(is_draft, false)             as is_draft
+    into c
+    from courses
+   where id = p_course_id;
+  if not found then raise exception 'Course not found'; end if;
+  if c.is_draft then raise exception 'This course is not published'; end if;
+
+  for q in select value from jsonb_array_elements(c.questions) as t(value)
+  loop
+    qtype    := q->>'type';
+    expected := q->'expected';
+    ans      := p_answers -> (q->>'id');
+    ans_txt  := ans #>> '{}';
+    pts      := coalesce(nullif(q->>'points','')::numeric, 1);
+    total    := total + pts;
+    ok       := false;
+
+    if qtype = 'confirm' then
+      ok := (ans = to_jsonb(true));
+
+    elsif qtype = 'choice' then
+      ok := lower(btrim(coalesce(ans_txt, ''))) = lower(btrim(coalesce(expected #>> '{}', '')));
+
+    elsif qtype = 'multi' then
+      -- set equality of normalised (trim+lowercase, de-duplicated) string arrays
+      ok := (
+        ( select array(
+            select distinct lower(btrim(e))
+              from jsonb_array_elements_text(
+                     case when jsonb_typeof(ans) = 'array' then ans else '[]'::jsonb end) as a(e)
+             order by 1) )
+        =
+        ( select array(
+            select distinct lower(btrim(e))
+              from jsonb_array_elements_text(
+                     case when jsonb_typeof(expected) = 'array' then expected else '[]'::jsonb end) as x(e)
+             order by 1) )
+      );
+
+    elsif qtype = 'text' then
+      ok := exists (
+        select 1
+          from jsonb_array_elements_text(
+                 case when jsonb_typeof(expected->'values') = 'array' then expected->'values' else '[]'::jsonb end) as v(val)
+         where lower(btrim(val)) = lower(btrim(coalesce(ans_txt, '')))
+      );
+
+    elsif qtype = 'number' then
+      if ans_txt is not null and ans_txt <> '' then
+        begin n := ans_txt::numeric; exception when others then n := null; end;
+        if n is not null then
+          mn := nullif(expected->>'min','')::numeric;
+          mx := nullif(expected->>'max','')::numeric;
+          ok := (mn is null or n >= mn) and (mx is null or n <= mx);
+        end if;
+      end if;
+    end if;
+
+    if ok then earned := earned + pts; end if;
+  end loop;
+
+  score_i  := case when total > 0 then round(earned / total * 100)::int else 100 end;
+  passed_b := score_i >= c.pass_threshold;
+
+  insert into course_submissions (course_id, user_id, answers, score, passed)
+  values (p_course_id, uid, coalesce(p_answers, '{}'::jsonb), score_i, passed_b);
+
+  return jsonb_build_object('score', score_i, 'passed', passed_b);
+end;
+$$;
+
+revoke all on function submit_course(uuid, jsonb) from public;
+grant execute on function submit_course(uuid, jsonb) to authenticated;
+
+-- 2) Remove direct client writes to course_submissions -----------------------
+-- Workers may still READ their own results (for "Completed" badges / history),
+-- but INSERT/UPDATE now happen only through submit_course() above, so a forged
+-- score can no longer be written from the browser. Admin read policy is
+-- unchanged (csub_admin_read, defined in the courses migration).
+drop policy if exists csub_own on course_submissions;
+drop policy if exists csub_own_read on course_submissions;
+create policy csub_own_read on course_submissions
+  for select using (user_id = auth.uid());
+
+
+-- ============================================================================
+-- == SECTION 23 :  migration_strict_verification.sql  (security fix, added post-consolidation 2026-06-29)
+-- ============================================================================
+
+-- migration_strict_verification.sql
+-- SECURITY FIX (audit R1 — horizontal privilege abuse / administrative lockout).
+--
+-- Before: set_verification() blocked only callers STRICTLY below the target
+-- (role_rank(caller) < role_rank(target)). That allowed approving/revoking an
+-- account at your OWN rank, so two admins (or two superusers) could revoke each
+-- other's access — a mutual lockout a disgruntled/compromised admin could abuse.
+--
+-- After: strict hierarchy — you can only approve/revoke accounts STRICTLY below
+-- your own rank, mirroring the rule set_role already enforces for role changes.
+-- Sysadmins keep full power over every lower rank; a sysadmin acting on another
+-- sysadmin still routes through the two-person review (unchanged). Safe to re-run.
+
+create or replace function set_verification(target uuid, verified boolean) returns void
+language plpgsql security definer set search_path = public as $$
+declare caller_role text; target_role text;
+begin
+  if is_suspended() then raise exception 'Your account is suspended'; end if;
+  if target = auth.uid() then raise exception 'You cannot change your own access'; end if;
+  select role into caller_role from profiles where id = auth.uid();
+  select role into target_role from profiles where id = target;
+
+  -- A sys-admin may not directly revoke another sys-admin.
+  if caller_role = 'sysadmin' and target_role = 'sysadmin' then
+    raise exception 'Use the sys-admin review process for actions on another sys-admin';
+  end if;
+
+  if role_rank(caller_role) < 2 then raise exception 'Not authorized'; end if;
+  -- strictly-greater: cannot touch your own rank or above (was: < )
+  if role_rank(caller_role) <= role_rank(target_role) then
+    raise exception 'Cannot modify an account at or above your level';
+  end if;
+  update profiles set is_verified = verified where id = target;
+end; $$;
+grant execute on function set_verification(uuid, boolean) to authenticated;
+
+
+-- ============================================================================
+-- == SECTION 24 :  migration_lock_profile_columns.sql  (security fix, added post-consolidation 2026-06-29)
+-- ============================================================================
+
+-- migration_lock_profile_columns.sql
+-- SECURITY FIX (audit V3 — privilege escalation via direct profile writes).
+--
+-- The profiles_update policy only checks is_super(), so a superuser (or a
+-- compromised superuser session) could write to profiles directly and bypass
+-- the rank-checked RPCs entirely — e.g. self-promote 3->4 with
+--   update profiles set role='sysadmin' where id = auth.uid();
+-- or bypass the sys-admin two-person rule, un-suspend themselves, or grant
+-- themselves varsling access.
+--
+-- Fix: a BEFORE UPDATE trigger forbids changing the privileged columns
+-- (role, is_verified, is_suspended, can_access_varsling) from a direct client
+-- update. Those columns may ONLY change inside the dedicated security-definer
+-- RPCs (set_role, set_verification, set_suspension, set_varsling_access,
+-- request_sysadmin_action, resolve_sysadmin_case), which run as the table owner
+-- and are therefore exempt. Non-privileged fields (full_name, username, email,
+-- mobile_number) are unaffected, so the profile-change approval flow still works.
+--
+-- The browser "add user" / "import users" flows are updated in admin.html to set
+-- role/approval through set_role()/set_verification() instead of a direct upsert.
+--
+-- Safe to run more than once.
+
+create or replace function guard_profile_privileged_columns()
+returns trigger
+language plpgsql
+as $$
+begin
+  -- PostgREST runs authenticated client requests as the 'authenticated' role.
+  -- The security-definer RPCs run as the function/table owner (a different role),
+  -- so they fall through this guard and may change anything.
+  if current_user = 'authenticated'
+     and ( new.role                is distinct from old.role
+        or new.is_verified         is distinct from old.is_verified
+        or new.is_suspended        is distinct from old.is_suspended
+        or new.can_access_varsling is distinct from old.can_access_varsling )
+  then
+    raise exception
+      'role / is_verified / is_suspended / can_access_varsling can only be changed through the dedicated actions, not by a direct profile update';
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists trg_guard_profile_privileged on profiles;
+create trigger trg_guard_profile_privileged
+  before update on profiles
+  for each row
+  execute function guard_profile_privileged_columns();
+
+
+-- ============================================================================
+-- == SECTION 25 :  migration_lock_submission_logs.sql  (security fix, added post-consolidation 2026-06-30)
+-- ============================================================================
+
+-- migration_lock_submission_logs.sql
+-- SECURITY FIX (audit R2 follow-up — submission-log integrity, same class as V2).
+--
+-- checklist_runs and procedure_submissions used "for all" to the owner, so a
+-- worker could UPDATE or DELETE their own already-submitted compliance record
+-- (e.g. erase a checklist run flagged "needs attention", or alter a procedure
+-- form after the fact). The apps only ever INSERT these and READ them back.
+--
+-- Lock both tables to insert + read-own. Admin reads stay (runs_admin_read /
+-- sub_admin_read). Deleting a checklist run remains possible only through the
+-- super-only delete_checklist_run() RPC (security definer), which is unaffected.
+--
+-- Safe to run more than once.
+
+-- ── checklist_runs ───────────────────────────────────────────
+drop policy if exists runs_own        on checklist_runs;
+drop policy if exists runs_own_insert on checklist_runs;
+drop policy if exists runs_own_read   on checklist_runs;
+create policy runs_own_insert on checklist_runs
+  for insert with check (user_id = auth.uid());
+create policy runs_own_read on checklist_runs
+  for select using (user_id = auth.uid());
+
+-- ── procedure_submissions ────────────────────────────────────
+drop policy if exists sub_own        on procedure_submissions;
+drop policy if exists sub_own_insert on procedure_submissions;
+drop policy if exists sub_own_read   on procedure_submissions;
+create policy sub_own_insert on procedure_submissions
+  for insert with check (user_id = auth.uid());
+create policy sub_own_read on procedure_submissions
+  for select using (user_id = auth.uid());
+
+
+-- ============================================================================
+-- == SECTION 26 :  migration_checklist_photos_storage.sql  (perf fix, added post-consolidation 2026-06-30)
+-- ============================================================================
+
+-- migration_checklist_photos_storage.sql
+-- PERFORMANCE (audit R3 — base64 bloat). Worker checklist inspection photos were
+-- stored as base64 data-URLs inside checklist_runs.checked, so every run row
+-- carried full images that the logs/analytics views load in bulk. This moves new
+-- checklist photos into a private Storage bucket (served via short-lived signed
+-- URLs), exactly like incident-photos. Existing rows keep their inline base64 and
+-- still render; only new uploads use Storage. Reusable admin content images
+-- (logos/illustrations) are intentionally left inline.
+--
+-- Safe to run more than once.
+
+insert into storage.buckets (id, name, public)
+values ('checklist-photos', 'checklist-photos', false)
+on conflict (id) do nothing;
+
+drop policy if exists "checklist photos upload" on storage.objects;
+create policy "checklist photos upload" on storage.objects
+  for insert
+  with check (bucket_id = 'checklist-photos' and auth.role() = 'authenticated');
+
+drop policy if exists "checklist photos read" on storage.objects;
+create policy "checklist photos read" on storage.objects
+  for select
+  using (bucket_id = 'checklist-photos' and auth.role() = 'authenticated');
+
+drop policy if exists "checklist photos admin delete" on storage.objects;
+create policy "checklist photos admin delete" on storage.objects
+  for delete
+  using (bucket_id = 'checklist-photos' and public.is_admin());
+
+
+-- ============================================================================
+-- == SECTION 27 :  migration_incident_addenda_escalation.sql  (worker addenda & escalation, Cat A)
+-- ============================================================================
+
+-- Category A: worker addenda + dismissed-incident escalation.
+-- Run in Supabase before using the new Append Update / Re-open & Escalate UI.
+
+alter table public.incident_actions
+  add column if not exists user_addendum boolean not null default false;
+
+alter table public.incident_actions
+  add column if not exists photo_paths text[] not null default '{}';
+
+drop policy if exists act_user_addendum_insert on public.incident_actions;
+create policy act_user_addendum_insert on public.incident_actions
+  for insert to authenticated
+  with check (
+    user_addendum = true
+    and author_id = auth.uid()
+    and exists (
+      select 1
+      from public.incidents i
+      where i.id = incident_actions.incident_id
+        and i.reporter_id = auth.uid()
+    )
+  );
+
+create or replace function public.reopen_incident_escalate(
+  p_incident uuid,
+  p_note text default null
+) returns uuid
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_inc public.incidents%rowtype;
+  v_varsling uuid;
+  v_tag text;
+  v_note text;
+begin
+  if auth.uid() is null then
+    raise exception 'Not authenticated';
+  end if;
+
+  select * into v_inc
+    from public.incidents
+   where id = p_incident
+     and reporter_id = auth.uid()
+   for update;
+
+  if not found then
+    raise exception 'Incident not found';
+  end if;
+
+  if v_inc.status <> 'resolved' then
+    raise exception 'Only resolved incidents can be re-opened and escalated';
+  end if;
+
+  v_tag := '[Escalation from Dismissed Incident ID: ' || p_incident || ']';
+  v_note := nullif(trim(coalesce(p_note, '')), '');
+
+  update public.incidents
+     set status = 'open',
+         resolved_at = null
+   where id = p_incident;
+
+  insert into public.incident_actions (incident_id, author_id, note, user_addendum)
+  values (
+    p_incident,
+    auth.uid(),
+    'Re-open escalation requested. ' || coalesce(v_note, ''),
+    true
+  );
+
+  insert into public.varslinger (
+    reporter_id,
+    is_anonymous,
+    title,
+    description,
+    status
+  ) values (
+    auth.uid(),
+    false,
+    v_tag,
+    concat_ws(E'\n\n',
+      v_tag,
+      'Reporter reason: ' || coalesce(v_note, 'No additional reason provided.'),
+      'Original report: ' || coalesce(v_inc.what_happened, ''),
+      case when nullif(v_inc.what_wrong, '') is not null then 'What needs fixing: ' || v_inc.what_wrong end,
+      case when nullif(v_inc.location, '') is not null then 'Location: ' || v_inc.location end,
+      case when nullif(v_inc.final_report, '') is not null then 'Final report: ' || v_inc.final_report end
+    ),
+    'open'
+  )
+  returning id into v_varsling;
+
+  return v_varsling;
+end;
+$$;
+
+grant execute on function public.reopen_incident_escalate(uuid, text) to authenticated;
+
+
+-- ============================================================================
+-- == SECTION 28 :  migration_departments.sql  (departments and visibility controls)
+-- ============================================================================
+
+-- Migration: Departments Feature
+-- Standalone Supabase migration for creating departments, mapping users to multiple departments,
+-- and setting visibility/filtering columns on content groups.
+
+-- 1. Create departments table
+create table if not exists public.departments (
+  id uuid primary key default gen_random_uuid(),
+  name text not null unique,
+  created_at timestamptz not null default now()
+);
+
+-- 2. Create user_departments join table
+create table if not exists public.user_departments (
+  user_id uuid not null references public.profiles (id) on delete cascade,
+  department_id uuid not null references public.departments (id) on delete cascade,
+  created_at timestamptz not null default now(),
+  primary key (user_id, department_id)
+);
+
+-- 3. Add department_ids to content tables
+alter table public.groups add column if not exists department_ids uuid[] not null default '{}';
+alter table public.checklists add column if not exists department_ids uuid[] not null default '{}';
+alter table public.procedures add column if not exists department_ids uuid[] not null default '{}';
+alter table public.documents add column if not exists department_ids uuid[] not null default '{}';
+alter table public.courses add column if not exists department_ids uuid[] not null default '{}';
+
+-- 4. Enable Row Level Security (RLS)
+alter table public.departments enable row level security;
+alter table public.user_departments enable row level security;
+
+-- 5. Create RLS policies for departments
+drop policy if exists dept_authenticated_read on public.departments;
+create policy dept_authenticated_read on public.departments
+  for select to authenticated using (true);
+
+drop policy if exists dept_admin_all on public.departments;
+create policy dept_admin_all on public.departments
+  for all to authenticated using (public.is_admin()) with check (public.is_admin());
+
+-- 6. Create RLS policies for user_departments
+drop policy if exists user_dept_authenticated_read on public.user_departments;
+create policy user_dept_authenticated_read on public.user_departments
+  for select to authenticated using (true);
+
+drop policy if exists user_dept_admin_all on public.user_departments;
+create policy user_dept_admin_all on public.user_departments
+  for all to authenticated using (public.is_admin()) with check (public.is_admin());
+
+-- 7. Insert default 'General' department
+insert into public.departments (name)
+values ('General')
+on conflict (name) do nothing;
+
+-- 8. Add all existing users to the 'General' department
+insert into public.user_departments (user_id, department_id)
+select p.id, d.id
+from public.profiles p
+cross join public.departments d
+where lower(d.name) = 'general'
+on conflict do nothing;
+
+-- 9. Setup trigger to auto-assign new profiles to the 'General' department
+create or replace function public.handle_new_profile_department()
+returns trigger
+language plpgsql
+security definer set search_path = public
+as $$
+declare
+  v_general_id uuid;
+begin
+  select id into v_general_id from public.departments where lower(name) = 'general';
+  if v_general_id is not null then
+    insert into public.user_departments (user_id, department_id)
+    values (new.id, v_general_id)
+    on conflict do nothing;
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists on_profile_created_department on public.profiles;
+create trigger on_profile_created_department
+  after insert on public.profiles
+  for each row execute function public.handle_new_profile_department();

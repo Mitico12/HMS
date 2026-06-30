@@ -199,8 +199,15 @@ function libraryIcon(kind, text = '') {
   if (kind === 'course') return s.includes('first aid') ? '🩹' : s.includes('safety') ? '🦺' : '🎓';
   return '📁';
 }
+const libraryKindLabel = (kind) => ({
+  course: t('courses'),
+  checklist: t('checklists'),
+  document: t('documents'),
+  procedure: t('procedures'),
+}[kind] || kind);
 function libraryCard({ kind, title, meta, sub, icon, onclick, actions = [], className = '' }) {
-  return el('div', { class: `library-card ${className}`.trim(), onclick, style: onclick ? 'cursor:pointer' : '' }, [
+  return el('div', { class: `library-card library-card-kind-${kind} ${className}`.trim(), onclick, style: onclick ? 'cursor:pointer' : '' }, [
+    el('div', { class: 'library-kind' }, libraryKindLabel(kind)),
     el('div', { class: 'library-title' }, title),
     el('div', { class: 'library-art' }, el('span', { class: 'library-icon' }, icon || libraryIcon(kind, title))),
     el('div', {}, [
@@ -209,6 +216,13 @@ function libraryCard({ kind, title, meta, sub, icon, onclick, actions = [], clas
     ]),
     actions.length ? el('div', { class: 'library-actions' }, actions) : null,
   ]);
+}
+function visibleToDepartments(row, ctx) {
+  const ids = Array.isArray(row?.department_ids) ? row.department_ids.filter(Boolean) : [];
+  if (!ids.length) return true;
+  const mine = ctx?.state?.departmentIds;
+  if (!mine?.size) return false;
+  return ids.some(id => mine.has(id));
 }
 
 const PRESET_LOGOS = ['✅','📋','🌅','🌙','🔒','🧹','🩹','🦺','🎓','🧭','🏭','🧑‍🏫','📄','📊','🧪','⚠️','🧯','🚧','🔧','🧰','🍽️','❄️','🔥','🚿'];
@@ -414,6 +428,7 @@ export function courseBuild(g, existing, ctx) {
       content.value = existing?.content || '';
       const pass = el('input', { type: 'number', min: '0', max: '100', step: '5', value: existing?.pass_threshold ?? 100 });
       const logo = { image: existing?.image || null, icon: existing?.icon || null };
+      const visibility = ctx.departmentPicker ? ctx.departmentPicker(existing?.department_ids) : null;
 
       let questions = (existing?.questions || []).map(q => ({ ...q }));
       const list = el('div', {});
@@ -503,6 +518,7 @@ export function courseBuild(g, existing, ctx) {
       app.append(
         labeled('Title', title, true),
         labeled(t('profileImage'), logoPicker(logo)),
+        visibility?.field || null,
         labeled('Reading material', content),
         labeled('Pass threshold (%)', pass),
         el('h3', { style: 'margin:18px 0 8px' }, 'Quiz'),
@@ -555,6 +571,7 @@ export function courseBuild(g, existing, ctx) {
           is_draft,
           image: logo.image || null,
           icon: logo.icon || null,
+          department_ids: visibility ? visibility.get() : (existing?.department_ids || []),
           created_by: ctx.state.profile.id,
         };
         const qy = existing ? db.from('courses').update(payload).eq('id', existing.id)
@@ -658,9 +675,10 @@ export function courseListView(g, ctx) {
     title: g.name || 'Courses', tab: 'home',
     async render(app) {
       app.classList.add('course-library');
-      const { data: rows = [], error } = await db.from('courses')
+      const { data: rawRows = [], error } = await db.from('courses')
         .select('*').eq('group_id', g.id).eq('is_draft', false).order('sort_order').order('created_at');
       if (error) return app.append(el('p', { class: 'c-meta' }, error.message));
+      const rows = (rawRows || []).filter(c => visibleToDepartments(c, ctx));
       if (!rows.length) return app.append(el('p', { class: 'c-meta' }, 'No courses available.'));
 
       const ids = rows.map(c => c.id);
