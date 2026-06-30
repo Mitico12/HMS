@@ -1,34 +1,34 @@
 :root {
   color-scheme: light;
-  --bg: #f4f7fb;
-  --paper: #ffffff;
-  --paper-2: #eef3f8;
-  --ink: #0f172a;
-  --steel: #64748b;
-  --line: rgba(15, 23, 42, .12);
-  --soft-line: rgba(15, 23, 42, .08);
-  --primary: #4f46e5;
-  --primary-hover: #4338ca;
+  --bg: #eef4f8;
+  --paper: #fbf8f5;
+  --paper-2: #e4eef2;
+  --ink: #172333;
+  --steel: #6b7786;
+  --line: rgba(45, 66, 86, .13);
+  --soft-line: rgba(45, 66, 86, .08);
+  --primary: #477fa3;
+  --primary-hover: #386f91;
   --primary-ink: #ffffff;
-  --accent: #0f766e;
-  --danger: #dc2626;
-  --danger-soft: #fef2f2;
-  --ok: #16a34a;
-  --warning: #f59e0b;
-  --nav: #111827;
-  --sidebar-bg: linear-gradient(180deg, #f8fafc 0%, #eef3f8 100%);
-  --sidebar-ink: #1e293b;
-  --sidebar-muted: #64748b;
-  --sidebar-faint: #94a3b8;
-  --sidebar-line: rgba(15, 23, 42, .12);
-  --sidebar-hover: rgba(79, 70, 229, .08);
-  --sidebar-active: rgba(79, 70, 229, .13);
-  --sidebar-icon: #4f46e5;
-  --sidebar-card: rgba(255, 255, 255, .68);
-  --sidebar-switch: rgba(15, 23, 42, .07);
+  --accent: #c57d68;
+  --danger: #b9584f;
+  --danger-soft: #f8e7e1;
+  --ok: #378763;
+  --warning: #c88b33;
+  --nav: #1a2735;
+  --sidebar-bg: linear-gradient(180deg, #f4f8fa 0%, #e5f0f3 100%);
+  --sidebar-ink: #243243;
+  --sidebar-muted: #6c7887;
+  --sidebar-faint: #9aa7b3;
+  --sidebar-line: rgba(45, 66, 86, .11);
+  --sidebar-hover: rgba(71, 127, 163, .10);
+  --sidebar-active: rgba(71, 127, 163, .17);
+  --sidebar-icon: #477fa3;
+  --sidebar-card: rgba(251, 248, 245, .80);
+  --sidebar-switch: rgba(45, 66, 86, .06);
   --sidebar-switch-active: #ffffff;
-  --shadow: 0 22px 60px rgba(15, 23, 42, .12);
-  --shadow-soft: 0 8px 24px rgba(15, 23, 42, .07);
+  --shadow: 0 22px 60px rgba(45, 66, 86, .12);
+  --shadow-soft: 0 8px 24px rgba(45, 66, 86, .07);
   /* role colours: orange=verneombud, blue=user, black=admin, red=superuser, green=sysadmin */
   --role-user: #3b82f6;
   --role-verneombud: #e08a1e;
@@ -304,10 +304,10 @@ h1, h2, h3, p {
   display: grid;
   place-items: center;
   border-radius: 8px;
-  background: #7c3aed;
+  background: linear-gradient(135deg, var(--primary), color-mix(in srgb, var(--accent) 72%, var(--primary)));
   color: #fff;
   font-weight: 900;
-  box-shadow: 0 14px 30px rgba(124, 58, 237, .32);
+  box-shadow: 0 14px 30px color-mix(in srgb, var(--primary) 24%, transparent);
 }
 
 .sidebar-title {
@@ -504,7 +504,7 @@ h1, h2, h3, p {
   display: grid;
   place-items: center;
   border-radius: 50%;
-  background: #7c3aed;
+  background: linear-gradient(135deg, var(--primary), color-mix(in srgb, var(--accent) 72%, var(--primary)));
   color: #fff;
   font-weight: 900;
 }
@@ -1476,8 +1476,8 @@ input[type="checkbox"]:focus, input[type="radio"]:focus {
   color: var(--steel);
 }
 .comm-empty { margin: 0 0 14px; }
-.comm-feed { display: grid; gap: 10px; margin-bottom: 14px; }
-.comm-admin-list { display: grid; gap: 10px; margin-bottom: 8px; }
+.comm-feed { display: grid; gap: 10px; margin-bottom: 14px; min-width: 0; max-width: 100%; }
+.comm-admin-list { display: grid; gap: 10px; margin-bottom: 8px; min-width: 0; max-width: 100%; }
 
 .comm-row,
 .comm-admin-row {
@@ -1485,6 +1485,8 @@ input[type="checkbox"]:focus, input[type="radio"]:focus {
   align-items: center;
   gap: 14px;
   width: 100%;
+  min-width: 0;
+  max-width: 100%;
   padding: 12px 14px;
   border: 1px solid var(--line);
   border-radius: 10px;
@@ -1593,6 +1595,33 @@ input[type="checkbox"]:focus, input[type="radio"]:focus {
   border-radius: 8px;
   background: var(--paper);
 }
+
+/* clickable "Messages" header → received-messages log */
+.comm-subhead-link {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+}
+.comm-subhead-go {
+  font-size: .72rem;
+  font-weight: 800;
+  letter-spacing: .02em;
+  text-transform: none;
+  color: var(--primary);
+}
+.comm-subhead-link:hover .comm-subhead-go { text-decoration: underline; }
+
+/* a row in the messages log = the notification card + a cancel button */
+.comm-log-row { display: flex; align-items: stretch; gap: 8px; }
+.comm-log-row .comm-row { flex: 1 1 auto; }
+.comm-cancel { flex: 0 0 auto; align-self: center; }
+.comm-detail-actions { margin: 14px 0 4px; }
 
 .todo-checklist-card {
   border-color: color-mix(in srgb, var(--primary) 45%, var(--line));
@@ -1994,6 +2023,108 @@ input[type="checkbox"]:focus, input[type="radio"]:focus {
   .row {
     align-items: flex-start;
     flex-wrap: wrap;
+  }
+}
+
+@media (max-width: 720px) {
+  .kpi-toolbar-row {
+    gap: 8px;
+    margin-bottom: 10px;
+  }
+
+  .kpi-control-wrap {
+    width: 100%;
+  }
+
+  .kpi-filter {
+    width: 100%;
+    min-width: 0;
+    min-height: 38px;
+    padding-block: 8px;
+  }
+
+  .kpi-status-filter {
+    gap: 6px;
+  }
+
+  .kpi-status-filter .chip {
+    min-height: 34px;
+    padding: 7px 10px;
+    font-size: .82rem;
+  }
+
+  .kpi-seg {
+    width: 100%;
+    padding: 2px;
+  }
+
+  .kpi-seg-btn {
+    flex: 1 1 0;
+    justify-content: center;
+    min-height: 36px;
+    padding: 6px 8px;
+    gap: 5px;
+    font-size: .82rem;
+  }
+
+  .kpi-period-chip {
+    min-height: 36px;
+    padding: 6px 11px;
+    font-size: .82rem;
+  }
+
+  .kpi-grid {
+    gap: 10px;
+    margin-bottom: 14px;
+  }
+
+  .kpi-card {
+    min-height: 78px;
+    padding: 14px 14px 14px 36px;
+    gap: 4px;
+  }
+
+  .kpi-card:not([draggable="true"]) {
+    padding-left: 16px;
+  }
+
+  .kpi-drag {
+    left: 10px;
+    top: 13px;
+  }
+
+  .kpi-value {
+    font-size: 1.78rem;
+  }
+
+  .kpi-label {
+    font-size: .82rem;
+    line-height: 1.22;
+  }
+
+  .kpi-period {
+    font-size: .74rem;
+  }
+
+  .metric-head {
+    gap: 8px;
+  }
+
+  .delta-pill {
+    font-size: .68rem;
+    padding: 2px 7px;
+  }
+
+  .kpi-live {
+    font-size: .65rem;
+  }
+
+  .kpi-section-h {
+    margin: 14px 0 8px;
+  }
+
+  .act-feed {
+    padding: 16px 16px 16px 48px;
   }
 }
 
