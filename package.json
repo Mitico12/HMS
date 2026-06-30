@@ -1,0 +1,16 @@
+{
+  "name": "hms-platform-claude",
+  "version": "1.0.0",
+  "description": "Two front-ends over one Supabase backend, hosted as static files on GitHub Pages.",
+  "main": "app-shell.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "devDependencies": {
+    "playwright": "^1.61.1"
+  }
+}
