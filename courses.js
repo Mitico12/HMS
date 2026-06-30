@@ -29,6 +29,29 @@
 
 import { db, el, opt, labeled, t, toast } from './config.js';
 
+// ── item ⇄ group linking ("import") — mirrors the helpers in admin.html ──
+// A course belongs to a group when owned (group_id) or imported (group_ids).
+const isLinkedCourse = (c, gid) => c.group_id !== gid;
+async function fetchGroupCourses(gid, { publishedOnly = false } = {}) {
+  const member = `group_id.eq.${gid},group_ids.cs.{${gid}}`;
+  const run = (useOr, useSort) => {
+    let qb = db.from('courses').select('*');
+    qb = useOr ? qb.or(member) : qb.eq('group_id', gid);
+    if (publishedOnly) qb = qb.eq('is_draft', false);
+    if (useSort) qb = qb.order('sort_order');
+    return qb.order('created_at');
+  };
+  let q = await run(true, true);
+  if (q.error) q = await run(true, false);   // no sort_order column
+  if (q.error) q = await run(false, true);   // no group_ids column (migration pending)
+  if (q.error) q = await run(false, false);
+  return q;
+}
+async function unlinkCourseFromGroup(c, gid) {
+  const next = (c.group_ids || []).filter(id => id && id !== gid);
+  return db.from('courses').update({ group_ids: next }).eq('id', c.id);
+}
+
 const QUESTION_TYPES = [
   ['confirm', 'Acknowledgement'],
   ['choice', 'Single choice'],
@@ -199,8 +222,15 @@ function libraryIcon(kind, text = '') {
   if (kind === 'course') return s.includes('first aid') ? '🩹' : s.includes('safety') ? '🦺' : '🎓';
   return '📁';
 }
+const libraryKindLabel = (kind) => ({
+  course: t('courses'),
+  checklist: t('checklists'),
+  document: t('documents'),
+  procedure: t('procedures'),
+}[kind] || kind);
 function libraryCard({ kind, title, meta, sub, icon, onclick, actions = [], className = '' }) {
-  return el('div', { class: `library-card ${className}`.trim(), onclick, style: onclick ? 'cursor:pointer' : '' }, [
+  return el('div', { class: `library-card library-card-kind-${kind} ${className}`.trim(), onclick, style: onclick ? 'cursor:pointer' : '' }, [
+    el('div', { class: 'library-kind' }, libraryKindLabel(kind)),
     el('div', { class: 'library-title' }, title),
     el('div', { class: 'library-art' }, el('span', { class: 'library-icon' }, icon || libraryIcon(kind, title))),
     el('div', {}, [
@@ -209,6 +239,13 @@ function libraryCard({ kind, title, meta, sub, icon, onclick, actions = [], clas
     ]),
     actions.length ? el('div', { class: 'library-actions' }, actions) : null,
   ]);
+}
+function visibleToDepartments(row, ctx) {
+  const ids = Array.isArray(row?.department_ids) ? row.department_ids.filter(Boolean) : [];
+  if (!ids.length) return true;
+  const mine = ctx?.state?.departmentIds;
+  if (!mine?.size) return false;
+  return ids.some(id => mine.has(id));
 }
 
 const PRESET_LOGOS = ['✅','📋','🌅','🌙','🔒','🧹','🩹','🦺','🎓','🧭','🏭','🧑‍🏫','📄','📊','🧪','⚠️','🧯','🚧','🔧','🧰','🍽️','❄️','🔥','🚿'];
@@ -262,32 +299,41 @@ export function coursesGroupView(g, ctx) {
   ensureStyles();
   return {
     title: g.name || 'Courses', tab: 'groups',
-    action: el('button', { class: 'iconbtn', title: 'New course', onclick: () => ctx.go(courseBuild(g, null, ctx)) }, '+'),
+    action: [
+      ctx.importBtn ? ctx.importBtn(g, { table: 'courses', titleOf: c => c.title, onDone: () => ctx.go(coursesGroupView(g, ctx), { reset: true }) }) : null,
+      el('button', { class: 'iconbtn', title: 'New course', onclick: () => ctx.go(courseBuild(g, null, ctx)) }, '+'),
+    ].filter(Boolean),
     async render(app) {
       app.classList.add('course-library');
-      const { data: rows = [], error } = await db.from('courses')
-        .select('*').eq('group_id', g.id).order('sort_order').order('created_at');
+      const { data: rows = [], error } = await fetchGroupCourses(g.id);
       if (error) return app.append(el('p', { class: 'c-meta' }, error.message));
       if (!rows.length) {
         app.append(el('p', { class: 'c-meta' }, 'No courses yet. Use + to add one.'));
         return;
       }
       rows.forEach(c => {
+        const linked = isLinkedCourse(c, g.id);
         const qn = (c.questions || []).length;
         const art = el('div', { class: 'course-art' }, c.image
           ? el('img', { src: c.image, alt: c.title })
           : el('span', { class: 'course-art-icon' }, c.icon || '🎓'));
-        app.append(el('div', { class: 'course-row course-row-has-art' }, [
+        app.append(el('div', { class: 'course-row course-row-has-art' + (linked ? ' item-linked' : '') }, [
           el('div', { style: 'min-width:0' }, [
             el('div', { class: 'c-title' }, c.title),
             el('div', { class: 'c-meta' }, `${qn} question${qn === 1 ? '' : 's'} · pass ${c.pass_threshold}%`),
           ]),
           art,
           el('div', { style: 'display:flex;gap:8px;align-items:center' }, [
+            linked ? el('span', { class: 'c-badge' }, t('linked')) : null,
             c.is_draft ? el('span', { class: 'c-badge draft' }, 'Draft') : null,
             el('button', { class: 'btn btn-ghost', onclick: () => ctx.go(courseResults(c, ctx)) }, 'Results'),
             el('button', { class: 'btn btn-ghost', onclick: () => ctx.go(courseAssign(c, ctx)) }, 'Assign'),
             el('button', { class: 'btn btn-ghost', onclick: () => ctx.go(courseBuild(g, c, ctx)) }, 'Edit'),
+            linked ? el('button', { class: 'btn btn-ghost', title: t('removeFromGroup'), onclick: async () => {
+              const { error: e } = await unlinkCourseFromGroup(c, g.id);
+              if (e) return toast(e.message, 'err');
+              toast(t('removedFromGroup')); ctx.go(coursesGroupView(g, ctx), { reset: true });
+            } }, '×') : null,
           ]),
         ]));
       });
@@ -414,6 +460,7 @@ export function courseBuild(g, existing, ctx) {
       content.value = existing?.content || '';
       const pass = el('input', { type: 'number', min: '0', max: '100', step: '5', value: existing?.pass_threshold ?? 100 });
       const logo = { image: existing?.image || null, icon: existing?.icon || null };
+      const visibility = ctx.departmentPicker ? ctx.departmentPicker(existing?.department_ids) : null;
 
       let questions = (existing?.questions || []).map(q => ({ ...q }));
       const list = el('div', {});
@@ -503,6 +550,7 @@ export function courseBuild(g, existing, ctx) {
       app.append(
         labeled('Title', title, true),
         labeled(t('profileImage'), logoPicker(logo)),
+        visibility?.field || null,
         labeled('Reading material', content),
         labeled('Pass threshold (%)', pass),
         el('h3', { style: 'margin:18px 0 8px' }, 'Quiz'),
@@ -547,7 +595,7 @@ export function courseBuild(g, existing, ctx) {
         if (bad) return toast(`Set the correct answer for: "${bad.prompt}"`, 'err');
 
         const payload = {
-          group_id: g.id,
+          group_id: existing ? existing.group_id : g.id, // keep home group when editing a shared/linked course
           title: title.value.trim(),
           content: content.value,
           pass_threshold: Math.max(0, Math.min(100, parseInt(pass.value, 10) || 100)),
@@ -555,6 +603,7 @@ export function courseBuild(g, existing, ctx) {
           is_draft,
           image: logo.image || null,
           icon: logo.icon || null,
+          department_ids: visibility ? visibility.get() : (existing?.department_ids || []),
           created_by: ctx.state.profile.id,
         };
         const qy = existing ? db.from('courses').update(payload).eq('id', existing.id)
@@ -658,9 +707,9 @@ export function courseListView(g, ctx) {
     title: g.name || 'Courses', tab: 'home',
     async render(app) {
       app.classList.add('course-library');
-      const { data: rows = [], error } = await db.from('courses')
-        .select('*').eq('group_id', g.id).eq('is_draft', false).order('sort_order').order('created_at');
+      const { data: rawRows = [], error } = await fetchGroupCourses(g.id, { publishedOnly: true });
       if (error) return app.append(el('p', { class: 'c-meta' }, error.message));
+      const rows = (rawRows || []).filter(c => visibleToDepartments(c, ctx));
       if (!rows.length) return app.append(el('p', { class: 'c-meta' }, 'No courses available.'));
 
       const ids = rows.map(c => c.id);

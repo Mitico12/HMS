@@ -565,9 +565,22 @@ input[type="range"]:focus {
 }
 
 input[type="checkbox"], input[type="radio"] {
-  width: auto;
+  /* Reset the generic input box (padding/border/transition) so the native
+     control renders cleanly and doesn't grow-then-shrink on click/focus. */
+  width: 18px;
+  height: 18px;
   min-height: 0;
   margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  flex: 0 0 auto;
+  accent-color: var(--primary);
+  transition: none;
+}
+
+input[type="checkbox"]:focus, input[type="radio"]:focus {
+  box-shadow: none;
 }
 
 .req-toggle {
@@ -817,7 +830,7 @@ input[type="checkbox"], input[type="radio"] {
   background: var(--paper);
   box-shadow: var(--shadow-soft);
   display: grid;
-  grid-template-rows: auto auto 1fr auto;
+  grid-template-rows: auto auto auto 1fr auto;
   gap: 10px;
   cursor: pointer;
   transition: border-color .16s ease, transform .16s ease, background .16s ease;
@@ -826,6 +839,17 @@ input[type="checkbox"], input[type="radio"] {
 .library-card:hover {
   border-color: color-mix(in srgb, var(--primary) 52%, var(--line));
   transform: translateY(-1px);
+}
+
+/* Items imported (linked) into a group from another group. */
+.library-card.item-linked,
+.course-row.item-linked {
+  border-style: dashed;
+  border-color: color-mix(in srgb, var(--primary) 45%, var(--line));
+}
+.library-card.item-linked .library-sub,
+.course-row.item-linked .c-meta {
+  color: var(--primary);
 }
 
 .library-title {
@@ -837,6 +861,16 @@ input[type="checkbox"], input[type="radio"] {
   font-weight: 780;
   line-height: 1.25;
   overflow-wrap: anywhere;
+}
+
+.library-kind {
+  justify-self: center;
+  color: var(--steel);
+  font-size: .68rem;
+  font-weight: 900;
+  line-height: 1;
+  text-transform: uppercase;
+  letter-spacing: .04em;
 }
 
 .library-art {
@@ -1160,7 +1194,8 @@ input[type="checkbox"], input[type="radio"] {
 }
 
 .check-item input {
-  width: auto;
+  width: 18px;
+  height: 18px;
   min-height: 0;
 }
 
@@ -1199,6 +1234,40 @@ input[type="checkbox"], input[type="radio"] {
   border-color: color-mix(in srgb, var(--primary) 45%, var(--line));
 }
 
+.library-card-kind-checklist,
+.library-card-kind-checklist.todo-checklist-card {
+  border-color: color-mix(in srgb, #2f9e5b 78%, var(--line));
+}
+
+.library-card-kind-course {
+  border-color: color-mix(in srgb, #e85aa8 78%, var(--line));
+}
+
+.library-card-kind-procedure {
+  border-color: color-mix(in srgb, #f97316 78%, var(--line));
+}
+
+.library-card-kind-document {
+  border-color: color-mix(in srgb, #ffffff 92%, var(--line));
+}
+
+.library-card-kind-checklist:hover,
+.library-card-kind-checklist.todo-checklist-card:hover {
+  border-color: #2f9e5b;
+}
+
+.library-card-kind-course:hover {
+  border-color: #e85aa8;
+}
+
+.library-card-kind-procedure:hover {
+  border-color: #f97316;
+}
+
+.library-card-kind-document:hover {
+  border-color: #ffffff;
+}
+
 .report-action-stack {
   display: grid;
   gap: 16px;
@@ -1206,6 +1275,7 @@ input[type="checkbox"], input[type="radio"] {
 }
 
 .report-action {
+  position: relative;
   width: 100%;
   min-height: 78px;
   border: 1px solid var(--line);
@@ -1273,11 +1343,73 @@ input[type="checkbox"], input[type="radio"] {
   align-items: flex-start;
 }
 
+.archive-accordion {
+  margin-top: 14px;
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+
+.archive-accordion summary {
+  cursor: pointer;
+  color: var(--steel);
+  font-weight: 800;
+  margin-bottom: 10px;
+}
+
+.btn-sm {
+  min-height: 32px;
+  padding: 6px 10px;
+  font-size: .82rem;
+}
+
+.photo-grid-compact {
+  margin-top: 10px;
+  grid-template-columns: repeat(auto-fill, minmax(92px, 1fr));
+}
+
+.user-addendum {
+  border-left: 3px solid color-mix(in srgb, var(--primary) 58%, var(--line));
+  padding-left: 10px;
+}
+
+.escalation-card {
+  border-color: color-mix(in srgb, #6d5bd0 58%, var(--line));
+}
+
 .report-row .grow > div:first-child {
   color: var(--ink);
   font-size: 1rem;
   font-weight: 650;
 }
+
+.report-type-chip {
+  position: relative;
+  padding-right: 26px;
+}
+
+.report-type-count {
+  position: absolute;
+  top: -7px;
+  right: -7px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  border: 1px solid var(--paper);
+  background: var(--ink);
+  color: var(--paper);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: .68rem;
+  font-weight: 900;
+  line-height: 1;
+}
+
+.report-type-chip-incident { border-color: color-mix(in srgb, #f97316 62%, var(--line)); }
+.report-type-chip-hazard { border-color: color-mix(in srgb, #f5c542 70%, var(--line)); }
+.report-type-chip-suggestion { border-color: color-mix(in srgb, #0f8a61 52%, var(--line)); }
+.report-type-chip-varsling { border-color: color-mix(in srgb, #6d5bd0 62%, var(--line)); }
 
 .report-type-picker {
   display: grid;
@@ -1720,3 +1852,65 @@ input[type="checkbox"], input[type="radio"] {
 .perf-val { flex: 0 0 auto; font-size: .78rem; font-weight: 650; color: var(--steel); white-space: nowrap; }
 .perf-row-active .perf-name { color: var(--primary); }
 .perf-row-active .perf-fill { background: color-mix(in srgb, var(--primary) 80%, #000 0%); }
+
+/* Departments Styles */
+.department-picker {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 8px;
+  margin-top: 6px;
+}
+.department-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--paper);
+  cursor: pointer;
+  font-size: 0.84rem;
+  transition: border-color 0.16s ease, background 0.16s ease;
+}
+.department-option:hover {
+  border-color: color-mix(in srgb, var(--primary) 52%, var(--line));
+}
+.department-option input {
+  margin: 0;
+}
+.departments-create {
+  margin-bottom: 20px;
+}
+.department-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 16px;
+  margin-top: 16px;
+}
+.department-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.department-users {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 200px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px;
+  background: var(--paper-2);
+}
+.department-user {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px;
+  cursor: pointer;
+  font-size: 0.84rem;
+}
+.department-user input {
+  margin: 0;
+}

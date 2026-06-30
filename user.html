@@ -28,7 +28,36 @@
   initTheme();
   initLanguage();
   const screen = $('#screen');
-  const state = { profile: null, groups: [], assignedCourseGroups: new Set() };
+  const state = { profile: null, groups: [], assignedCourseGroups: new Set(), departmentIds: new Set() };
+
+  async function loadMyDepartments() {
+    state.departmentIds = new Set();
+    const { data, error } = await db.from('user_departments').select('department_id').eq('user_id', state.profile.id);
+    if (!error) (data || []).forEach(r => state.departmentIds.add(r.department_id));
+  }
+  function visibleToMyDepartments(row) {
+    const ids = Array.isArray(row?.department_ids) ? row.department_ids.filter(Boolean) : [];
+    if (!ids.length) return true;
+    if (!state.departmentIds.size) return false;
+    return ids.some(id => state.departmentIds.has(id));
+  }
+  // Items shown in a group = owned (group_id) + imported into it (group_ids).
+  // Falls back to owned-only if the group_ids column isn't there yet.
+  async function fetchGroupItems(table, gid, { desc = false, extra } = {}) {
+    const member = `group_id.eq.${gid},group_ids.cs.{${gid}}`;
+    const run = (useOr, useSort) => {
+      let qb = db.from(table).select('*');
+      qb = useOr ? qb.or(member) : qb.eq('group_id', gid);
+      if (extra) qb = extra(qb);
+      if (useSort) qb = qb.order('sort_order');
+      return qb.order('created_at', { ascending: !desc });
+    };
+    let q = await run(true, true);
+    if (q.error) q = await run(true, false);
+    if (q.error) q = await run(false, true);
+    if (q.error) q = await run(false, false);
+    return q;
+  }
 
   // Which course groups have a course assigned to me that I haven't passed yet.
   async function loadAssignedCourseGroups() {
@@ -55,6 +84,7 @@
     state.profile = res.profile;
     if (res.profile.is_suspended) return showWaiting('suspended'); // under sys-admin review
     if (!res.profile.is_verified) return showWaiting(); // unapproved or access revoked
+    await loadMyDepartments();
     showApp();
     go(homeView(), { reset: true });
   })();
@@ -291,21 +321,10 @@
       title: t('groups'), tab: 'groups',
       async render(app) {
         const { data } = await db.from('groups').select('*').order('sort_order');
-        state.groups = visibleGroups(data || []);
+        state.groups = visibleGroups((data || []).filter(visibleToMyDepartments));
         await loadAssignedCourseGroups();
         renderSidebar('groups');
         await renderUserKpiDashboard(app);
-        return;
-        const grid = el('div', { class: 'tile-grid mobile-only-groups' });
-        renderSortableHomeTiles(grid, state.groups.map(g => ({
-          id: `group:${g.id}`,
-          glyph: g.icon || '📁',
-          name: groupName(g),
-          meta: kindLabel(g.kind),
-          flag: state.assignedCourseGroups.has(g.id),
-          open: () => go(groupView(g)),
-        })), 'userHomeTileOrder');
-        app.append(grid);
       },
     };
   }
@@ -396,15 +415,19 @@
     const { start, end } = todayBounds();
     if (!state.groups.length) {
       const { data } = await db.from('groups').select('*').order('sort_order');
-      state.groups = visibleGroups(data || []);
+      state.groups = visibleGroups((data || []).filter(visibleToMyDepartments));
     }
     const checklistGroups = state.groups.filter(g => g.kind === 'checklist');
     const groupIds = checklistGroups.map(g => g.id);
     if (!groupIds.length) return { items: [], total: 0 };
 
-    let q = await db.from('checklists').select('*').in('group_id', groupIds).order('sort_order').order('created_at');
-    if (q.error) q = await db.from('checklists').select('*').in('group_id', groupIds).order('created_at');
-    const all = q.data || [];
+    // Include checklists owned by a visible checklist group OR imported into one.
+    const idList = groupIds.join(',');
+    const member = `group_id.in.(${idList}),group_ids.ov.{${idList}}`;
+    let q = await db.from('checklists').select('*').or(member).order('sort_order').order('created_at');
+    if (q.error) q = await db.from('checklists').select('*').or(member).order('created_at');
+    if (q.error) q = await db.from('checklists').select('*').in('group_id', groupIds).order('created_at'); // group_ids column pending
+    const all = (q.data || []).filter(visibleToMyDepartments);
     if (!all.length) return { items: [], total: 0 };
 
     const dueByQuota = all.filter(checklistDueToday);
@@ -634,11 +657,18 @@
     if (kind === 'procedure') return s.includes('meeting') ? '🧑‍🏫' : s.includes('tour') ? '🏭' : '🧭';
     return '📁';
   }
+  const libraryKindLabel = (kind) => ({
+    checklist: t('checklists'),
+    course: t('courses'),
+    document: t('documents'),
+    procedure: t('procedures'),
+  }[kind] || kind);
   function libraryCard({ kind, title, meta, sub, image, icon, onclick, actions = [], className = '' }) {
     const art = image
       ? el('div', { class: 'library-art' }, el('img', { src: image, alt: title }))
       : el('div', { class: 'library-art' }, el('span', { class: 'library-icon' }, icon || libraryIcon(kind, title)));
-    return el('div', { class: `library-card ${className}`.trim(), onclick, style: onclick ? 'cursor:pointer' : '' }, [
+    return el('div', { class: `library-card library-card-kind-${kind} ${className}`.trim(), onclick, style: onclick ? 'cursor:pointer' : '' }, [
+      el('div', { class: 'library-kind' }, libraryKindLabel(kind)),
       el('div', { class: 'library-title' }, title),
       art,
       el('div', {}, [
@@ -657,9 +687,8 @@
     return {
       title: groupName(g), tab: 'groups',
       async render(app) {
-        let q = await db.from('checklists').select('*').eq('group_id', g.id).order('sort_order').order('created_at');
-        if (q.error) q = await db.from('checklists').select('*').eq('group_id', g.id).order('created_at');
-        const data = q.data || [];
+        const q = await fetchGroupItems('checklists', g.id);
+        const data = (q.data || []).filter(visibleToMyDepartments);
         if (!data?.length) return app.append(emptyState(t('noChecklists'), t('noChecklistsHint')));
         const grid = el('div', { class: 'library-grid' });
         data.forEach(c => grid.append(libraryCard({
@@ -879,7 +908,7 @@
     return {
       title: groupName(g), tab: 'groups',
       async render(app) {
-        renderReportActions(app);
+        await renderReportActions(app);
         await renderRecentReports(app, 5);
         return;
         app.append(el('div', { style: 'display:grid;gap:10px;margin-bottom:18px' }, [
@@ -899,24 +928,30 @@
     };
   }
 
-  function renderReportActions(app) {
+  const HIDDEN_REPORTS_KEY = 'workerHiddenReportIds';
+  function hiddenReportIds() {
+    try { return new Set(JSON.parse(localStorage.getItem(HIDDEN_REPORTS_KEY) || '[]')); }
+    catch (err) { return new Set(); }
+  }
+  function setReportHidden(id, hidden) {
+    const ids = hiddenReportIds();
+    if (hidden) ids.add(id); else ids.delete(id);
+    localStorage.setItem(HIDDEN_REPORTS_KEY, JSON.stringify([...ids]));
+  }
+
+  function reportActionButton({ primary, iconClass, icon, label, onclick }) {
+    return el('button', { class: `report-action${primary ? ' report-action-primary' : ''}`, onclick }, [
+      el('span', { class: `report-action-icon ${iconClass}` }, icon),
+      el('span', {}, label),
+    ]);
+  }
+
+  async function renderReportActions(app) {
     app.append(el('div', { class: 'report-action-stack' }, [
-      el('button', { class: 'report-action report-action-primary', onclick: () => go(reportForm()) }, [
-        el('span', { class: 'report-action-icon report-action-icon-incident' }, '!'),
-        el('span', {}, t('reportIncident')),
-      ]),
-      el('button', { class: 'report-action', onclick: () => go(hazardForm()) }, [
-        el('span', { class: 'report-action-icon report-action-icon-warn' }, '!'),
-        el('span', {}, t('reportHazard')),
-      ]),
-      el('button', { class: 'report-action', onclick: () => go(suggestionForm()) }, [
-        el('span', { class: 'report-action-icon report-action-icon-suggestion' }, '+'),
-        el('span', {}, t('reportSuggestion')),
-      ]),
-      el('button', { class: 'report-action', onclick: () => go(varslingForm()) }, [
-        el('span', { class: 'report-action-icon report-action-icon-varsling' }, 'V'),
-        el('span', {}, t('varsling')),
-      ]),
+      reportActionButton({ primary: true, iconClass: 'report-action-icon-incident', icon: '!', label: t('reportIncident'), onclick: () => go(reportForm()) }),
+      reportActionButton({ iconClass: 'report-action-icon-warn', icon: '!', label: t('reportHazard'), onclick: () => go(hazardForm()) }),
+      reportActionButton({ iconClass: 'report-action-icon-suggestion', icon: '+', label: t('reportSuggestion'), onclick: () => go(suggestionForm()) }),
+      reportActionButton({ iconClass: 'report-action-icon-varsling', icon: 'V', label: t('varsling'), onclick: () => go(varslingForm()) }),
     ]));
   }
 
@@ -924,17 +959,35 @@
     app.append(el('h2', { class: 'display report-section-title' }, t('yourRecentReports')));
     let query = db.from('incidents').select('*')
       .eq('reporter_id', state.profile.id).order('created_at', { ascending: false });
-    if (limit) query = query.limit(limit);
     const { data } = await query;
     if (!data?.length) return app.append(emptyState(t('noReports'), t('noReportsHint')));
-    for (const i of data) app.append(incidentRow(i));
+    const hidden = hiddenReportIds();
+    const visibleReports = data.filter(i => !hidden.has(i.id));
+    const hiddenReports = data.filter(i => hidden.has(i.id));
+    const shown = limit ? visibleReports.slice(0, limit) : visibleReports;
+    if (shown.length) {
+      for (const i of shown) app.append(incidentRow(i));
+    } else {
+      app.append(emptyState(t('noReports'), t('noReportsHint')));
+    }
+    app.append(el('details', { class: 'archive-accordion' }, [
+      el('summary', {}, `${t('hiddenArchivedReports')} (${hiddenReports.length})`),
+      hiddenReports.length ? null : el('p', { class: 'muted' }, t('noHiddenReports')),
+      ...hiddenReports.map(i => incidentRow(i, true)),
+    ]));
   }
 
-  function incidentRow(i) {
+  function incidentRow(i, hidden = false) {
     return el('div', { class: 'row report-row', onclick: () => go(myIncidentView(i.id)), style: 'cursor:pointer' }, [
       el('div', { class: 'grow' }, [el('div', {}, truncate(i.what_happened, 64)),
         el('div', { class: 'sub' }, `${typeLabel(i.report_type)} · ${fmt(i.created_at)}`)]),
       el('span', { class: `pill ${incidentStatusClass(i)}`, style: incidentStatusStyle(i) }, statusLabel(i.status)),
+      el('button', { class: 'btn btn-ghost btn-sm', onclick: e => {
+        e.stopPropagation();
+        setReportHidden(i.id, !hidden);
+        toast(hidden ? t('reportRestored') : t('reportHidden'));
+        go(myReportsView(), { reset: true });
+      } }, hidden ? t('unhide') : t('hide')),
     ]);
   }
   const typeLabel = (k) => ({ incident: t('incident'), hazard: t('hazard'), suggestion: t('suggestion') }[k] || k || t('incident'));
@@ -1377,6 +1430,83 @@
     }
   }
 
+  async function appendIncidentActionPhotos(host, paths = []) {
+    if (!paths.length) return;
+    const grid = el('div', { class: 'photo-grid photo-grid-compact' });
+    host.append(grid);
+    for (const path of paths) {
+      const { data, error } = await db.storage.from('incident-photos').createSignedUrl(path, 300);
+      if (!error && data?.signedUrl) grid.append(el('img', { src: data.signedUrl, alt: t('attachments'), class: 'incident-photo' }));
+    }
+  }
+
+  async function renderIncidentActionLog(host, actions = []) {
+    const log = el('div', { class: 'timeline-list' });
+    host.append(el('div', { class: 'card' }, [
+      el('h3', {}, t('actionLog')),
+      log,
+    ]));
+    if (!actions.length) {
+      log.append(el('p', { class: 'muted' }, t('noActionsLoggedYet')));
+      return;
+    }
+    for (const a of actions) {
+      const item = el('div', { class: `timeline-note${a.user_addendum ? ' user-addendum' : ''}` }, [
+        el('div', { class: 'when' }, `${a.author_id === state.profile.id ? t('you') : t('caseTeam')} · ${fmt(a.created_at)}`),
+        el('div', {}, a.note),
+      ]);
+      log.append(item);
+      await appendIncidentActionPhotos(item, a.photo_paths || []);
+    }
+  }
+
+  function appendUpdateCard(host, inc) {
+    const note = el('textarea', { placeholder: t('appendUpdatePlaceholder'), style: 'min-height:110px' });
+    const files = el('input', { type: 'file', accept: 'image/*', multiple: true });
+    host.append(el('div', { class: 'card' }, [
+      el('h3', {}, t('appendUpdate')),
+      el('p', { class: 'muted' }, t('appendUpdateHint')),
+      labeled(t('addActionNote'), note),
+      labeled(t('attachments'), files),
+      el('button', { class: 'btn btn-primary', onclick: async () => {
+        const cleanNote = note.value.trim();
+        if (!cleanNote && !files.files.length) return toast(t('appendUpdateEmpty'), 'err');
+        const paths = await uploadIncidentPhotos(inc.id, files.files);
+        if (paths === null) return;
+        const { error } = await db.from('incident_actions').insert({
+          incident_id: inc.id,
+          author_id: state.profile.id,
+          note: cleanNote || t('attachmentsAdded'),
+          user_addendum: true,
+          photo_paths: paths,
+        });
+        if (error) return toast(error.message, 'err');
+        toast(t('updateAppended'));
+        go(myIncidentView(inc.id), { reset: true });
+      } }, t('appendUpdate')),
+    ]));
+  }
+
+  function appendEscalationCard(host, inc) {
+    if (inc.status !== 'resolved') return;
+    const reason = el('textarea', { placeholder: t('escalationReasonPlaceholder'), style: 'min-height:110px' });
+    host.append(el('div', { class: 'card escalation-card' }, [
+      el('h3', {}, t('reopenEscalate')),
+      el('p', { class: 'muted' }, t('reopenEscalateHint')),
+      labeled(t('reason'), reason),
+      el('button', { class: 'btn btn-primary', onclick: async () => {
+        if (!reason.value.trim()) return toast(t('reasonRequired'), 'err');
+        const { error } = await db.rpc('reopen_incident_escalate', {
+          p_incident: inc.id,
+          p_note: reason.value.trim(),
+        });
+        if (error) return toast(error.message, 'err');
+        toast(t('incidentEscalated'));
+        go(myIncidentView(inc.id), { reset: true });
+      } }, t('reopenEscalate')),
+    ]));
+  }
+
   // A category group: selectable chips + an "Other" chip that reveals a text box.
   function categoryBlock(labelText, cats) {
     const picked = new Set();
@@ -1412,6 +1542,7 @@
       title: t('yourReport'), tab: 'reports',
       async render(app) {
         const { data: inc } = await db.from('incidents').select('*').eq('id', id).single();
+        const { data: actions = [] } = await db.from('incident_actions').select('*').eq('incident_id', id).order('created_at');
         app.append(el('div', { class: 'card' }, [
           el('div', { class: 'section-head' }, [el('h3', {}, t('whatHappenedTitle')),
             el('span', { class: `pill ${incidentStatusClass(inc)}`, style: incidentStatusStyle(inc) }, statusLabel(inc.status))]),
@@ -1441,6 +1572,9 @@
               : 'This case is still being handled. The final report will appear here once it is closed.'),
           ]));
         }
+        await renderIncidentActionLog(app, actions || []);
+        appendUpdateCard(app, inc);
+        appendEscalationCard(app, inc);
       },
     };
   }
@@ -1449,7 +1583,7 @@
     return {
       title: t('reports'), tab: 'reports',
       async render(app) {
-        renderReportActions(app);
+        await renderReportActions(app);
         await renderRecentReports(app);
       },
     };
@@ -1460,9 +1594,8 @@
     return {
       title: groupName(g), tab: 'groups',
       async render(app) {
-        let q = await db.from('documents').select('*').eq('group_id', g.id).order('sort_order').order('created_at', { ascending: false });
-        if (q.error) q = await db.from('documents').select('*').eq('group_id', g.id).order('created_at', { ascending: false });
-        const data = q.data || [];
+        const q = await fetchGroupItems('documents', g.id, { desc: true });
+        const data = (q.data || []).filter(visibleToMyDepartments);
         if (!data?.length) return app.append(emptyState(t('noDocuments'), t('noDocumentsHint')));
         const grid = el('div', { class: 'library-grid' });
         data.forEach(d => grid.append(libraryCard({
@@ -1486,9 +1619,8 @@
     return {
       title: groupName(g), tab: 'groups',
       async render(app) {
-        let q = await db.from('procedures').select('*').eq('group_id', g.id).eq('is_draft', false).order('sort_order').order('created_at');
-        if (q.error) q = await db.from('procedures').select('*').eq('group_id', g.id).eq('is_draft', false).order('created_at');
-        const data = q.data || [];
+        const q = await fetchGroupItems('procedures', g.id, { extra: qb => qb.eq('is_draft', false) });
+        const data = (q.data || []).filter(visibleToMyDepartments);
         if (!data?.length) return app.append(emptyState(t('noProcedures'), t('noProceduresHint')));
         const grid = el('div', { class: 'library-grid' });
         data.forEach(p => grid.append(libraryCard({

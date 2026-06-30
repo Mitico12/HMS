@@ -52,7 +52,7 @@
   initTheme();
   initLanguage();
   const screen = $('#screen');
-  const state = { profile: null, groups: [], profiles: [], groupDeleteRequests: [] };
+  const state = { profile: null, groups: [], profiles: [], departments: [], userDepartments: new Map(), groupDeleteRequests: [] };
   const viewStack = [];                 // each entry: { title, render }
   let mobileSidebarOpen = false;
 
@@ -65,6 +65,8 @@
     if (res.profile.is_suspended) return showSuspended(res.profile); // under sys-admin review
     state.profile = res.profile;
     await loadProfiles();
+    await loadDepartments();
+    await loadUserDepartments();
     await loadGroupDeleteRequests();
     showApp();
     // Safety reps (verneombud) are limited to the Checklist Logs section.
@@ -77,6 +79,28 @@
   const monitor = { seen: null, count: 0, emergency: false, timer: null };
   const notifyPref = () => localStorage.getItem('notify_reports') || 'all';
   const isRedReport = (i) => (i.consequence_ids?.length > 0) || !!i.consequence_other;
+  const notificationController = (() => {
+    const key = 'seen_notification_ids';
+    const read = () => {
+      try { return new Set(JSON.parse(sessionStorage.getItem(key) || '[]')); }
+      catch (err) { return new Set(); }
+    };
+    const ids = read();
+    const persist = () => {
+      try { sessionStorage.setItem(key, JSON.stringify([...ids].slice(-500))); }
+      catch (err) { /* storage may be unavailable */ }
+    };
+    return {
+      shouldFire(kind, id) {
+        if (!id) return true;
+        const token = `${kind}:${id}`;
+        if (ids.has(token)) return false;
+        ids.add(token);
+        persist();
+        return true;
+      },
+    };
+  })();
 
   function updateReportsBadge() {
     const text = monitor.count ? (monitor.emergency ? '🚩 ' : '') + monitor.count : '';
@@ -88,6 +112,7 @@
   }
 
   function fireReportNotification(red, i) {
+    if (!notificationController.shouldFire('incident', i.id)) return;
     const title = red ? '🚩 Emergency report' : 'New report';
     const body = truncate(i.what_happened || 'A new report was submitted.', 80);
     toast(`${title}: ${body}`, red ? 'err' : 'ok');
@@ -154,7 +179,8 @@
     for (const c of cases) {
       if (!caseMonitor.seen.has(c.id)) {
         caseMonitor.seen.add(c.id);
-        if ('Notification' in window && Notification.permission === 'granted')
+        if (notificationController.shouldFire('sysadmin_case', c.id) &&
+            'Notification' in window && Notification.permission === 'granted')
           new Notification(t('emergencyTitle'), { body: t('emergencyBody') });
       }
     }
@@ -215,6 +241,129 @@
     }
     state.profiles = (withUsername.data || []).map(p => ({ ...p, mobile_number: p.mobile_number || '' }));
   }
+  async function loadDepartments() {
+    const { data, error } = await db.from('departments').select('*').order('name');
+    state.departments = error ? [] : (data || []);
+    return state.departments;
+  }
+  async function loadUserDepartments() {
+    const { data, error } = await db.from('user_departments').select('user_id,department_id');
+    state.userDepartments = new Map();
+    if (!error) {
+      for (const row of data || []) {
+        if (!state.userDepartments.has(row.user_id)) state.userDepartments.set(row.user_id, new Set());
+        state.userDepartments.get(row.user_id).add(row.department_id);
+      }
+    }
+    return state.userDepartments;
+  }
+  const departmentName = (id) => state.departments.find(d => d.id === id)?.name || 'Department';
+  const generalDepartmentId = () => state.departments.find(d => (d.name || '').toLowerCase() === 'general')?.id || state.departments[0]?.id || null;
+  const departmentIdsForUser = (id) => [...(state.userDepartments.get(id) || new Set())];
+  const departmentLabelsForUser = (id) => {
+    const labels = departmentIdsForUser(id).map(departmentName).filter(Boolean);
+    return labels.length ? labels.join(', ') : 'General';
+  };
+  const normalizeDepartmentIds = (ids) => Array.isArray(ids) ? ids.filter(Boolean) : [];
+  function departmentPicker(selectedIds = []) {
+    const picked = new Set(normalizeDepartmentIds(selectedIds));
+    if (!picked.size) {
+      const general = generalDepartmentId();
+      if (general) picked.add(general);
+    }
+    const wrap = el('div', { class: 'department-picker' });
+    if (!state.departments.length) {
+      wrap.append(el('p', { class: 'muted' }, 'Run the departments migration to enable department visibility.'));
+      return { field: el('div', { class: 'field' }, [el('span', {}, t('departments')), wrap]), get: () => [] };
+    }
+    for (const d of state.departments) {
+      const box = el('input', { type: 'checkbox', value: d.id });
+      box.checked = picked.has(d.id);
+      wrap.append(el('label', { class: 'check-item department-option' }, [box, el('span', {}, d.name)]));
+    }
+    return {
+      field: el('div', { class: 'field' }, [
+        el('span', {}, t('visibleToDepartments')),
+        wrap,
+        el('div', { class: 'muted', style: 'font-size:.78rem' }, t('departmentsHint')),
+      ]),
+      get: () => [...wrap.querySelectorAll('input:checked')].map(i => i.value),
+    };
+  }
+  // ── item ⇄ group linking ("import") ────────────────────
+  // An item belongs to a group when it's owned by it (group_id) or imported into
+  // it (group_ids contains the id). These helpers fetch that union, falling back
+  // gracefully if the group_ids column isn't there yet (migration not run).
+  const isLinkedItem = (item, gid) => item.group_id !== gid; // borrowed, not owned here
+  async function fetchGroupItems(table, gid, { desc = false } = {}) {
+    const member = `group_id.eq.${gid},group_ids.cs.{${gid}}`;
+    const run = (useOr, useSort) => {
+      let qb = db.from(table).select('*');
+      qb = useOr ? qb.or(member) : qb.eq('group_id', gid);
+      if (useSort) qb = qb.order('sort_order');
+      return qb.order('created_at', { ascending: !desc });
+    };
+    let q = await run(true, true);
+    if (q.error) q = await run(true, false);   // no sort_order column
+    if (q.error) q = await run(false, true);   // no group_ids column (migration pending)
+    if (q.error) q = await run(false, false);
+    return q;
+  }
+  async function importItemToGroup(table, item, gid) {
+    const next = [...new Set([...(item.group_ids || []), gid])].filter(id => id && id !== item.group_id);
+    return db.from(table).update({ group_ids: next }).eq('id', item.id);
+  }
+  async function unlinkItemFromGroup(table, item, gid) {
+    const next = (item.group_ids || []).filter(id => id && id !== gid);
+    return db.from(table).update({ group_ids: next }).eq('id', item.id);
+  }
+  // Modal: pick same-kind items from OTHER groups to import into group `g`.
+  // `labelOf` reads an item's display title; `onDone` re-renders the host view.
+  function importItemsModal(g, { table, titleOf, onDone }) {
+    openModal(t('importTitle'), async (body, close) => {
+      body.append(el('p', { class: 'muted', style: 'margin-top:0' }, t('importHint')));
+      const host = el('div', {});
+      body.append(host);
+      host.append(el('p', { class: 'muted' }, '…'));
+      const { data: rows = [], error } = await db.from(table).select('*');
+      host.innerHTML = '';
+      if (error) { host.append(el('p', { class: 'muted' }, error.message)); return; }
+      // Candidates: not already owned by, nor imported into, this group.
+      const candidates = (rows || []).filter(r =>
+        r.group_id !== g.id && !(Array.isArray(r.group_ids) && r.group_ids.includes(g.id)));
+      if (!candidates.length) { host.append(el('p', { class: 'muted' }, t('noItemsToImport'))); return; }
+      // Group candidates by their home group, label with the group name.
+      const byGroup = new Map();
+      candidates.forEach(r => {
+        if (!byGroup.has(r.group_id)) byGroup.set(r.group_id, []);
+        byGroup.get(r.group_id).push(r);
+      });
+      const picked = new Set();
+      for (const [gid, items] of byGroup) {
+        const home = state.groups.find(x => x.id === gid);
+        host.append(el('div', { class: 'muted', style: 'margin:10px 0 4px;font-weight:600' },
+          t('fromGroupLabel', { group: home ? home.name : '—' })));
+        items.forEach(r => {
+          const box = el('input', { type: 'checkbox', value: r.id });
+          box.addEventListener('change', () => box.checked ? picked.add(r) : picked.delete(r));
+          host.append(el('label', { class: 'check-item' }, [box, el('span', {}, titleOf(r) || '—')]));
+        });
+      }
+      body.append(el('button', { class: 'btn btn-primary btn-block', style: 'margin-top:14px', onclick: async () => {
+        if (!picked.size) return toast(t('selectItemsToImport'), 'err');
+        for (const r of picked) {
+          const { error: e } = await importItemToGroup(table, r, g.id);
+          if (e) return toast(e.message, 'err');
+        }
+        close();
+        toast(t('itemsImported', { count: picked.size }));
+        onDone && onDone();
+      } }, t('importSelected')));
+    });
+  }
+  const importBtn = (g, opts) => el('button', { class: 'iconbtn', title: t('import'),
+    onclick: () => importItemsModal(g, opts) }, '⬇');
+
   const nameOf = (id) => state.profiles.find(p => p.id === id)?.full_name || '—';
   const emailOf = (id) => state.profiles.find(p => p.id === id)?.email || '';
   const labelOf = (p) => p?.full_name || p?.username || p?.email || 'Unnamed user';
@@ -376,14 +525,10 @@
       { id: 'procedures', ic: '▤', label: t('procedureSubmissions'), open: () => openKind('procedures') },
       { id: 'courses', ic: '▣', label: t('manageCourses'), open: () => openKind('courses') },
       { id: 'users', ic: 'U', label: t('accounts'), count: pendingAccounts, open: () => go(usersView()) },
+      { id: 'departments', ic: 'D', label: t('departments'), open: () => go(departmentsView()) },
     ] : [
       { id: 'logs', ic: '☑', label: t('checklistLogs'), open: () => go(checklistLogsView()) },
     ];
-    // Varsling (whistleblowing) reports live in their own confidential list,
-    // visible in the management panel to superusers and above.
-    if (isSuperPlus(state.profile)) {
-      fixed.push({ id: 'varsling', ic: '🔒', label: t('varsling'), open: () => go(varslingListView()) });
-    }
     for (const item of fixed) nav.append(sidebarButton(item, active));
     const hidden = hiddenGroupIds();
     const extras = isAdmin
@@ -484,7 +629,7 @@
     bar.append(el('span', { class: 'role-pill' }, roleName(state.profile.role)));
     bar.append(themeToggleButton());
     bar.append(el('button', { class: 'iconbtn', title: t('signOut'), onclick: signOut }, '⏻'));
-    if (view.action) bar.append(view.action);
+    if (view.action) (Array.isArray(view.action) ? view.action : [view.action]).filter(Boolean).forEach(a => bar.append(a));
     const app = $('#app'); app.innerHTML = ''; app.className = 'wrap';
     renderBotnav(view.tab || 'groups');
     renderSidebar(view.side || view.tab || 'analytics');
@@ -512,35 +657,6 @@
         await loadGroupDeleteRequests();
         renderSidebar('analytics');
         await renderAdminKpiDashboard(app);
-        const pendingAccounts = state.profiles.filter(p => p.role === 'user' && !p.is_verified).length;
-        const pendingChanges = await pendingProfileChangeCount();
-        const pending = pendingAccounts + pendingChanges;
-        const grid = el('div', { class: 'tile-grid mobile-only-groups' });
-        const cards = [
-          { id: 'fixed:users', glyph: '👥', name: t('users'), meta: pending ? `${pending} ${t('waitingApproval').toLowerCase()}` : t('accountsAccess'), open: () => go(usersView()) },
-          { id: 'fixed:logs', glyph: '☑', name: t('logs'), meta: t('logsMeta'), open: () => go(logsView()) },
-          ...state.groups.map(g => ({
-            id: `group:${g.id}`,
-            group: g,
-            glyph: g.icon || '📁',
-            name: groupName(g),
-            meta: kindLabel(g.kind),
-            badge: g.kind === 'reports',
-            open: () => go(groupView(g)),
-            onHide: () => { setGroupHidden(g.id, true); toast(t('groupHidden')); go(homeView(), { reset: true }); },
-          })),
-        ];
-        const hidden = hiddenGroupIds();
-        const shownCards = cards.filter(c => !(c.group && hidden.has(c.group.id)));
-        renderSortableHomeTiles(grid, shownCards, 'adminHomeTileOrder', async ordered => {
-          const orderedGroups = ordered.filter(c => c.group).map(c => c.group);
-          state.groups = orderedGroups;
-          await saveSortOrder('groups', orderedGroups);
-          go(homeView(), { reset: true });
-        });
-        grid.append(el('button', { class: 'tile add', onclick: addGroupModal },
-          [el('span', { class: 'glyph' }, '+'), el('div', { class: 't-meta' }, t('addGroup'))]));
-        app.append(grid);
         updateReportsBadge();
       },
     };
@@ -1837,15 +1953,18 @@
         opt('documents', t('documents')),
         opt('courses', t('courses')),
       ]);
+      const visibility = departmentPicker();
       body.append(
         labeled(t('name'), name, true),
         labeled(t('icon'), icon),
         labeled(t('type'), kind),
+        visibility.field,
         el('button', { class: 'btn btn-primary btn-block', onclick: async () => {
           if (!name.value.trim()) return toast(t('nameRequired'), 'err');
           const sort_order = (state.groups.at(-1)?.sort_order || 0) + 1;
           const { error } = await db.from('groups').insert({
-            name: name.value.trim(), icon: icon.value.trim() || '📁', kind: kind.value, sort_order });
+            name: name.value.trim(), icon: icon.value.trim() || '📁', kind: kind.value, sort_order,
+            department_ids: visibility.get() });
           if (error) return toast(error.message, 'err');
           close(); toast(t('groupAdded')); go(homeView(), { reset: true });
         } }, t('addGroup')),
@@ -1880,12 +1999,19 @@
     if (kind === 'procedure') return s.includes('meeting') ? '🧑‍🏫' : s.includes('tour') ? '🏭' : '🧭';
     return '📁';
   }
+  const libraryKindLabel = (kind) => ({
+    checklist: t('checklists'),
+    course: t('courses'),
+    document: t('documents'),
+    procedure: t('procedures'),
+  }[kind] || kind);
   function libraryCard({ kind, title, meta, sub, image, icon, onclick, actions = [], handle = null, className = '' }) {
     const art = image
       ? el('div', { class: 'library-art' }, el('img', { src: image, alt: title }))
       : el('div', { class: 'library-art' }, el('span', { class: 'library-icon' }, icon || libraryIcon(kind, title)));
-    const card = el('div', { class: `library-card ${className}`.trim(), onclick, style: onclick ? 'cursor:pointer' : '' }, [
+    const card = el('div', { class: `library-card library-card-kind-${kind} ${className}`.trim(), onclick, style: onclick ? 'cursor:pointer' : '' }, [
       handle,
+      el('div', { class: 'library-kind' }, libraryKindLabel(kind)),
       el('div', { class: 'library-title' }, title),
       art,
       el('div', {}, [
@@ -1945,7 +2071,7 @@
       g.kind === 'checklist' ? checklistGroupView(g) :
       g.kind === 'reports' ? reportsGroupView(g) :
       g.kind === 'documents' ? documentsGroupView(g) :
-      g.kind === 'courses' ? coursesGroupView(g, { go, back, state }) :
+      g.kind === 'courses' ? coursesGroupView(g, { go, back, state, departmentPicker, importBtn }) :
       proceduresGroupView(g);
     view.side = g.kind === 'reports' ? 'incidents'
       : g.kind === 'procedures' ? 'procedures'
@@ -1964,10 +2090,12 @@
   function checklistGroupView(g) {
     return {
       title: groupName(g), tab: 'groups',
-      action: el('button', { class: 'iconbtn', title: t('newChecklist'), onclick: () => go(checklistEdit(g, null)) }, '+'),
+      action: [
+        importBtn(g, { table: 'checklists', titleOf: c => c.title, onDone: () => go(checklistGroupView(g), { reset: true }) }),
+        el('button', { class: 'iconbtn', title: t('newChecklist'), onclick: () => go(checklistEdit(g, null)) }, '+'),
+      ],
       async render(app) {
-        let q = await db.from('checklists').select('*').eq('group_id', g.id).order('sort_order').order('created_at');
-        if (q.error) q = await db.from('checklists').select('*').eq('group_id', g.id).order('created_at');
+        const q = await fetchGroupItems('checklists', g.id);
         const data = q.data || [];
         if (!data?.length) return app.append(emptyState(t('noChecklists'), t('noChecklistsHint')));
         let rows = data.slice();
@@ -1976,15 +2104,26 @@
         const draw = () => {
           list.innerHTML = '';
           rows.forEach((c, idx) => {
+            const linked = isLinkedItem(c, g.id);
             const handle = el('span', { class: 'drag-handle', draggable: 'true', title: t('dragReorder') }, '⠿');
             const row = libraryCard({
               kind: 'checklist',
               title: c.title,
               meta: t('items', { count: (c.items || []).length }),
+              sub: linked ? t('linked') : null,
+              className: linked ? 'item-linked' : '',
               image: c.image || firstChecklistImage(c),
               icon: c.icon || null,
               handle,
-              actions: [el('button', { class: 'btn btn-ghost', onclick: e => { e.stopPropagation(); go(checklistEdit(g, c)); } }, t('edit'))],
+              actions: [
+                el('button', { class: 'btn btn-ghost', onclick: e => { e.stopPropagation(); go(checklistEdit(g, c)); } }, t('edit')),
+                linked ? el('button', { class: 'btn btn-ghost', title: t('removeFromGroup'), onclick: async e => {
+                  e.stopPropagation();
+                  const { error } = await unlinkItemFromGroup('checklists', c, g.id);
+                  if (error) return toast(error.message, 'err');
+                  toast(t('removedFromGroup')); go(checklistGroupView(g), { reset: true });
+                } }, '×') : null,
+              ].filter(Boolean),
             });
             handle.addEventListener('dragstart', e => {
               dragIdx = idx;
@@ -2020,6 +2159,7 @@
         let items = (existing?.items || []).map(i => ({ ...i }));
         const quota = el('input', { type: 'number', min: '0', step: '1',
           value: existing?.daily_quota ?? 0, placeholder: '0' });
+        const visibility = departmentPicker(existing?.department_ids);
 
         const WEEKDAYS = [['1','Mon'],['2','Tue'],['3','Wed'],['4','Thu'],['5','Fri'],['6','Sat'],['0','Sun']];
         const quotaDays = new Set((existing?.quota_weekdays ?? [0,1,2,3,4,5,6]).map(Number));
@@ -2122,6 +2262,7 @@
         app.append(
           labeled(t('title'), title, true),
           labeled(t('profileImage'), logoPicker(logo)),
+          visibility.field,
           labeled(t('dailyQuota'), quota),
           labeled(t('quotaDays'), dayRow),
           list,
@@ -2131,7 +2272,13 @@
             el('button', { class: 'btn btn-ghost btn-block', onclick: previewChecklist }, 'Preview'),
             el('button', { class: 'btn btn-primary btn-block', onclick: save }, t('saveChecklist')),
           ]),
-          existing ? el('button', { class: 'btn btn-danger btn-block', style: 'margin-top:10px', onclick: del }, t('deleteChecklist')) : null,
+          existing && isLinkedItem(existing, g.id)
+            ? el('button', { class: 'btn btn-ghost btn-block', style: 'margin-top:10px', onclick: async () => {
+                const { error } = await unlinkItemFromGroup('checklists', existing, g.id);
+                if (error) return toast(error.message, 'err');
+                toast(t('removedFromGroup')); back();
+              } }, t('removeFromGroup'))
+            : existing ? el('button', { class: 'btn btn-danger btn-block', style: 'margin-top:10px', onclick: del }, t('deleteChecklist')) : null,
         );
         function cleanItems() {
           return items.filter(i => i.label.trim()).map(i => ({
@@ -2155,11 +2302,12 @@
           const clean = cleanItems();
           if (!title.value.trim() || !clean.length) return toast(t('addTitleAndItem'), 'err');
           const payload = {
-            group_id: g.id,
+            group_id: existing ? existing.group_id : g.id, // keep home group when editing a shared/linked item
             title: title.value.trim(),
             items: clean,
             image: logo.image || null,
             icon: logo.icon || null,
+            department_ids: visibility.get(),
             daily_quota: Math.max(0, parseInt(quota.value, 10) || 0),
             quota_weekdays: [...quotaDays].sort((a, b) => a - b),
           };
@@ -2251,6 +2399,15 @@
       async render(app) {
         await loadProfiles();
         const data = await fetchActiveReports();
+        const openByType = { incident: 0, hazard: 0, suggestion: 0 };
+        data.filter(i => i.status === 'open').forEach(i => {
+          const type = i.report_type || 'incident';
+          if (Object.prototype.hasOwnProperty.call(openByType, type)) openByType[type] += 1;
+        });
+        const canSeeVarsling = isSuperPlus(state.profile) && canAccessVarsling(state.profile);
+        const openVarslingCount = canSeeVarsling
+          ? await countRows(db.from('varslinger').select('id', { count: 'exact', head: true }).eq('status', 'open'))
+          : null;
 
         const filters = { status: 'all', type: 'incident', assignee: 'all', reporter: 'all' };
         let currentRows = data.slice();
@@ -2262,14 +2419,15 @@
           ['hazard', t('reportTypeHazards')],
           ['suggestion', t('reportTypeSuggestions')],
         ].forEach(([key, label]) => {
-          const chip = el('button', { class: 'chip', onclick: () => {
+          const chip = el('button', { class: `chip report-type-chip report-type-chip-${key}`, onclick: () => {
             filters.type = key; markActive(typeChips, key); apply();
-          } }, label);
+          } }, [label, openByType[key] ? el('span', { class: 'report-type-count' }, String(openByType[key])) : null]);
           typeChips[key] = chip;
           typeBar.append(chip);
         });
-        if (isSuperPlus(state.profile) && canAccessVarsling(state.profile)) {
-          typeBar.append(el('button', { class: 'chip', onclick: () => go(varslingListView()) }, t('varsling')));
+        if (canSeeVarsling) {
+          typeBar.append(el('button', { class: 'chip report-type-chip report-type-chip-varsling', onclick: () => go(varslingListView()) },
+            [t('varsling'), openVarslingCount ? el('span', { class: 'report-type-count' }, String(openVarslingCount)) : null]));
         }
 
         // Status chips — now with a visible active state.
@@ -2542,6 +2700,16 @@
     }
   }
 
+  async function appendIncidentActionPhotos(host, paths = []) {
+    if (!paths.length) return;
+    const grid = el('div', { class: 'photo-grid photo-grid-compact' });
+    host.append(grid);
+    for (const path of paths) {
+      const { data, error } = await db.storage.from('incident-photos').createSignedUrl(path, 300);
+      if (!error && data?.signedUrl) grid.append(el('img', { src: data.signedUrl, alt: t('attachments'), class: 'incident-photo' }));
+    }
+  }
+
   function customFieldsCard(values) {
     const entries = Object.entries(values || {}).filter(([, v]) => Array.isArray(v) ? v.length : v !== null && v !== undefined && v !== '');
     if (!entries.length) return null;
@@ -2623,10 +2791,12 @@
         const note = el('textarea', { placeholder: t('actionNotePlaceholder') });
         const log = el('div', {});
         for (const a of actions || []) {
-          log.append(el('div', { class: 'timeline-note' }, [
-            el('div', { class: 'when' }, `${nameOf(a.author_id)} · ${fmt(a.created_at)}`),
+          const item = el('div', { class: `timeline-note${a.user_addendum ? ' user-addendum' : ''}` }, [
+            el('div', { class: 'when' }, `${nameOf(a.author_id)} · ${fmt(a.created_at)}${a.user_addendum ? ` · ${t('workerAddendum')}` : ''}`),
             el('div', {}, a.note),
-          ]));
+          ]);
+          log.append(item);
+          await appendIncidentActionPhotos(item, a.photo_paths || []);
         }
         if (!actions?.length) log.append(el('p', { class: 'muted' }, t('noActionsLoggedYet')));
         app.append(el('div', { class: 'card' }, [
@@ -3097,36 +3267,40 @@
   function documentsGroupView(g) {
     return {
       title: groupName(g), tab: 'groups',
+      action: importBtn(g, { table: 'documents', titleOf: d => d.name, onDone: () => go(documentsGroupView(g), { reset: true }) }),
       render(app) {
         const file = el('input', { type: 'file' });
+        const visibility = departmentPicker(g.department_ids);
         const listHost = el('div', { class: 'library-grid' });
         app.append(el('div', { class: 'card' }, [
           el('h3', {}, t('uploadDocument')),
           file,
+          visibility.field,
           el('button', { class: 'btn btn-primary', style: 'margin-top:12px', onclick: upload }, t('upload')),
         ]), listHost);
         loadDocs();
 
         async function loadDocs() {
           listHost.innerHTML = '';
-          let q = await db.from('documents').select('*').eq('group_id', g.id).order('sort_order').order('created_at', { ascending: false });
-          if (q.error) q = await db.from('documents').select('*').eq('group_id', g.id).order('created_at', { ascending: false });
+          const q = await fetchGroupItems('documents', g.id, { desc: true });
           let rows = q.data || [];
           if (!rows.length) { listHost.append(emptyState(t('noDocuments'), t('noDocumentsHint'))); return; }
           let dragIdx = null;
           const draw = () => {
             listHost.innerHTML = '';
             rows.forEach((d, idx) => {
+              const linked = isLinkedItem(d, g.id);
               const handle = el('span', { class: 'drag-handle', draggable: 'true', title: t('dragReorder') }, '⠿');
               const row = libraryCard({
                 kind: 'document',
                 title: d.name,
                 meta: `${(d.size_bytes / 1024 | 0)} KB`,
-                sub: fmt(d.created_at),
+                sub: linked ? `${t('linked')} · ${fmt(d.created_at)}` : fmt(d.created_at),
+                className: linked ? 'item-linked' : '',
                 handle,
                 actions: [
                   el('button', { class: 'btn btn-ghost', onclick: e => { e.stopPropagation(); openDoc(d); } }, t('open')),
-                  el('button', { class: 'btn btn-danger', onclick: e => { e.stopPropagation(); removeDoc(d); } }, '×'),
+                  el('button', { class: 'btn btn-danger', title: linked ? t('removeFromGroup') : '', onclick: e => { e.stopPropagation(); removeDoc(d); } }, '×'),
                 ],
               });
               handle.addEventListener('dragstart', e => {
@@ -3158,7 +3332,7 @@
           if (upErr) return toast(upErr.message, 'err');
           const { error } = await db.from('documents').insert({
             group_id: g.id, name: f.name, storage_path: path, mime_type: f.type, size_bytes: f.size,
-            uploaded_by: state.profile.id });
+            department_ids: visibility.get(), uploaded_by: state.profile.id });
           if (error) return toast(error.message, 'err');
           file.value = ''; toast(t('uploaded')); loadDocs();
         }
@@ -3168,6 +3342,11 @@
           window.open(data.signedUrl, '_blank');
         }
         async function removeDoc(d) {
+          if (isLinkedItem(d, g.id)) { // borrowed here — just unlink, keep the file & home group
+            const { error } = await unlinkItemFromGroup('documents', d, g.id);
+            if (error) return toast(error.message, 'err');
+            toast(t('removedFromGroup')); return loadDocs();
+          }
           if (!confirm(`Delete "${d.name}"?`)) return;
           await db.storage.from('documents').remove([d.storage_path]);
           await db.from('documents').delete().eq('id', d.id);
@@ -3186,10 +3365,12 @@
   function proceduresGroupView(g) {
     return {
       title: groupName(g), tab: 'groups',
-      action: el('button', { class: 'iconbtn', title: t('newProcedure'), onclick: () => go(procedureBuild(g, null)) }, '+'),
+      action: [
+        importBtn(g, { table: 'procedures', titleOf: p => p.title, onDone: () => go(proceduresGroupView(g), { reset: true }) }),
+        el('button', { class: 'iconbtn', title: t('newProcedure'), onclick: () => go(procedureBuild(g, null)) }, '+'),
+      ],
       async render(app) {
-        let q = await db.from('procedures').select('*').eq('group_id', g.id).order('sort_order').order('created_at');
-        if (q.error) q = await db.from('procedures').select('*').eq('group_id', g.id).order('created_at');
+        const q = await fetchGroupItems('procedures', g.id);
         const data = q.data || [];
         if (!data?.length) return app.append(emptyState(t('noProcedures'), t('noProceduresHint')));
         let rows = data.slice();
@@ -3198,19 +3379,27 @@
         const draw = () => {
           list.innerHTML = '';
           rows.forEach((p, idx) => {
+            const linked = isLinkedItem(p, g.id);
             const handle = el('span', { class: 'drag-handle', draggable: 'true', title: t('dragReorder') }, '⠿');
             const row = libraryCard({
               kind: 'procedure',
               title: p.title,
               meta: `${(p.fields || []).length} ${t('fields')}`,
-              sub: p.is_draft ? t('draft') : t('published'),
+              sub: linked ? `${t('linked')} · ${p.is_draft ? t('draft') : t('published')}` : (p.is_draft ? t('draft') : t('published')),
+              className: linked ? 'item-linked' : '',
               image: p.image || null,
               icon: p.icon || null,
               handle,
               actions: [
                 el('button', { class: 'btn btn-ghost', onclick: e => { e.stopPropagation(); go(submissionsView(p)); } }, t('entries')),
                 el('button', { class: 'btn btn-ghost', onclick: e => { e.stopPropagation(); go(procedureBuild(g, p)); } }, t('edit')),
-              ],
+                linked ? el('button', { class: 'btn btn-ghost', title: t('removeFromGroup'), onclick: async e => {
+                  e.stopPropagation();
+                  const { error } = await unlinkItemFromGroup('procedures', p, g.id);
+                  if (error) return toast(error.message, 'err');
+                  toast(t('removedFromGroup')); go(proceduresGroupView(g), { reset: true });
+                } }, '×') : null,
+              ].filter(Boolean),
             });
             handle.addEventListener('dragstart', e => {
               dragIdx = idx;
@@ -3244,6 +3433,7 @@
         const title = el('input', { type: 'text', value: existing?.title || '', placeholder: 'Procedure title' });
         const desc = el('textarea', { placeholder: 'Short description (optional)' }); desc.value = existing?.description || '';
         const logo = { image: existing?.image || null, icon: existing?.icon || null };
+        const visibility = departmentPicker(existing?.department_ids);
         let fields = (existing?.fields || []).map(f => ({ ...f }));
         let dragIdx = null;
         const list = el('div', {});
@@ -3325,7 +3515,7 @@
         };
         draw();
         app.append(
-          labeled(t('title'), title, true), labeled(t('profileImage'), logoPicker(logo)), labeled(t('description'), desc), list,
+          labeled(t('title'), title, true), labeled(t('profileImage'), logoPicker(logo)), visibility.field, labeled(t('description'), desc), list,
           el('button', { class: 'btn btn-ghost btn-block', style: 'margin-bottom:16px', onclick: () => {
             fields.push({ key: crypto.randomUUID(), type: 'short', label: '', required: false, options: [] }); draw();
           } }, t('addField')),
@@ -3334,7 +3524,13 @@
             el('button', { class: 'btn btn-ghost btn-block', onclick: () => saveProc(true) }, t('saveDraft')),
             el('button', { class: 'btn btn-primary btn-block', onclick: () => saveProc(false) }, t('publish')),
           ]),
-          existing ? el('button', { class: 'btn btn-danger btn-block', style: 'margin-top:10px', onclick: del }, t('deleteProcedure')) : null,
+          existing && isLinkedItem(existing, g.id)
+            ? el('button', { class: 'btn btn-ghost btn-block', style: 'margin-top:10px', onclick: async () => {
+                const { error } = await unlinkItemFromGroup('procedures', existing, g.id);
+                if (error) return toast(error.message, 'err');
+                toast(t('removedFromGroup')); back();
+              } }, t('removeFromGroup'))
+            : existing ? el('button', { class: 'btn btn-danger btn-block', style: 'margin-top:10px', onclick: del }, t('deleteProcedure')) : null,
         );
         function cleanProcFields() {
           return cleanReportFormFields(fields);
@@ -3349,8 +3545,9 @@
         async function saveProc(is_draft) {
           const clean = cleanProcFields();
           if (!title.value.trim() || !clean.length) return toast(t('addTitleAndField'), 'err');
-          const payload = { group_id: g.id, title: title.value.trim(), description: desc.value.trim() || null,
-            fields: clean, is_draft, image: logo.image || null, icon: logo.icon || null, created_by: state.profile.id };
+          const payload = { group_id: existing ? existing.group_id : g.id, title: title.value.trim(), description: desc.value.trim() || null,
+            fields: clean, is_draft, image: logo.image || null, icon: logo.icon || null,
+            department_ids: visibility.get(), created_by: state.profile.id };
           const q = existing ? db.from('procedures').update(payload).eq('id', existing.id)
                              : db.from('procedures').insert(payload);
           const { error } = await q;
@@ -3653,7 +3850,7 @@
   // ════════════════════════════════════════════════════════
   function varslingListView() {
     return {
-      title: t('varsling'), tab: 'groups', side: 'varsling',
+      title: t('varsling'), tab: 'groups', side: 'incidents',
       async render(app) {
         if (!isSuperPlus(state.profile) && !canAccessVarsling(state.profile)) { app.append(emptyState(t('varsling'), 'No access.')); return; }
         await loadProfiles();
@@ -3684,7 +3881,7 @@
 
   function varslingDetailView(id) {
     return {
-      title: t('varsling'), tab: 'groups', side: 'varsling',
+      title: t('varsling'), tab: 'groups', side: 'incidents',
       async render(app) {
         if (!isSuperPlus(state.profile) && !canAccessVarsling(state.profile)) { app.append(emptyState(t('varsling'), 'No access.')); return; }
         await loadProfiles();
@@ -3823,6 +4020,71 @@
     };
   }
 
+  function departmentsView() {
+    return {
+      title: t('departments'), tab: 'groups', side: 'departments',
+      async render(app) {
+        await loadProfiles();
+        await loadDepartments();
+        await loadUserDepartments();
+        const name = el('input', { type: 'text', placeholder: t('departmentName') });
+        app.append(el('div', { class: 'card departments-create' }, [
+          el('h3', {}, t('departments')),
+          el('p', { class: 'muted' }, t('departmentsAdminHint')),
+          labeled(t('name'), name, true),
+          el('button', { class: 'btn btn-primary', onclick: async () => {
+            const clean = name.value.trim();
+            if (!clean) return toast(t('nameRequired'), 'err');
+            const { error } = await db.from('departments').insert({ name: clean });
+            if (error) return toast(error.message, 'err');
+            name.value = '';
+            toast(t('saved'));
+            go(departmentsView(), { reset: true });
+          } }, t('add')),
+        ]));
+        if (!state.departments.length) {
+          app.append(emptyState(t('departments'), 'Run the departments migration first.'));
+          return;
+        }
+        const grid = el('div', { class: 'department-grid' });
+        app.append(grid);
+        for (const d of state.departments) {
+          const isGeneral = (d.name || '').toLowerCase() === 'general';
+          const users = el('div', { class: 'department-users' });
+          const card = el('div', { class: 'card department-card' }, [
+            el('div', { class: 'section-head' }, [
+              el('h3', {}, d.name),
+              isGeneral ? el('span', { class: 'pill' }, 'Default') : null,
+            ]),
+            el('p', { class: 'muted' }, isGeneral ? t('generalDepartmentHint') : t('departmentMembershipHint')),
+            users,
+          ]);
+          grid.append(card);
+          for (const p of state.profiles) {
+            const box = el('input', { type: 'checkbox' });
+            box.checked = isGeneral || departmentIdsForUser(p.id).includes(d.id);
+            box.disabled = isGeneral;
+            box.addEventListener('change', async () => {
+              if (box.checked) {
+                const { error } = await db.from('user_departments').insert({ user_id: p.id, department_id: d.id });
+                if (error) { box.checked = false; return toast(error.message, 'err'); }
+              } else {
+                const { error } = await db.from('user_departments').delete().eq('user_id', p.id).eq('department_id', d.id);
+                if (error) { box.checked = true; return toast(error.message, 'err'); }
+              }
+              await loadUserDepartments();
+              toast(t('saved'));
+            });
+            users.append(el('label', { class: 'check-item department-user' }, [
+              box,
+              el('span', {}, labelOf(p)),
+            ]));
+          }
+        }
+      },
+    };
+  }
+
   // Map any role (incl. legacy super_admin) to its colour-class suffix.
   const roleClass = (r) => 'role-' + (r === 'super_admin' ? 'sysadmin' : r);
 
@@ -3831,6 +4093,7 @@
       p.email || 'No email',
       p.username ? `@${p.username}` : null,
       p.mobile_number || null,
+      departmentLabelsForUser(p.id),
       roleName(p.role).toLowerCase(),
       p.role === 'user' ? (p.is_verified ? 'approved' : 'awaiting approval') : null,
     ].filter(Boolean).join(' · ');
@@ -3981,6 +4244,7 @@
             kv('Username', p.username ? `@${p.username}` : '—'),
             kv('Email', p.email || '—'),
             kv('Mobile', p.mobile_number || '—'),
+            kv(t('departments'), departmentLabelsForUser(p.id)),
             kv('Access', `${roleName(p.role)}${p.role === 'user' ? (p.is_verified ? ' · approved' : ' · awaiting approval') : ''}`),
           ]),
         ]));
@@ -4227,8 +4491,10 @@
             const { error: vErr } = await db.rpc('set_verification', { target: id, verified: true });
             if (vErr) return toast(vErr.message, 'err');
           }
+          const general = generalDepartmentId();
+          if (general) await db.from('user_departments').insert({ user_id: id, department_id: general });
           toast(t('userAddedTempPassword'));
-          close(); await loadProfiles(); refresh();
+          close(); await loadProfiles(); await loadUserDepartments(); refresh();
         } }, 'Create user'),
       );
     });
