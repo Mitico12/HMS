@@ -290,6 +290,80 @@
       get: () => [...wrap.querySelectorAll('input:checked')].map(i => i.value),
     };
   }
+  // ── item ⇄ group linking ("import") ────────────────────
+  // An item belongs to a group when it's owned by it (group_id) or imported into
+  // it (group_ids contains the id). These helpers fetch that union, falling back
+  // gracefully if the group_ids column isn't there yet (migration not run).
+  const isLinkedItem = (item, gid) => item.group_id !== gid; // borrowed, not owned here
+  async function fetchGroupItems(table, gid, { desc = false } = {}) {
+    const member = `group_id.eq.${gid},group_ids.cs.{${gid}}`;
+    const run = (useOr, useSort) => {
+      let qb = db.from(table).select('*');
+      qb = useOr ? qb.or(member) : qb.eq('group_id', gid);
+      if (useSort) qb = qb.order('sort_order');
+      return qb.order('created_at', { ascending: !desc });
+    };
+    let q = await run(true, true);
+    if (q.error) q = await run(true, false);   // no sort_order column
+    if (q.error) q = await run(false, true);   // no group_ids column (migration pending)
+    if (q.error) q = await run(false, false);
+    return q;
+  }
+  async function importItemToGroup(table, item, gid) {
+    const next = [...new Set([...(item.group_ids || []), gid])].filter(id => id && id !== item.group_id);
+    return db.from(table).update({ group_ids: next }).eq('id', item.id);
+  }
+  async function unlinkItemFromGroup(table, item, gid) {
+    const next = (item.group_ids || []).filter(id => id && id !== gid);
+    return db.from(table).update({ group_ids: next }).eq('id', item.id);
+  }
+  // Modal: pick same-kind items from OTHER groups to import into group `g`.
+  // `labelOf` reads an item's display title; `onDone` re-renders the host view.
+  function importItemsModal(g, { table, titleOf, onDone }) {
+    openModal(t('importTitle'), async (body, close) => {
+      body.append(el('p', { class: 'muted', style: 'margin-top:0' }, t('importHint')));
+      const host = el('div', {});
+      body.append(host);
+      host.append(el('p', { class: 'muted' }, '…'));
+      const { data: rows = [], error } = await db.from(table).select('*');
+      host.innerHTML = '';
+      if (error) { host.append(el('p', { class: 'muted' }, error.message)); return; }
+      // Candidates: not already owned by, nor imported into, this group.
+      const candidates = (rows || []).filter(r =>
+        r.group_id !== g.id && !(Array.isArray(r.group_ids) && r.group_ids.includes(g.id)));
+      if (!candidates.length) { host.append(el('p', { class: 'muted' }, t('noItemsToImport'))); return; }
+      // Group candidates by their home group, label with the group name.
+      const byGroup = new Map();
+      candidates.forEach(r => {
+        if (!byGroup.has(r.group_id)) byGroup.set(r.group_id, []);
+        byGroup.get(r.group_id).push(r);
+      });
+      const picked = new Set();
+      for (const [gid, items] of byGroup) {
+        const home = state.groups.find(x => x.id === gid);
+        host.append(el('div', { class: 'muted', style: 'margin:10px 0 4px;font-weight:600' },
+          t('fromGroupLabel', { group: home ? home.name : '—' })));
+        items.forEach(r => {
+          const box = el('input', { type: 'checkbox', value: r.id });
+          box.addEventListener('change', () => box.checked ? picked.add(r) : picked.delete(r));
+          host.append(el('label', { class: 'check-item' }, [box, el('span', {}, titleOf(r) || '—')]));
+        });
+      }
+      body.append(el('button', { class: 'btn btn-primary btn-block', style: 'margin-top:14px', onclick: async () => {
+        if (!picked.size) return toast(t('selectItemsToImport'), 'err');
+        for (const r of picked) {
+          const { error: e } = await importItemToGroup(table, r, g.id);
+          if (e) return toast(e.message, 'err');
+        }
+        close();
+        toast(t('itemsImported', { count: picked.size }));
+        onDone && onDone();
+      } }, t('importSelected')));
+    });
+  }
+  const importBtn = (g, opts) => el('button', { class: 'iconbtn', title: t('import'),
+    onclick: () => importItemsModal(g, opts) }, '⬇');
+
   const nameOf = (id) => state.profiles.find(p => p.id === id)?.full_name || '—';
   const emailOf = (id) => state.profiles.find(p => p.id === id)?.email || '';
   const labelOf = (p) => p?.full_name || p?.username || p?.email || 'Unnamed user';
@@ -555,7 +629,7 @@
     bar.append(el('span', { class: 'role-pill' }, roleName(state.profile.role)));
     bar.append(themeToggleButton());
     bar.append(el('button', { class: 'iconbtn', title: t('signOut'), onclick: signOut }, '⏻'));
-    if (view.action) bar.append(view.action);
+    if (view.action) (Array.isArray(view.action) ? view.action : [view.action]).filter(Boolean).forEach(a => bar.append(a));
     const app = $('#app'); app.innerHTML = ''; app.className = 'wrap';
     renderBotnav(view.tab || 'groups');
     renderSidebar(view.side || view.tab || 'analytics');
@@ -1997,7 +2071,7 @@
       g.kind === 'checklist' ? checklistGroupView(g) :
       g.kind === 'reports' ? reportsGroupView(g) :
       g.kind === 'documents' ? documentsGroupView(g) :
-      g.kind === 'courses' ? coursesGroupView(g, { go, back, state, departmentPicker }) :
+      g.kind === 'courses' ? coursesGroupView(g, { go, back, state, departmentPicker, importBtn }) :
       proceduresGroupView(g);
     view.side = g.kind === 'reports' ? 'incidents'
       : g.kind === 'procedures' ? 'procedures'
@@ -2016,10 +2090,12 @@
   function checklistGroupView(g) {
     return {
       title: groupName(g), tab: 'groups',
-      action: el('button', { class: 'iconbtn', title: t('newChecklist'), onclick: () => go(checklistEdit(g, null)) }, '+'),
+      action: [
+        importBtn(g, { table: 'checklists', titleOf: c => c.title, onDone: () => go(checklistGroupView(g), { reset: true }) }),
+        el('button', { class: 'iconbtn', title: t('newChecklist'), onclick: () => go(checklistEdit(g, null)) }, '+'),
+      ],
       async render(app) {
-        let q = await db.from('checklists').select('*').eq('group_id', g.id).order('sort_order').order('created_at');
-        if (q.error) q = await db.from('checklists').select('*').eq('group_id', g.id).order('created_at');
+        const q = await fetchGroupItems('checklists', g.id);
         const data = q.data || [];
         if (!data?.length) return app.append(emptyState(t('noChecklists'), t('noChecklistsHint')));
         let rows = data.slice();
@@ -2028,15 +2104,26 @@
         const draw = () => {
           list.innerHTML = '';
           rows.forEach((c, idx) => {
+            const linked = isLinkedItem(c, g.id);
             const handle = el('span', { class: 'drag-handle', draggable: 'true', title: t('dragReorder') }, '⠿');
             const row = libraryCard({
               kind: 'checklist',
               title: c.title,
               meta: t('items', { count: (c.items || []).length }),
+              sub: linked ? t('linked') : null,
+              className: linked ? 'item-linked' : '',
               image: c.image || firstChecklistImage(c),
               icon: c.icon || null,
               handle,
-              actions: [el('button', { class: 'btn btn-ghost', onclick: e => { e.stopPropagation(); go(checklistEdit(g, c)); } }, t('edit'))],
+              actions: [
+                el('button', { class: 'btn btn-ghost', onclick: e => { e.stopPropagation(); go(checklistEdit(g, c)); } }, t('edit')),
+                linked ? el('button', { class: 'btn btn-ghost', title: t('removeFromGroup'), onclick: async e => {
+                  e.stopPropagation();
+                  const { error } = await unlinkItemFromGroup('checklists', c, g.id);
+                  if (error) return toast(error.message, 'err');
+                  toast(t('removedFromGroup')); go(checklistGroupView(g), { reset: true });
+                } }, '×') : null,
+              ].filter(Boolean),
             });
             handle.addEventListener('dragstart', e => {
               dragIdx = idx;
@@ -2185,7 +2272,13 @@
             el('button', { class: 'btn btn-ghost btn-block', onclick: previewChecklist }, 'Preview'),
             el('button', { class: 'btn btn-primary btn-block', onclick: save }, t('saveChecklist')),
           ]),
-          existing ? el('button', { class: 'btn btn-danger btn-block', style: 'margin-top:10px', onclick: del }, t('deleteChecklist')) : null,
+          existing && isLinkedItem(existing, g.id)
+            ? el('button', { class: 'btn btn-ghost btn-block', style: 'margin-top:10px', onclick: async () => {
+                const { error } = await unlinkItemFromGroup('checklists', existing, g.id);
+                if (error) return toast(error.message, 'err');
+                toast(t('removedFromGroup')); back();
+              } }, t('removeFromGroup'))
+            : existing ? el('button', { class: 'btn btn-danger btn-block', style: 'margin-top:10px', onclick: del }, t('deleteChecklist')) : null,
         );
         function cleanItems() {
           return items.filter(i => i.label.trim()).map(i => ({
@@ -2209,7 +2302,7 @@
           const clean = cleanItems();
           if (!title.value.trim() || !clean.length) return toast(t('addTitleAndItem'), 'err');
           const payload = {
-            group_id: g.id,
+            group_id: existing ? existing.group_id : g.id, // keep home group when editing a shared/linked item
             title: title.value.trim(),
             items: clean,
             image: logo.image || null,
@@ -3174,6 +3267,7 @@
   function documentsGroupView(g) {
     return {
       title: groupName(g), tab: 'groups',
+      action: importBtn(g, { table: 'documents', titleOf: d => d.name, onDone: () => go(documentsGroupView(g), { reset: true }) }),
       render(app) {
         const file = el('input', { type: 'file' });
         const visibility = departmentPicker(g.department_ids);
@@ -3188,24 +3282,25 @@
 
         async function loadDocs() {
           listHost.innerHTML = '';
-          let q = await db.from('documents').select('*').eq('group_id', g.id).order('sort_order').order('created_at', { ascending: false });
-          if (q.error) q = await db.from('documents').select('*').eq('group_id', g.id).order('created_at', { ascending: false });
+          const q = await fetchGroupItems('documents', g.id, { desc: true });
           let rows = q.data || [];
           if (!rows.length) { listHost.append(emptyState(t('noDocuments'), t('noDocumentsHint'))); return; }
           let dragIdx = null;
           const draw = () => {
             listHost.innerHTML = '';
             rows.forEach((d, idx) => {
+              const linked = isLinkedItem(d, g.id);
               const handle = el('span', { class: 'drag-handle', draggable: 'true', title: t('dragReorder') }, '⠿');
               const row = libraryCard({
                 kind: 'document',
                 title: d.name,
                 meta: `${(d.size_bytes / 1024 | 0)} KB`,
-                sub: fmt(d.created_at),
+                sub: linked ? `${t('linked')} · ${fmt(d.created_at)}` : fmt(d.created_at),
+                className: linked ? 'item-linked' : '',
                 handle,
                 actions: [
                   el('button', { class: 'btn btn-ghost', onclick: e => { e.stopPropagation(); openDoc(d); } }, t('open')),
-                  el('button', { class: 'btn btn-danger', onclick: e => { e.stopPropagation(); removeDoc(d); } }, '×'),
+                  el('button', { class: 'btn btn-danger', title: linked ? t('removeFromGroup') : '', onclick: e => { e.stopPropagation(); removeDoc(d); } }, '×'),
                 ],
               });
               handle.addEventListener('dragstart', e => {
@@ -3247,6 +3342,11 @@
           window.open(data.signedUrl, '_blank');
         }
         async function removeDoc(d) {
+          if (isLinkedItem(d, g.id)) { // borrowed here — just unlink, keep the file & home group
+            const { error } = await unlinkItemFromGroup('documents', d, g.id);
+            if (error) return toast(error.message, 'err');
+            toast(t('removedFromGroup')); return loadDocs();
+          }
           if (!confirm(`Delete "${d.name}"?`)) return;
           await db.storage.from('documents').remove([d.storage_path]);
           await db.from('documents').delete().eq('id', d.id);
@@ -3265,10 +3365,12 @@
   function proceduresGroupView(g) {
     return {
       title: groupName(g), tab: 'groups',
-      action: el('button', { class: 'iconbtn', title: t('newProcedure'), onclick: () => go(procedureBuild(g, null)) }, '+'),
+      action: [
+        importBtn(g, { table: 'procedures', titleOf: p => p.title, onDone: () => go(proceduresGroupView(g), { reset: true }) }),
+        el('button', { class: 'iconbtn', title: t('newProcedure'), onclick: () => go(procedureBuild(g, null)) }, '+'),
+      ],
       async render(app) {
-        let q = await db.from('procedures').select('*').eq('group_id', g.id).order('sort_order').order('created_at');
-        if (q.error) q = await db.from('procedures').select('*').eq('group_id', g.id).order('created_at');
+        const q = await fetchGroupItems('procedures', g.id);
         const data = q.data || [];
         if (!data?.length) return app.append(emptyState(t('noProcedures'), t('noProceduresHint')));
         let rows = data.slice();
@@ -3277,19 +3379,27 @@
         const draw = () => {
           list.innerHTML = '';
           rows.forEach((p, idx) => {
+            const linked = isLinkedItem(p, g.id);
             const handle = el('span', { class: 'drag-handle', draggable: 'true', title: t('dragReorder') }, '⠿');
             const row = libraryCard({
               kind: 'procedure',
               title: p.title,
               meta: `${(p.fields || []).length} ${t('fields')}`,
-              sub: p.is_draft ? t('draft') : t('published'),
+              sub: linked ? `${t('linked')} · ${p.is_draft ? t('draft') : t('published')}` : (p.is_draft ? t('draft') : t('published')),
+              className: linked ? 'item-linked' : '',
               image: p.image || null,
               icon: p.icon || null,
               handle,
               actions: [
                 el('button', { class: 'btn btn-ghost', onclick: e => { e.stopPropagation(); go(submissionsView(p)); } }, t('entries')),
                 el('button', { class: 'btn btn-ghost', onclick: e => { e.stopPropagation(); go(procedureBuild(g, p)); } }, t('edit')),
-              ],
+                linked ? el('button', { class: 'btn btn-ghost', title: t('removeFromGroup'), onclick: async e => {
+                  e.stopPropagation();
+                  const { error } = await unlinkItemFromGroup('procedures', p, g.id);
+                  if (error) return toast(error.message, 'err');
+                  toast(t('removedFromGroup')); go(proceduresGroupView(g), { reset: true });
+                } }, '×') : null,
+              ].filter(Boolean),
             });
             handle.addEventListener('dragstart', e => {
               dragIdx = idx;
@@ -3414,7 +3524,13 @@
             el('button', { class: 'btn btn-ghost btn-block', onclick: () => saveProc(true) }, t('saveDraft')),
             el('button', { class: 'btn btn-primary btn-block', onclick: () => saveProc(false) }, t('publish')),
           ]),
-          existing ? el('button', { class: 'btn btn-danger btn-block', style: 'margin-top:10px', onclick: del }, t('deleteProcedure')) : null,
+          existing && isLinkedItem(existing, g.id)
+            ? el('button', { class: 'btn btn-ghost btn-block', style: 'margin-top:10px', onclick: async () => {
+                const { error } = await unlinkItemFromGroup('procedures', existing, g.id);
+                if (error) return toast(error.message, 'err');
+                toast(t('removedFromGroup')); back();
+              } }, t('removeFromGroup'))
+            : existing ? el('button', { class: 'btn btn-danger btn-block', style: 'margin-top:10px', onclick: del }, t('deleteProcedure')) : null,
         );
         function cleanProcFields() {
           return cleanReportFormFields(fields);
@@ -3429,7 +3545,7 @@
         async function saveProc(is_draft) {
           const clean = cleanProcFields();
           if (!title.value.trim() || !clean.length) return toast(t('addTitleAndField'), 'err');
-          const payload = { group_id: g.id, title: title.value.trim(), description: desc.value.trim() || null,
+          const payload = { group_id: existing ? existing.group_id : g.id, title: title.value.trim(), description: desc.value.trim() || null,
             fields: clean, is_draft, image: logo.image || null, icon: logo.icon || null,
             department_ids: visibility.get(), created_by: state.profile.id };
           const q = existing ? db.from('procedures').update(payload).eq('id', existing.id)

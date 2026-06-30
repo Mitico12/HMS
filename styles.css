@@ -828,6 +828,17 @@ input[type="checkbox"], input[type="radio"] {
   transform: translateY(-1px);
 }
 
+/* Items imported (linked) into a group from another group. */
+.library-card.item-linked,
+.course-row.item-linked {
+  border-style: dashed;
+  border-color: color-mix(in srgb, var(--primary) 45%, var(--line));
+}
+.library-card.item-linked .library-sub,
+.course-row.item-linked .c-meta {
+  color: var(--primary);
+}
+
 .library-title {
   min-height: 2.5em;
   display: grid;

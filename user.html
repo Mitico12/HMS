@@ -41,6 +41,23 @@
     if (!state.departmentIds.size) return false;
     return ids.some(id => state.departmentIds.has(id));
   }
+  // Items shown in a group = owned (group_id) + imported into it (group_ids).
+  // Falls back to owned-only if the group_ids column isn't there yet.
+  async function fetchGroupItems(table, gid, { desc = false, extra } = {}) {
+    const member = `group_id.eq.${gid},group_ids.cs.{${gid}}`;
+    const run = (useOr, useSort) => {
+      let qb = db.from(table).select('*');
+      qb = useOr ? qb.or(member) : qb.eq('group_id', gid);
+      if (extra) qb = extra(qb);
+      if (useSort) qb = qb.order('sort_order');
+      return qb.order('created_at', { ascending: !desc });
+    };
+    let q = await run(true, true);
+    if (q.error) q = await run(true, false);
+    if (q.error) q = await run(false, true);
+    if (q.error) q = await run(false, false);
+    return q;
+  }
 
   // Which course groups have a course assigned to me that I haven't passed yet.
   async function loadAssignedCourseGroups() {
@@ -404,8 +421,12 @@
     const groupIds = checklistGroups.map(g => g.id);
     if (!groupIds.length) return { items: [], total: 0 };
 
-    let q = await db.from('checklists').select('*').in('group_id', groupIds).order('sort_order').order('created_at');
-    if (q.error) q = await db.from('checklists').select('*').in('group_id', groupIds).order('created_at');
+    // Include checklists owned by a visible checklist group OR imported into one.
+    const idList = groupIds.join(',');
+    const member = `group_id.in.(${idList}),group_ids.ov.{${idList}}`;
+    let q = await db.from('checklists').select('*').or(member).order('sort_order').order('created_at');
+    if (q.error) q = await db.from('checklists').select('*').or(member).order('created_at');
+    if (q.error) q = await db.from('checklists').select('*').in('group_id', groupIds).order('created_at'); // group_ids column pending
     const all = (q.data || []).filter(visibleToMyDepartments);
     if (!all.length) return { items: [], total: 0 };
 
@@ -666,8 +687,7 @@
     return {
       title: groupName(g), tab: 'groups',
       async render(app) {
-        let q = await db.from('checklists').select('*').eq('group_id', g.id).order('sort_order').order('created_at');
-        if (q.error) q = await db.from('checklists').select('*').eq('group_id', g.id).order('created_at');
+        const q = await fetchGroupItems('checklists', g.id);
         const data = (q.data || []).filter(visibleToMyDepartments);
         if (!data?.length) return app.append(emptyState(t('noChecklists'), t('noChecklistsHint')));
         const grid = el('div', { class: 'library-grid' });
@@ -1574,8 +1594,7 @@
     return {
       title: groupName(g), tab: 'groups',
       async render(app) {
-        let q = await db.from('documents').select('*').eq('group_id', g.id).order('sort_order').order('created_at', { ascending: false });
-        if (q.error) q = await db.from('documents').select('*').eq('group_id', g.id).order('created_at', { ascending: false });
+        const q = await fetchGroupItems('documents', g.id, { desc: true });
         const data = (q.data || []).filter(visibleToMyDepartments);
         if (!data?.length) return app.append(emptyState(t('noDocuments'), t('noDocumentsHint')));
         const grid = el('div', { class: 'library-grid' });
@@ -1600,8 +1619,7 @@
     return {
       title: groupName(g), tab: 'groups',
       async render(app) {
-        let q = await db.from('procedures').select('*').eq('group_id', g.id).eq('is_draft', false).order('sort_order').order('created_at');
-        if (q.error) q = await db.from('procedures').select('*').eq('group_id', g.id).eq('is_draft', false).order('created_at');
+        const q = await fetchGroupItems('procedures', g.id, { extra: qb => qb.eq('is_draft', false) });
         const data = (q.data || []).filter(visibleToMyDepartments);
         if (!data?.length) return app.append(emptyState(t('noProcedures'), t('noProceduresHint')));
         const grid = el('div', { class: 'library-grid' });
