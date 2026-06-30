@@ -29,6 +29,12 @@
   initLanguage();
   const screen = $('#screen');
   const state = { profile: null, groups: [], assignedCourseGroups: new Set(), departmentIds: new Set() };
+  const DATA_TTL = 30000;
+  const cache = { reportFields: new Map(), reportFieldsAt: new Map(), incidentCategories: null, incidentCategoriesAt: 0 };
+
+  function fresh(ts) {
+    return ts && Date.now() - ts < DATA_TTL;
+  }
 
   async function loadMyDepartments() {
     state.departmentIds = new Set();
@@ -782,14 +788,17 @@
           const completed = items.every(i => checked[i.id]?.done);
           // Upload captured photos to Storage and keep only the path in the row
           // (no base64). Strip the transient File + preview data-URL before saving.
+          const photoEntries = Object.entries(checked).filter(([, ans]) => ans?.photoFile);
+          const uploadedPhotos = await Promise.all(photoEntries.map(async ([id, ans]) => [
+            id,
+            await uploadChecklistPhoto(ans.photoFile, state.profile.id),
+          ]));
+          if (uploadedPhotos.some(([, path]) => path === null)) return;
+          const uploadedPhotoById = new Map(uploadedPhotos);
           const cleanChecked = {};
           for (const [id, ans] of Object.entries(checked)) {
             const { photoFile, ...rest } = ans || {};
-            if (photoFile) {
-              const path = await uploadChecklistPhoto(photoFile, state.profile.id);
-              if (path === null) return; // upload failed (error already shown)
-              rest.photo = path;
-            }
+            if (photoFile) rest.photo = uploadedPhotoById.get(id);
             cleanChecked[id] = rest;
           }
           const payload = {
@@ -959,6 +968,7 @@
     app.append(el('h2', { class: 'display report-section-title' }, t('yourRecentReports')));
     let query = db.from('incidents').select('*')
       .eq('reporter_id', state.profile.id).order('created_at', { ascending: false });
+    if (limit) query = query.limit(Math.max(20, limit * 4));
     const { data } = await query;
     if (!data?.length) return app.append(emptyState(t('noReports'), t('noReportsHint')));
     const hidden = hiddenReportIds();
@@ -1016,12 +1026,24 @@
   }
   async function loadReportFormFields(type) {
     if (!REPORT_FORM_TYPES.includes(type)) return [];
+    if (cache.reportFields.has(type) && fresh(cache.reportFieldsAt.get(type))) return cache.reportFields.get(type);
     const { data, error } = await db.from('report_form_configs').select('fields').eq('report_type', type).maybeSingle();
     if (error) {
       if (!missingOptionalTable(error)) toast(error.message, 'err');
       return readLocalReportFields(type);
     }
-    return Array.isArray(data?.fields) ? data.fields : readLocalReportFields(type);
+    const fields = Array.isArray(data?.fields) ? data.fields : readLocalReportFields(type);
+    cache.reportFields.set(type, fields);
+    cache.reportFieldsAt.set(type, Date.now());
+    return fields;
+  }
+
+  async function loadIncidentCategories() {
+    if (cache.incidentCategories && fresh(cache.incidentCategoriesAt)) return cache.incidentCategories;
+    const { data = [] } = await db.from('incident_categories').select('*').order('sort_order');
+    cache.incidentCategories = data || [];
+    cache.incidentCategoriesAt = Date.now();
+    return cache.incidentCategories;
   }
   function missingOptionalColumn(error) {
     if (!error) return false;
@@ -1183,7 +1205,7 @@
     return {
       title: t('reportIncident'), tab: 'reports',
       async render(app) {
-        const { data: cats } = await db.from('incident_categories').select('*').order('sort_order');
+        const cats = await loadIncidentCategories();
         const roots = (cats || []).filter(c => c.kind === 'root_cause');
         const cons  = (cats || []).filter(c => c.kind === 'consequence');
         const customFields = await loadReportFormFields('incident');
@@ -1253,7 +1275,7 @@
     return {
       title: t('reportHazard'), tab: 'reports',
       async render(app) {
-        const { data: cats } = await db.from('incident_categories').select('*').order('sort_order');
+        const cats = await loadIncidentCategories();
         const cons = (cats || []).filter(c => c.kind === 'consequence');
         const customFields = await loadReportFormFields('hazard');
 
@@ -1362,29 +1384,58 @@
   async function uploadIncidentPhotos(incidentId, files) {
     const selected = Array.from(files || []);
     if (!selected.length) return [];
-    const paths = [];
-    for (const file of selected) {
+    const uploads = await Promise.all(selected.map(async file => {
       const safeName = file.name.replace(/[^\w.\-]+/g, '_');
       const path = `${incidentId}/${crypto.randomUUID()}-${safeName}`;
-      const { error } = await db.storage.from('incident-photos').upload(path, file);
+      const uploadFile = await prepareImageUpload(file);
+      const { error } = await db.storage.from('incident-photos').upload(path, uploadFile, {
+        contentType: uploadFile.type || file.type || 'application/octet-stream',
+      });
       if (error) {
         toast(error.message + ' - create the incident-photos bucket with the SQL migration first.', 'err');
         return null;
       }
-      paths.push(path);
-    }
-    return paths;
+      return path;
+    }));
+    return uploads.includes(null) ? null : uploads;
   }
 
   async function uploadChecklistPhoto(file, userId) {
     const safeName = (file.name || 'photo').replace(/[^\w.\-]+/g, '_');
     const path = `${userId}/${crypto.randomUUID()}-${safeName}`;
-    const { error } = await db.storage.from('checklist-photos').upload(path, file);
+    const uploadFile = await prepareImageUpload(file);
+    const { error } = await db.storage.from('checklist-photos').upload(path, uploadFile, {
+      contentType: uploadFile.type || file.type || 'application/octet-stream',
+    });
     if (error) {
       toast(error.message + ' - create the checklist-photos bucket with the SQL migration first.', 'err');
       return null;
     }
     return path;
+  }
+
+  function prepareImageUpload(file) {
+    return new Promise(resolve => {
+      if (!file?.type?.startsWith('image/')) return resolve(file);
+      const img = new Image();
+      const url = URL.createObjectURL(file);
+      img.onload = () => {
+        URL.revokeObjectURL(url);
+        const maxSide = 1600;
+        const scale = Math.min(1, maxSide / Math.max(img.width, img.height));
+        if (scale === 1 && file.size < 900000) return resolve(file);
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.max(1, Math.round(img.width * scale));
+        canvas.height = Math.max(1, Math.round(img.height * scale));
+        canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+        canvas.toBlob(blob => resolve(blob || file), 'image/jpeg', 0.82);
+      };
+      img.onerror = () => {
+        URL.revokeObjectURL(url);
+        resolve(file);
+      };
+      img.src = url;
+    });
   }
 
   function fileToDataUrl(file) {
@@ -1424,9 +1475,10 @@
       el('h3', {}, t('attachments')),
       grid,
     ]));
+    const urls = await signedUrls('incident-photos', paths, 300);
     for (const path of paths) {
-      const { data, error } = await db.storage.from('incident-photos').createSignedUrl(path, 300);
-      if (!error && data?.signedUrl) grid.append(el('img', { src: data.signedUrl, alt: t('attachments'), class: 'incident-photo' }));
+      const src = urls.get(path);
+      if (src) grid.append(el('img', { src, alt: t('attachments'), class: 'incident-photo' }));
     }
   }
 
@@ -1434,10 +1486,30 @@
     if (!paths.length) return;
     const grid = el('div', { class: 'photo-grid photo-grid-compact' });
     host.append(grid);
+    const urls = await signedUrls('incident-photos', paths, 300);
     for (const path of paths) {
-      const { data, error } = await db.storage.from('incident-photos').createSignedUrl(path, 300);
-      if (!error && data?.signedUrl) grid.append(el('img', { src: data.signedUrl, alt: t('attachments'), class: 'incident-photo' }));
+      const src = urls.get(path);
+      if (src) grid.append(el('img', { src, alt: t('attachments'), class: 'incident-photo' }));
     }
+  }
+
+  async function signedUrls(bucket, paths, expires = 300) {
+    const clean = [...new Set((paths || []).filter(Boolean))];
+    if (!clean.length) return new Map();
+    const store = db.storage.from(bucket);
+    if (typeof store.createSignedUrls === 'function') {
+      const { data, error } = await store.createSignedUrls(clean, expires);
+      if (!error) {
+        return new Map((data || [])
+          .map((row, idx) => [row.path || clean[idx], row.signedUrl])
+          .filter(([, url]) => !!url));
+      }
+    }
+    const entries = await Promise.all(clean.map(async path => {
+      const { data, error } = await store.createSignedUrl(path, expires);
+      return (!error && data?.signedUrl) ? [path, data.signedUrl] : null;
+    }));
+    return new Map(entries.filter(Boolean));
   }
 
   async function renderIncidentActionLog(host, actions = []) {

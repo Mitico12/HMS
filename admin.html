@@ -53,6 +53,16 @@
   initLanguage();
   const screen = $('#screen');
   const state = { profile: null, groups: [], profiles: [], departments: [], userDepartments: new Map(), groupDeleteRequests: [] };
+  const DATA_TTL = 30000;
+  const cache = {
+    profilesAt: 0,
+    departmentsAt: 0,
+    userDepartmentsAt: 0,
+    seriousIds: null,
+    seriousIdsAt: 0,
+    reportFields: new Map(),
+    reportFieldsAt: new Map(),
+  };
   const viewStack = [];                 // each entry: { title, render }
   let mobileSidebarOpen = false;
 
@@ -64,7 +74,7 @@
     if (!res.profile.is_verified) return showNotAdmin(res.profile); // access revoked
     if (res.profile.is_suspended) return showSuspended(res.profile); // under sys-admin review
     state.profile = res.profile;
-    await loadProfiles();
+    await loadProfiles(true);
     await loadDepartments();
     await loadUserDepartments();
     await loadGroupDeleteRequests();
@@ -215,11 +225,16 @@
     caseMonitor.seen.delete(id);
     toast(t('caseResolved'));
     if (done) done();
-    await loadProfiles();
+    await loadProfiles(true);
     go(homeView(), { reset: true });
   }
 
-  async function loadProfiles() {
+  function fresh(ts) {
+    return ts && Date.now() - ts < DATA_TTL;
+  }
+
+  async function loadProfiles(force = false) {
+    if (!force && state.profiles.length && fresh(cache.profilesAt)) return state.profiles;
     const withUsername = await db.from('profiles')
       .select('id, full_name, username, email, mobile_number, role, is_verified, can_access_varsling, is_suspended, suspended_reason')
       .order('full_name');
@@ -230,23 +245,30 @@
         .order('full_name');
       if (!fallback.error) {
         state.profiles = (fallback.data || []).map(p => ({ ...p, mobile_number: '' }));
-        return;
+        cache.profilesAt = Date.now();
+        return state.profiles;
       }
       fallback = await db.from('profiles')
         .select('id, full_name, email, role, is_verified')
         .order('full_name');
       if (fallback.error) { toast(fallback.error.message, 'err'); state.profiles = []; return; }
       state.profiles = (fallback.data || []).map(p => ({ ...p, username: '', mobile_number: '' }));
-      return;
+      cache.profilesAt = Date.now();
+      return state.profiles;
     }
     state.profiles = (withUsername.data || []).map(p => ({ ...p, mobile_number: p.mobile_number || '' }));
+    cache.profilesAt = Date.now();
+    return state.profiles;
   }
-  async function loadDepartments() {
+  async function loadDepartments(force = false) {
+    if (!force && state.departments.length && fresh(cache.departmentsAt)) return state.departments;
     const { data, error } = await db.from('departments').select('*').order('name');
     state.departments = error ? [] : (data || []);
+    cache.departmentsAt = Date.now();
     return state.departments;
   }
-  async function loadUserDepartments() {
+  async function loadUserDepartments(force = false) {
+    if (!force && state.userDepartments.size && fresh(cache.userDepartmentsAt)) return state.userDepartments;
     const { data, error } = await db.from('user_departments').select('user_id,department_id');
     state.userDepartments = new Map();
     if (!error) {
@@ -255,6 +277,7 @@
         state.userDepartments.get(row.user_id).add(row.department_id);
       }
     }
+    cache.userDepartmentsAt = Date.now();
     return state.userDepartments;
   }
   const departmentName = (id) => state.departments.find(d => d.id === id)?.name || 'Department';
@@ -921,25 +944,58 @@
   async function renderOverviewKpi(host, period, cur, prev) {
     const seriousIds = await seriousConsequenceIds();
 
-    const [backlog, unassigned, oldestRow] = await Promise.all([
-      countRows(db.from('incidents').select('id', { count: 'exact', head: true }).neq('status', 'resolved')),
-      countRows(db.from('incidents').select('id', { count: 'exact', head: true }).eq('status', 'open').is('assigned_to', null)),
-      db.from('incidents').select('created_at').neq('status', 'resolved').order('created_at', { ascending: true }).limit(1),
-    ]);
-    const oldestDays = oldestRow.data?.[0]
-      ? Math.floor((Date.now() - new Date(oldestRow.data[0].created_at)) / DAYMS) : 0;
+    const rpc = await db.rpc('admin_overview_kpi', {
+      p_cur_start: cur.start,
+      p_cur_end: cur.end,
+      p_prev_start: prev.start,
+      p_prev_end: prev.end,
+      p_serious_ids: seriousIds,
+    });
 
-    const [serCur, serPrev, resCur, resPrev, repCur, repPrev, medCur, medPrev] = await Promise.all([
-      seriousCount(cur, seriousIds), seriousCount(prev, seriousIds),
-      countRows(db.from('incidents').select('id', { count: 'exact', head: true }).eq('status', 'resolved').gte('resolved_at', cur.start).lt('resolved_at', cur.end)),
-      countRows(db.from('incidents').select('id', { count: 'exact', head: true }).eq('status', 'resolved').gte('resolved_at', prev.start).lt('resolved_at', prev.end)),
-      countRows(db.from('incidents').select('id', { count: 'exact', head: true }).gte('created_at', cur.start).lt('created_at', cur.end)),
-      countRows(db.from('incidents').select('id', { count: 'exact', head: true }).gte('created_at', prev.start).lt('created_at', prev.end)),
-      resolveTimes(cur), resolveTimes(prev),
-    ]);
+    let backlog, unassigned, oldestDays, serCur, serPrev, resCur, resPrev, repCur, repPrev, medC, medP;
+    if (!rpc.error && rpc.data) {
+      const s = rpc.data;
+      backlog = Number(s.backlog || 0);
+      unassigned = Number(s.unassigned || 0);
+      oldestDays = s.oldest_open_at ? Math.floor((Date.now() - new Date(s.oldest_open_at)) / DAYMS) : 0;
+      serCur = Number(s.serious_cur || 0);
+      serPrev = Number(s.serious_prev || 0);
+      resCur = Number(s.resolved_cur || 0);
+      resPrev = Number(s.resolved_prev || 0);
+      repCur = Number(s.reported_cur || 0);
+      repPrev = Number(s.reported_prev || 0);
+      medC = s.median_cur == null ? null : Number(s.median_cur);
+      medP = s.median_prev == null ? null : Number(s.median_prev);
+    } else {
+      const [backlogRows, unassignedRows, oldestRow] = await Promise.all([
+        countRows(db.from('incidents').select('id', { count: 'exact', head: true }).neq('status', 'resolved')),
+        countRows(db.from('incidents').select('id', { count: 'exact', head: true }).eq('status', 'open').is('assigned_to', null)),
+        db.from('incidents').select('created_at').neq('status', 'resolved').order('created_at', { ascending: true }).limit(1),
+      ]);
+      backlog = backlogRows;
+      unassigned = unassignedRows;
+      oldestDays = oldestRow.data?.[0]
+        ? Math.floor((Date.now() - new Date(oldestRow.data[0].created_at)) / DAYMS) : 0;
+
+      const [seriousCur, seriousPrev, resolvedCur, resolvedPrev, reportedCur, reportedPrev, medCur, medPrev] = await Promise.all([
+        seriousCount(cur, seriousIds), seriousCount(prev, seriousIds),
+        countRows(db.from('incidents').select('id', { count: 'exact', head: true }).eq('status', 'resolved').gte('resolved_at', cur.start).lt('resolved_at', cur.end)),
+        countRows(db.from('incidents').select('id', { count: 'exact', head: true }).eq('status', 'resolved').gte('resolved_at', prev.start).lt('resolved_at', prev.end)),
+        countRows(db.from('incidents').select('id', { count: 'exact', head: true }).gte('created_at', cur.start).lt('created_at', cur.end)),
+        countRows(db.from('incidents').select('id', { count: 'exact', head: true }).gte('created_at', prev.start).lt('created_at', prev.end)),
+        resolveTimes(cur), resolveTimes(prev),
+      ]);
+      serCur = seriousCur;
+      serPrev = seriousPrev;
+      resCur = resolvedCur;
+      resPrev = resolvedPrev;
+      repCur = reportedCur;
+      repPrev = reportedPrev;
+      medC = medianDays(medCur);
+      medP = medianDays(medPrev);
+    }
     const rateCur = repCur ? Math.round(resCur / repCur * 100) : 0;
     const ratePrev = repPrev ? Math.round(resPrev / repPrev * 100) : 0;
-    const medC = medianDays(medCur), medP = medianDays(medPrev);
 
     const grid = el('div', { class: 'kpi-grid' }, [
       metricCard({ label: t('reportsInPeriod'), value: backlog, live: true, hint: t('openBacklog') }),
@@ -1159,15 +1215,34 @@
       return;
     }
     const today = todayBounds();
-    const statFor = async (id) => {
-      const [assigned, completed, completedToday] = await Promise.all([
-        countRows(db.from('incidents').select('id', { count: 'exact', head: true }).eq('assigned_to', id)),
-        countRows(db.from('incidents').select('id', { count: 'exact', head: true }).eq('assigned_to', id).eq('status', 'resolved')),
-        countRows(db.from('incidents').select('id', { count: 'exact', head: true }).eq('assigned_to', id).eq('status', 'resolved').gte('resolved_at', today.start).lt('resolved_at', today.end)),
-      ]);
-      return { assigned: assigned || 0, completed: completed || 0, completedToday: completedToday || 0 };
-    };
-    const stats = await Promise.all(admins.map(async p => ({ id: p.id, name: labelOf(p), ...(await statFor(p.id)) })));
+    const rpc = await db.rpc('admin_performance_kpi', {
+      p_today_start: today.start,
+      p_today_end: today.end,
+    });
+    let stats;
+    if (!rpc.error && Array.isArray(rpc.data)) {
+      const byId = new Map(rpc.data.map(s => [s.id, s]));
+      stats = admins.map(p => {
+        const s = byId.get(p.id) || {};
+        return {
+          id: p.id,
+          name: labelOf(p),
+          assigned: Number(s.assigned || 0),
+          completed: Number(s.completed || 0),
+          completedToday: Number(s.completedToday || 0),
+        };
+      });
+    } else {
+      const statFor = async (id) => {
+        const [assigned, completed, completedToday] = await Promise.all([
+          countRows(db.from('incidents').select('id', { count: 'exact', head: true }).eq('assigned_to', id)),
+          countRows(db.from('incidents').select('id', { count: 'exact', head: true }).eq('assigned_to', id).eq('status', 'resolved')),
+          countRows(db.from('incidents').select('id', { count: 'exact', head: true }).eq('assigned_to', id).eq('status', 'resolved').gte('resolved_at', today.start).lt('resolved_at', today.end)),
+        ]);
+        return { assigned: assigned || 0, completed: completed || 0, completedToday: completedToday || 0 };
+      };
+      stats = await Promise.all(admins.map(async p => ({ id: p.id, name: labelOf(p), ...(await statFor(p.id)) })));
+    }
 
     // metric cards — aggregate across everyone for "all", else the selected admin
     const pick = adminId === 'all'
@@ -1201,9 +1276,12 @@
 
   // ── shared incident helpers ─────────────────────────────────
   async function seriousConsequenceIds() {
+    if (cache.seriousIds && fresh(cache.seriousIdsAt)) return cache.seriousIds;
     const { data: cats } = await db.from('incident_categories').select('id,name').eq('kind', 'consequence');
     const names = ['Death', 'Injury or sick leave', 'Environmental impact'];
-    return (cats || []).filter(c => names.includes(c.name)).map(c => c.id);
+    cache.seriousIds = (cats || []).filter(c => names.includes(c.name)).map(c => c.id);
+    cache.seriousIdsAt = Date.now();
+    return cache.seriousIds;
   }
   async function seriousCount(bounds, seriousIds) {
     if (!seriousIds.length) return 0;
@@ -1222,6 +1300,11 @@
   }
 
   async function saveSortOrder(table, rows) {
+    const payload = rows.map((row, idx) => ({ id: row.id, sort_order: (idx + 1) * 10 }));
+    if (!payload.length) return true;
+    const bulk = await db.from(table).upsert(payload, { onConflict: 'id' });
+    if (!bulk.error) return true;
+
     for (const [idx, row] of rows.entries()) {
       const { error } = await db.from(table).update({ sort_order: (idx + 1) * 10 }).eq('id', row.id);
       if (error) {
@@ -1838,9 +1921,13 @@
   function checklistLogDetailView(run, checklist) {
     return {
       title: checklist?.title || t('checklist'), tab: 'groups',
-      render(app) {
+      async render(app) {
         const items = checklist?.items || [];
         const answers = run.checked || {};
+        const storagePhotos = Object.values(answers)
+          .map(answer => answer?.photo)
+          .filter(photo => photo && !(typeof photo === 'string' && photo.startsWith('data:')));
+        const checklistPhotoUrls = await signedUrls('checklist-photos', storagePhotos, 300);
         const missingItems = items.filter(i => !answers[i.id]?.done);
         const issueItems = items.filter(i => answers[i.id]?.needs_fix);
         const flagged = missingItems.length > 0 || issueItems.length > 0 || !!(run.notes || '').trim();
@@ -1901,7 +1988,10 @@
             el('img', { src: item.image, alt: item.label, class: 'checklist-item-image' }));
           if (answer.photo) {
             const photoImg = el('img', { alt: item.label, class: 'checklist-item-image' });
-            resolveChecklistPhoto(answer.photo).then(src => { if (src) photoImg.src = src; });
+            const src = (typeof answer.photo === 'string' && answer.photo.startsWith('data:'))
+              ? answer.photo
+              : checklistPhotoUrls.get(answer.photo);
+            if (src) photoImg.src = src;
             card.append(el('div', { class: 'sub' }, t('submittedPhoto')), photoImg);
           }
           app.append(card);
@@ -1975,11 +2065,29 @@
 
   // A submitted checklist photo is either a legacy inline data-URL (old rows) or
   // a Storage path (new rows). Resolve it to something an <img> can show.
+  async function signedUrls(bucket, paths, expires = 300) {
+    const clean = [...new Set((paths || []).filter(Boolean))];
+    if (!clean.length) return new Map();
+    const store = db.storage.from(bucket);
+    if (typeof store.createSignedUrls === 'function') {
+      const { data, error } = await store.createSignedUrls(clean, expires);
+      if (!error) {
+        return new Map((data || [])
+          .map((row, idx) => [row.path || clean[idx], row.signedUrl])
+          .filter(([, url]) => !!url));
+      }
+    }
+    const entries = await Promise.all(clean.map(async path => {
+      const { data, error } = await store.createSignedUrl(path, expires);
+      return (!error && data?.signedUrl) ? [path, data.signedUrl] : null;
+    }));
+    return new Map(entries.filter(Boolean));
+  }
+
   async function resolveChecklistPhoto(photo) {
     if (!photo) return '';
     if (typeof photo === 'string' && photo.startsWith('data:')) return photo;
-    const { data, error } = await db.storage.from('checklist-photos').createSignedUrl(photo, 300);
-    return (!error && data?.signedUrl) ? data.signedUrl : '';
+    return (await signedUrls('checklist-photos', [photo], 300)).get(photo) || '';
   }
 
   function fileToDataUrl(file) {
@@ -2606,7 +2714,7 @@
   async function importReportLogsExcel(file, refreshView) {
     const rows = await readExcelRows(file, REPORT_LOG_COLUMNS, 'Report logs');
     if (!rows) return;
-    await loadProfiles();
+    await loadProfiles(true);
     const profileByLabel = new Map();
     state.profiles.forEach(p => {
       [p.email, p.full_name, p.username, labelOf(p)].filter(Boolean)
@@ -2694,9 +2802,10 @@
       el('h3', {}, t('attachments')),
       grid,
     ]));
+    const urls = await signedUrls('incident-photos', paths, 300);
     for (const path of paths) {
-      const { data, error } = await db.storage.from('incident-photos').createSignedUrl(path, 300);
-      if (!error && data?.signedUrl) grid.append(el('img', { src: data.signedUrl, alt: t('attachments'), class: 'incident-photo' }));
+      const src = urls.get(path);
+      if (src) grid.append(el('img', { src, alt: t('attachments'), class: 'incident-photo' }));
     }
   }
 
@@ -2704,9 +2813,10 @@
     if (!paths.length) return;
     const grid = el('div', { class: 'photo-grid photo-grid-compact' });
     host.append(grid);
+    const urls = await signedUrls('incident-photos', paths, 300);
     for (const path of paths) {
-      const { data, error } = await db.storage.from('incident-photos').createSignedUrl(path, 300);
-      if (!error && data?.signedUrl) grid.append(el('img', { src: data.signedUrl, alt: t('attachments'), class: 'incident-photo' }));
+      const src = urls.get(path);
+      if (src) grid.append(el('img', { src, alt: t('attachments'), class: 'incident-photo' }));
     }
   }
 
@@ -2903,12 +3013,16 @@
     catch (_) { return []; }
   }
   async function loadReportFormFields(type) {
+    if (cache.reportFields.has(type) && fresh(cache.reportFieldsAt.get(type))) return cache.reportFields.get(type);
     const { data, error } = await db.from('report_form_configs').select('fields').eq('report_type', type).maybeSingle();
     if (error) {
       if (!missingOptionalTable(error)) toast(error.message, 'err');
       return readLocalReportFields(type);
     }
-    return Array.isArray(data?.fields) ? data.fields : readLocalReportFields(type);
+    const fields = Array.isArray(data?.fields) ? data.fields : readLocalReportFields(type);
+    cache.reportFields.set(type, fields);
+    cache.reportFieldsAt.set(type, Date.now());
+    return fields;
   }
   async function saveReportFormFields(type, fields) {
     localStorage.setItem(reportFormStorageKey(type), JSON.stringify(fields));
@@ -2927,6 +3041,8 @@
       toast(error.message, 'err');
       return false;
     }
+    cache.reportFields.set(type, fields);
+    cache.reportFieldsAt.set(type, Date.now());
     return true;
   }
   function reportTypeLabel(type) {
@@ -4038,6 +4154,7 @@
             const { error } = await db.from('departments').insert({ name: clean });
             if (error) return toast(error.message, 'err');
             name.value = '';
+            await loadDepartments(true);
             toast(t('saved'));
             go(departmentsView(), { reset: true });
           } }, t('add')),
@@ -4072,7 +4189,7 @@
                 const { error } = await db.from('user_departments').delete().eq('user_id', p.id).eq('department_id', d.id);
                 if (error) { box.checked = true; return toast(error.message, 'err'); }
               }
-              await loadUserDepartments();
+              await loadUserDepartments(true);
               toast(t('saved'));
             });
             users.append(el('label', { class: 'check-item department-user' }, [
@@ -4203,26 +4320,26 @@
     const { error } = await db.rpc('set_role', { target: p.id, new_role: newRole });
     if (error) return toast(error.message, 'err');
     toast(`${labelOf(p)} → ${roleName(newRole)}.`);
-    await loadProfiles(); refresh();
+    await loadProfiles(true); refresh();
   }
   async function setProfileVerification(p, verified) {
     if (!verified && isSysadminPair(p)) return openSysadminReasonModal(p, 'revoke', null);
     const { error } = await db.rpc('set_verification', { target: p.id, verified });
     if (error) return toast(error.message, 'err');
     toast(verified ? 'Account approved.' : 'Access revoked.');
-    await loadProfiles(); refresh();
+    await loadProfiles(true); refresh();
   }
   async function setSuspension(p, suspended) {
     const { error } = await db.rpc('set_suspension', { target: p.id, suspended });
     if (error) return toast(error.message, 'err');
     toast(suspended ? t('suspended') + '.' : t('unsuspend') + '.');
-    await loadProfiles(); refresh();
+    await loadProfiles(true); refresh();
   }
   async function setVarslingAccess(p, v) {
     const { error } = await db.rpc('set_varsling_access', { target: p.id, v });
     if (error) return toast(error.message, 'err');
     toast(v ? t('varslingAccessGranted') : t('varslingAccessRevoked'));
-    await loadProfiles(); refresh();
+    await loadProfiles(true); refresh();
   }
 
   function userDetailView(id) {
@@ -4427,7 +4544,7 @@
       }).eq('id', r.id);
     }
     toast(t('profileChangeApproved'));
-    await loadProfiles(); refresh();
+    await loadProfiles(true); refresh();
   }
   async function rejectProfileChange(r) {
     const note = prompt('Reason for rejection (optional):') || '';
@@ -4494,7 +4611,7 @@
           const general = generalDepartmentId();
           if (general) await db.from('user_departments').insert({ user_id: id, department_id: general });
           toast(t('userAddedTempPassword'));
-          close(); await loadProfiles(); await loadUserDepartments(); refresh();
+          close(); await loadProfiles(true); await loadUserDepartments(true); refresh();
         } }, 'Create user'),
       );
     });
