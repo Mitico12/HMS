@@ -23,7 +23,7 @@
   <div id="screen"></div>
 
   <script type="module">
-    import { db, currentProfile, el, $, toast, initTheme, themeToggleButton, initLanguage, languageSelect, t } from './config.js';
+    import { db, currentProfile, prefetchWorkerData, el, $, toast, initTheme, themeToggleButton, initLanguage, languageSelect, t } from './config.js';
     import { navigateShell, replaceShell, setupPageTransition, warmAppShell } from './app-shell.js';
 
     initTheme();
@@ -33,7 +33,15 @@
     const screen = $('#screen');
     const isAdmin = (profile) => ['admin', 'super_admin'].includes(profile?.role);
     const openPage = (page) => replaceShell(page);
-    const continueFor = (profile) => isAdmin(profile) ? showAdminChoice(profile) : openPage('./user.html');
+    // Warm the worker data cache as soon as we know who's signed in. Admins dwell
+    // on the app-choice screen, so prefetch in the background there; a worker is
+    // about to redirect, so wait (briefly) for the cache before swapping pages so
+    // user.html can paint its groups instantly.
+    async function continueFor(profile) {
+      if (isAdmin(profile)) { prefetchWorkerData(profile); return showAdminChoice(profile); }
+      await prefetchWorkerData(profile);
+      return openPage('./user.html');
+    }
 
     (async function boot() {
       const profile = await currentProfile();

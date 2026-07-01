@@ -1,4 +1,4 @@
-const CACHE_NAME = 'hms-shell-v26';
+const CACHE_NAME = 'hms-shell-v31';
 const SHELL_ASSETS = [
   './',
   './index.html',
@@ -32,13 +32,14 @@ self.addEventListener('fetch', event => {
   const url = new URL(request.url);
   if (request.method !== 'GET' || url.origin !== location.origin) return;
 
-  if (request.mode === 'navigate' || request.destination === 'document') {
+  // Network-first for HTML *and* CSS/JS: an online user always gets the freshly
+  // deployed asset, and the cache is only a fallback when offline. This is what
+  // prevents a stale/poisoned styles.css from getting "stuck" and rendering the
+  // app unstyled after a bad or superseded deploy. cacheFirst kept only for
+  // anything else we might cache later.
+  if (request.mode === 'navigate' ||
+      ['document', 'style', 'script', 'worker'].includes(request.destination)) {
     event.respondWith(networkFirst(request));
-    return;
-  }
-
-  if (['style', 'script', 'worker'].includes(request.destination)) {
-    event.respondWith(cacheFirst(request));
   }
 });
 
@@ -46,10 +47,13 @@ async function networkFirst(request) {
   const cache = await caches.open(CACHE_NAME);
   try {
     const fresh = await fetch(request);
-    cache.put(request, fresh.clone()).catch(() => {});
+    // Only cache genuinely good responses — never poison the cache with a 404
+    // page or an error, which is how the app ended up unstyled before.
+    if (fresh && fresh.ok && fresh.type === 'basic') cache.put(request, fresh.clone()).catch(() => {});
     return fresh;
   } catch (_) {
-    return (await cache.match(request)) || cache.match('./index.html');
+    const isDoc = request.mode === 'navigate' || request.destination === 'document';
+    return (await cache.match(request)) || (isDoc ? cache.match('./index.html') : Response.error());
   }
 }
 
@@ -58,6 +62,6 @@ async function cacheFirst(request) {
   const cached = await cache.match(request);
   if (cached) return cached;
   const fresh = await fetch(request);
-  cache.put(request, fresh.clone()).catch(() => {});
+  if (fresh && fresh.ok && fresh.type === 'basic') cache.put(request, fresh.clone()).catch(() => {});
   return fresh;
 }

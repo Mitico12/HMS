@@ -22,7 +22,7 @@
   <div id="screen"></div>
 
   <script type="module">
-  import { db, requireSession, el, $, fmt, toast, initTheme, themeToggleButton, initLanguage, languageSelect, t, roleRank } from './config.js';
+  import { db, requireSession, readWorkerPrefetch, cacheWorkerGroups, cacheWorkerDepartments, el, $, fmt, toast, initTheme, themeToggleButton, initLanguage, languageSelect, t, roleRank, fileButton } from './config.js';
   import { courseListView } from './courses.js';
   import { navigateShell, setupPageTransition, warmAppShell } from './app-shell.js';
 
@@ -70,7 +70,10 @@
   async function loadMyDepartments() {
     state.departmentIds = new Set();
     const { data, error } = await db.from('user_departments').select('department_id').eq('user_id', state.profile.id);
-    if (!error) (data || []).forEach(r => state.departmentIds.add(r.department_id));
+    if (!error) {
+      (data || []).forEach(r => state.departmentIds.add(r.department_id));
+      cacheWorkerDepartments(state.profile.id, [...state.departmentIds]);
+    }
   }
   function visibleToMyDepartments(row) {
     const ids = Array.isArray(row?.department_ids) ? row.department_ids.filter(Boolean) : [];
@@ -122,7 +125,9 @@
     state.profile = res.profile;
     if (res.profile.is_suspended) return showWaiting('suspended'); // under sys-admin review
     if (!res.profile.is_verified) return showWaiting(); // unapproved or access revoked
-    await loadMyDepartments();
+    const pf = readWorkerPrefetch(res.profile.id);
+    if (pf?.departmentIds) state.departmentIds = new Set(pf.departmentIds); // warmed by index.html
+    else await loadMyDepartments();
     showApp();
     go(homeView(), { reset: true });
   })();
@@ -448,11 +453,32 @@
     return {
       title: t('groups'), tab: 'groups',
       async render(app) {
-        const { data } = await db.from('groups').select('*').order('sort_order');
-        state.groups = visibleGroups((data || []).filter(visibleToMyDepartments));
-        await loadAssignedCourseGroups();
-        renderSidebar('groups');
-        await renderUserKpiDashboard(app);
+        const uid = state.profile?.id;
+        // Apply a raw groups array (filtered for this user) and paint the home.
+        const applyAndPaint = async (raw) => {
+          state.groups = visibleGroups((raw || []).filter(visibleToMyDepartments));
+          await loadAssignedCourseGroups();
+          renderSidebar('groups');
+          await renderUserKpiDashboard(app);
+        };
+        const visibleIds = (raw) => visibleGroups((raw || []).filter(visibleToMyDepartments)).map(g => g.id).join(',');
+        const fetchGroups = async () => (await db.from('groups').select('*').order('sort_order')).data || [];
+
+        const pf = readWorkerPrefetch(uid);
+        if (pf?.groups) {
+          await applyAndPaint(pf.groups);                 // instant, from the prefetched cache
+          // Skip the revalidation when index.html only just warmed the cache;
+          // otherwise refetch quietly and repaint only if the visible set changed.
+          if (Date.now() - (pf.t || 0) > 30000) {
+            const fresh = await fetchGroups();
+            cacheWorkerGroups(uid, fresh);
+            if (visibleIds(pf.groups) !== visibleIds(fresh)) await applyAndPaint(fresh);
+          }
+          return;
+        }
+        const data = await fetchGroups();               // cold cache: normal fetch, then warm it
+        cacheWorkerGroups(uid, data);
+        await applyAndPaint(data);
       },
     };
   }
@@ -535,9 +561,10 @@
   // red flag until opened. Opening records a read receipt (the admin's hidden stat).
   async function renderWorkerCommunications(app) {
     let comms;
-    const res = await db.from('communications').select('*').order('created_at', { ascending: false }).then(r => r, () => ({ error: true }));
+    const res = await db.from('communications').select('*').eq('kind', 'news')
+      .order('created_at', { ascending: false }).then(r => r, () => ({ error: true }));
     if (res.error) return; // table not migrated yet → show nothing, don't break the home
-    comms = res.data || [];
+    comms = (res.data || []).filter(c => !c.archived_at);
     app.append(el('div', { class: 'worker-home-section' }, [
       el('h2', { class: 'display worker-section-title' }, t('communications')),
     ]));
@@ -551,19 +578,9 @@
     const readSet = new Set((readRows || []).map(r => r.communication_id));
     const thumbs = await signedUrls('communications', comms.map(c => c.image_path), 600);
 
-    // Messages: header is a link into the full received-messages log; the home only
-    // surfaces UNREAD ones (read messages live in the log). Cancelled ones are hidden.
-    const hiddenMsgs = hiddenMessageIds();
-    const unreadMsgs = comms.filter(c => c.kind === 'message' && !readSet.has(c.id) && !hiddenMsgs.has(c.id));
-    app.append(el('button', { class: 'comm-subhead comm-subhead-link', onclick: () => go(messagesLogView()) }, [
-      el('span', {}, t('messages')),
-      el('span', { class: 'comm-subhead-go' }, t('viewAllMessages') + ' ›'),
-    ]));
-    if (!unreadMsgs.length) app.append(el('p', { class: 'muted comm-empty' }, t('noNewMessages')));
-    else renderWorkerCommRows(app, unreadMsgs, readSet, thumbs);
-
-    // News: a notification feed (read + unread), minus admin-archived items.
-    renderWorkerCommSection(app, t('news'), comms.filter(c => c.kind === 'news' && !c.archived_at), readSet, thumbs, t('noNews'));
+    // News branches into safety news (red title/border) and regular news.
+    renderWorkerCommSection(app, t('safetyNews'), comms.filter(c => c.is_safety), readSet, thumbs, t('noSafetyNews'));
+    renderWorkerCommSection(app, t('news'), comms.filter(c => !c.is_safety), readSet, thumbs, t('noNews'));
   }
 
   function renderWorkerCommSection(app, title, list, readSet, thumbs, emptyMsg) {
@@ -577,10 +594,10 @@
     list.forEach(c => {
       const unread = !readSet.has(c.id);
       const url = thumbs.get(c.image_path);
-      const snippet = c.title || (c.body || '').slice(0, 80) || (c.kind === 'news' ? t('news') : t('messages'));
+      const snippet = c.title || (c.body || '').slice(0, 80) || t('news');
       const sub = c.title ? (c.body || '').slice(0, 80) : fmt(c.created_at);
-      wrap.append(el('button', { class: 'comm-row' + (unread ? ' comm-unread' : ''), onclick: () => go(communicationDetail(c)) }, [
-        el('div', { class: 'comm-thumb' }, url ? el('img', { src: url, alt: '' }) : el('span', { class: 'comm-thumb-ico' }, c.kind === 'news' ? '📰' : '✉')),
+      wrap.append(el('button', { class: 'comm-row' + (unread ? ' comm-unread' : '') + (c.is_safety ? ' comm-safety' : ''), onclick: () => go(communicationDetail(c)) }, [
+        el('div', { class: 'comm-thumb' }, url ? el('img', { src: url, alt: '' }) : el('span', { class: 'comm-thumb-ico' }, c.is_safety ? '🚨' : '📰')),
         el('div', { class: 'comm-main' }, [
           el('div', { class: 'comm-title' }, snippet),
           el('div', { class: 'comm-snippet' }, sub),
@@ -595,13 +612,14 @@
 
   function communicationDetail(comm) {
     return {
-      title: comm.title || (comm.kind === 'news' ? t('news') : t('messages')), tab: 'groups',
+      title: comm.title || t('news'), tab: 'groups',
       async render(app) {
         // Record the read receipt on open (ignore the duplicate if already read).
         db.from('communication_reads').insert({ communication_id: comm.id, user_id: state.profile.id }).then(() => {}, () => {});
         const media = await signedUrls('communications', [comm.image_path, ...(comm.attachments || []).map(a => a.path)], 600);
-        const card = el('div', { class: 'card comm-detail' });
+        const card = el('div', { class: 'card comm-detail' + (comm.is_safety ? ' comm-safety' : '') });
         if (comm.image_path && media.get(comm.image_path)) card.append(el('img', { src: media.get(comm.image_path), class: 'comm-detail-img', alt: '' }));
+        if (comm.is_safety) card.append(el('span', { class: 'pill comm-safety-pill' }, t('safetyNews')));
         if (comm.title) card.append(el('h2', { class: 'comm-detail-title' }, comm.title));
         card.append(el('div', { class: 'comm-detail-meta' }, fmt(comm.created_at)));
         if (comm.body) card.append(el('p', { class: 'comm-detail-body' }, comm.body));
@@ -613,52 +631,6 @@
             ]))));
         }
         app.append(card);
-      },
-    };
-  }
-
-  // The worker's received-messages log — reached from the home "Messages" header.
-  // Holds every message they've received (read + unread); each can be opened or
-  // cancelled (hidden for this worker only).
-  function messagesLogView() {
-    return {
-      title: t('messages'), tab: 'groups',
-      async render(app) {
-        const res = await db.from('communications').select('*').eq('kind', 'message')
-          .order('created_at', { ascending: false }).then(r => r, () => ({ error: true }));
-        if (res.error) { app.append(emptyState(t('messages'), t('runCommunicationsMigration'))); return; }
-        const hidden = hiddenMessageIds();
-        const msgs = (res.data || []).filter(c => !hidden.has(c.id));
-        if (!msgs.length) { app.append(emptyState(t('noMessages'), t('noCommunicationsHint'))); return; }
-        const ids = msgs.map(c => c.id);
-        const { data: readRows = [] } = await db.from('communication_reads')
-          .select('communication_id').eq('user_id', state.profile.id).in('communication_id', ids);
-        const readSet = new Set((readRows || []).map(r => r.communication_id));
-        const thumbs = await signedUrls('communications', msgs.map(c => c.image_path), 600);
-        const wrap = el('div', { class: 'comm-feed' });
-        msgs.forEach(c => {
-          const unread = !readSet.has(c.id);
-          const url = thumbs.get(c.image_path);
-          const snippet = c.title || (c.body || '').slice(0, 80) || t('messages');
-          wrap.append(el('div', { class: 'comm-log-row' }, [
-            el('button', { class: 'comm-row' + (unread ? ' comm-unread' : ''), onclick: () => go(communicationDetail(c)) }, [
-              el('div', { class: 'comm-thumb' }, url ? el('img', { src: url, alt: '' }) : el('span', { class: 'comm-thumb-ico' }, '✉')),
-              el('div', { class: 'comm-main' }, [
-                el('div', { class: 'comm-title' }, snippet),
-                el('div', { class: 'comm-snippet' }, c.title ? (c.body || '').slice(0, 80) : fmt(c.created_at)),
-              ]),
-              unread
-                ? el('span', { class: 'comm-flag', title: t('unread') }, '❗')
-                : el('span', { class: 'comm-time' }, fmt(c.created_at)),
-            ]),
-            el('button', { class: 'btn btn-ghost btn-sm comm-cancel', onclick: () => {
-              setMessageHidden(c.id, true);
-              toast(t('messageCancelled'));
-              go(messagesLogView(), { reset: true });
-            } }, t('cancel')),
-          ]));
-        });
-        app.append(wrap);
       },
     };
   }
@@ -1019,7 +991,7 @@
             setChecklistPhoto(it, await fileToDataUrl(file), file);
             drawChecklistAnswerPhoto(it, photoHost);
           } });
-          card.append(labeled(t('photosOptional'), photoInput), photoHost);
+          card.append(labeled(t('photosOptional'), fileButton(photoInput)), photoHost);
           app.append(card);
         }
         app.append(
@@ -1192,18 +1164,6 @@
     if (hidden) ids.add(id); else ids.delete(id);
     setStorageJson(HIDDEN_REPORTS_KEY, [...ids]);
   }
-  // Cancelling a message hides it from this worker only (the row stays in the DB
-  // for the admin's read stats); mirrors the per-user hidden-reports pattern.
-  const HIDDEN_MESSAGES_KEY = 'workerHiddenMessageIds';
-  function hiddenMessageIds() {
-    return new Set(storageArray(HIDDEN_MESSAGES_KEY));
-  }
-  function setMessageHidden(id, hidden) {
-    const ids = hiddenMessageIds();
-    if (hidden) ids.add(id); else ids.delete(id);
-    setStorageJson(HIDDEN_MESSAGES_KEY, [...ids]);
-  }
-
   function reportActionButton({ primary, iconClass, icon, label, onclick }) {
     return el('button', { class: `report-action${primary ? ' report-action-primary' : ''}`, onclick }, [
       el('span', { class: `report-action-icon ${iconClass}` }, icon),
@@ -1422,6 +1382,7 @@
         const customFields = await loadReportFormFields('varsling');
         const title = el('input', { type: 'text', placeholder: t('varslingTitle') });
         const desc = el('textarea', { placeholder: t('varslingDetails') });
+        const where = el('input', { type: 'text', placeholder: t('locationOptional') });
         const anonBox = el('input', { type: 'checkbox' });
         anonBox.addEventListener('change', () => {
           if (anonBox.checked && !confirm('Are you sure you want to stay anonymous? Handlers will not see who filed this.'))
@@ -1431,6 +1392,7 @@
           el('p', { class: 'muted', style: 'margin:0 0 12px' }, t('varslingDesc')),
           labeled(t('varslingTitle'), title, true),
           labeled(t('varslingDetails'), desc),
+          labeled(t('locationOptional'), where),
           el('label', { class: 'check-item' }, [anonBox, el('span', {}, t('submitAnonymously'))]),
         );
         const custom = renderCustomReportFields(app, customFields);
@@ -1443,6 +1405,7 @@
             is_anonymous: anonBox.checked,
             title: title.value.trim(),
             description: desc.value.trim() || null,
+            location: where.value.trim() || null,
             custom_fields: custom.values(),
           });
           if (error) return toast(error.message, 'err');
@@ -1491,7 +1454,7 @@
           ]),
           rootBlock.field,
           consBlock.field,
-          labeled(t('photosOptional'), photos),
+          labeled(t('photosOptional'), fileButton(photos)),
           anonRow,
         );
         const custom = renderCustomReportFields(app, customFields);
@@ -1556,7 +1519,7 @@
             el('div', { style: 'flex:1;min-width:160px' }, labeled(t('locationOptional'), where)),
           ]),
           consBlock.field,
-          labeled(t('photosOptional'), photos),
+          labeled(t('photosOptional'), fileButton(photos)),
           anonRow,
         );
         const custom = renderCustomReportFields(app, customFields);
@@ -1606,7 +1569,7 @@
 
         app.append(
           labeled(t('suggestionText'), what, true),
-          labeled(t('photosOptional'), photos),
+          labeled(t('photosOptional'), fileButton(photos)),
           anonRow,
         );
         const custom = renderCustomReportFields(app, customFields);
@@ -1802,7 +1765,7 @@
       el('h3', {}, t('appendUpdate')),
       el('p', { class: 'muted' }, t('appendUpdateHint')),
       labeled(t('addActionNote'), note),
-      labeled(t('attachments'), files),
+      labeled(t('attachments'), fileButton(files)),
       el('button', { class: 'btn btn-primary', onclick: async () => {
         const cleanNote = note.value.trim();
         if (!cleanNote && !files.files.length) return toast(t('appendUpdateEmpty'), 'err');
