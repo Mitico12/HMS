@@ -1019,6 +1019,7 @@
     const mount = el('div', { class: 'kpi-dashboard' });
     app.append(mount);
     let incCache = null; // { key, all, cats, rootCauseCats, live }
+    let clCache = null;
 
     const ensureIncidents = async (key, cur, prev) => {
       if (incCache && incCache.key === key) return incCache;
@@ -1033,6 +1034,35 @@
       ]);
       incCache = { key, all: allRes.data || [], cats: catsRes.data || [], rootCauseCats: rcRes.data || [], live };
       return incCache;
+    };
+
+    const ensureChecklistRuns = async (key, cur, prev, todayB) => {
+      if (clCache && clCache.key === key) return clCache;
+      const [runsRes, latestRunsRes, todayRes] = await Promise.all([
+        db.from('checklist_runs')
+          .select('checklist_id,user_id,submitted_at,completed')
+          .not('submitted_at', 'is', null)
+          .eq('completed', true)
+          .or(`and(submitted_at.gte.${prev.start},submitted_at.lt.${cur.end})`)
+          .limit(10000),
+        db.from('checklist_runs')
+          .select('checklist_id,user_id,submitted_at,completed')
+          .not('submitted_at', 'is', null)
+          .order('submitted_at', { ascending: false })
+          .limit(3),
+        db.from('checklist_runs')
+          .select('checklist_id')
+          .eq('completed', true)
+          .gte('submitted_at', todayB.start)
+          .lt('submitted_at', todayB.end)
+      ]);
+      clCache = {
+        key,
+        runs: runsRes.data || [],
+        latestRuns: latestRunsRes.data || [],
+        todayRuns: todayRes.data || [],
+      };
+      return clCache;
     };
 
     // Overview has no per-click filters — only the period changes it. To make Day/Week/Month
@@ -1112,22 +1142,25 @@
 
       // checklists (with quotas) loaded up front; also feeds the filter dropdown
       let checklists = [];
+      let runsData = null;
       if (type === 'checklists') {
-        const { data } = await db.from('checklists').select('id,title,daily_quota,quota_weekdays');
-        checklists = (data || []).filter(c => c.daily_quota > 0);
+        const todayB = todayBounds();
+        const [clRes, runsRes] = await Promise.all([
+          db.from('checklists').select('id,title,daily_quota,quota_weekdays'),
+          ensureChecklistRuns(`${period.from}|${period.until}`, cur, prev, todayB)
+        ]);
+        checklists = (clRes.data || []).filter(c => c.daily_quota > 0);
+        runsData = runsRes;
       }
-      const selectedCl = storageValue(filterKey, 'all');
-      const clSel = el('select', { class: 'kpi-filter', onchange: e => {
-        setStorageValue(filterKey, e.target.value); refresh();
-      } }, [opt('all', t('allChecklists')), ...checklists.map(c => opt(c.id, c.title))]);
-      clSel.value = checklists.some(c => c.id === selectedCl) ? selectedCl : 'all';
+      const selectedCls = new Set((storageValue(filterKey, '') || '').split(',').filter(x => checklists.some(c => c.id === x)));
+      const saveChecklists = (set) => { set.size ? setStorageValue(filterKey, [...set].join(',')) : removeStorageValue(filterKey); refresh(); };
 
-      const admins = state.profiles.filter(p => isAdminPlus(p));
       const selectedAdmin = storageValue(adminKey, 'all');
-      const adminSel = el('select', { class: 'kpi-filter', onchange: e => {
-        setStorageValue(adminKey, e.target.value); refresh();
-      } }, [opt('all', t('allAdmins')), ...admins.map(p => opt(p.id, labelOf(p)))]);
-      adminSel.value = (selectedAdmin === 'all' || admins.some(p => p.id === selectedAdmin)) ? selectedAdmin : 'all';
+      const saveAdmin = (val) => {
+        if (val === 'all') removeStorageValue(adminKey);
+        else setStorageValue(adminKey, val);
+        refresh();
+      };
 
       const from = el('input', { type: 'date', value: period.from });
       const until = el('input', { type: 'date', value: period.until });
@@ -1182,11 +1215,13 @@
       // so without this a refresh keeps them stuck. Shown next to the type selector on
       // the two tabs that carry filters.
       const anyFilterActive = (type === 'overview' && overviewActivity.size > 0)
-        || (type === 'incidents' && (incidentReportTypes.size > 0 || incidentConsequences.size > 0 || incidentRootCauses.size > 0 || incidentStatuses.size > 0));
+        || (type === 'incidents' && (incidentReportTypes.size > 0 || incidentConsequences.size > 0 || incidentRootCauses.size > 0 || incidentStatuses.size > 0))
+        || (type === 'checklists' && selectedCls.size > 0)
+        || (type === 'admin_performance' && selectedAdmin !== 'all');
       const resetFiltersBtn = el('button', {
         class: 'btn btn-ghost btn-sm kpi-reset-btn',
         onclick: () => {
-          [reportTypeKey, consequenceKey, rootCauseKey, statusKey, activityKey].forEach(removeStorageValue);
+          [reportTypeKey, consequenceKey, rootCauseKey, statusKey, activityKey, filterKey, adminKey].forEach(removeStorageValue);
           refresh();
         },
       }, t('resetFilters'));
@@ -1198,11 +1233,9 @@
       frag.append(el('div', { class: 'kpi-control-wrap' }, [
         el('div', { class: 'kpi-toolbar-row' }, [
           typeSel,
-          ['overview', 'incidents'].includes(type) ? resetFiltersBtn : null,
-          type === 'checklists' ? clSel : null,
+          ['overview', 'incidents', 'checklists', 'admin_performance'].includes(type) ? resetFiltersBtn : null,
           type === 'incidents' ? statusFilter : null,
           el('span', { class: 'spacer' }),
-          type === 'admin_performance' ? adminSel : null,
           type !== 'admin_performance' ? presetSeg : null,
           type !== 'admin_performance' ? el('div', { class: 'kpi-period-chip' }, periodLabel(period)) : null,
           type !== 'admin_performance' ? calBtn : null,
@@ -1219,8 +1252,8 @@
         statusSet: incidentStatuses, rootCauseSet: incidentRootCauses,
         reportTypeSet: incidentReportTypes, consequenceSet: incidentConsequences,
       });
-      else if (type === 'checklists') await renderChecklistsKpi(host, period, prev, checklists, selectedCl);
-      else await renderAdminPerformanceKpi(host, adminSel.value);
+      else if (type === 'checklists') await renderChecklistsKpi(host, { period, prev, checklists, selectedCls, saveChecklists, refresh, runsData });
+      else await renderAdminPerformanceKpi(host, { adminId: selectedAdmin, saveAdmin });
 
       mount.replaceChildren(...Array.from(frag.childNodes));
     };
@@ -1690,10 +1723,9 @@
     renderEventFeed(host, ev);
   }
 
-  // ── CHECKLISTS (quota model) ────────────────────────────────
-  async function renderChecklistsKpi(host, period, prev, checklists, selectedCl) {
+  async function renderChecklistsKpi(host, { period, prev, checklists, selectedCls = new Set(), saveChecklists = () => {}, refresh = () => {}, runsData }) {
     const cur = periodBounds(period);
-    const scope = selectedCl === 'all' ? checklists : checklists.filter(c => c.id === selectedCl);
+    const scope = selectedCls.size === 0 ? checklists : checklists.filter(c => selectedCls.has(c.id));
     const scopeIds = scope.map(c => c.id);
 
     // expected = Σ quota × qualifying days
@@ -1702,15 +1734,28 @@
     // Completion events for the range, current and previous. We count completed
     // checklist_runs (checklist_completions is not reliably written), normalising
     // each submission to its date so the per-day shortfall maths is unchanged.
-    const fetchEvents = async (b) => {
-      const { data = [] } = await db.from('checklist_runs')
-        .select('checklist_id,submitted_at')
-        .eq('completed', true).not('submitted_at', 'is', null)
-        .gte('submitted_at', b.start).lt('submitted_at', b.end)
-        .in('checklist_id', scopeIds.length ? scopeIds : ['00000000-0000-0000-0000-000000000000']);
-      return data.map(r => ({ checklist_id: r.checklist_id, completed_on: localDateString(new Date(r.submitted_at)) }));
+    const getEvents = (b) => {
+      const filtered = (runsData?.runs || []).filter(r => r.submitted_at >= b.start && r.submitted_at < b.end && scopeIds.includes(r.checklist_id));
+      return filtered.map(r => ({ checklist_id: r.checklist_id, completed_on: localDateString(new Date(r.submitted_at)) }));
     };
-    const [ev, evPrev] = await Promise.all([fetchEvents(cur), fetchEvents(prev)]);
+    const ev = getEvents(cur);
+    const evPrev = getEvents(prev);
+
+    // Build active chips for multi-select
+    const activeChips = [];
+    for (const id of selectedCls) {
+      const title = checklists.find(c => c.id === id)?.title;
+      if (title) {
+        activeChips.push({
+          label: title,
+          onclick: () => {
+            const next = new Set(selectedCls);
+            next.delete(id);
+            saveChecklists(next);
+          }
+        });
+      }
+    }
 
     const completions = ev.length;
     const prevPeriod = { from: prev.start.slice(0, 10), until: new Date(new Date(prev.end) - DAYMS).toISOString().slice(0, 10) };
@@ -1768,13 +1813,19 @@
       const set = new Set((c.quota_weekdays || [0, 1, 2, 3, 4, 5, 6]).map(Number));
       return s + (set.has(todayDow) ? c.daily_quota : 0);
     }, 0);
-    const doneTodayQ = db.from('checklist_runs').select('id', { count: 'exact', head: true })
-      .eq('completed', true).gte('submitted_at', todayB.start).lt('submitted_at', todayB.end);
-    const doneToday = num0(await countRows(scopeIds.length
-      ? doneTodayQ.in('checklist_id', scopeIds)
-      : doneTodayQ.eq('checklist_id', '00000000-0000-0000-0000-000000000000')));
+    const doneToday = (runsData?.todayRuns || []).filter(r => scopeIds.includes(r.checklist_id)).length;
     const pendingToday = Math.max(0, dueToday - doneToday);
+
     host.append(el('div', { class: 'kpi-section-h' }, t('rightNow')));
+
+    if (activeChips.length) {
+      host.append(el('div', { class: 'kpi-drillbar' }, [
+        el('span', { class: 'kpi-drill-label' }, `${t('filteredBy')}:`),
+        ...activeChips.map(c => el('button', { class: 'kpi-drill-chip', onclick: c.onclick }, `x ${c.label}`)),
+        activeChips.length > 1 ? el('button', { class: 'btn btn-ghost btn-sm', onclick: () => saveChecklists(new Set()) }, t('clearFilter')) : null,
+      ]));
+    }
+
     host.append(el('div', { class: 'kpi-grid' }, [
       metricCard({ label: t('activeChecklists'), value: scope.length, live: true }),
       metricCard({ label: t('dueToday'), value: dueToday, live: true }),
@@ -1794,22 +1845,11 @@
     const titleOf = (id) => (checklists.find(c => c.id === id)?.title) || t('checklist');
     const userName = (id) => { const p = state.profiles.find(u => u.id === id); return p ? labelOf(p) : '—'; };
 
-    // Last three submissions entered anywhere in the system (ignores date range + filter).
-    const { data: latestRuns = [] } = await db.from('checklist_runs')
-      .select('checklist_id,user_id,submitted_at,completed')
-      .not('submitted_at', 'is', null)
-      .order('submitted_at', { ascending: false })
-      .limit(3);
-
-    // Completed submissions in this range/scope — feeds per-checklist "when filed".
-    const periodRunQ = db.from('checklist_runs')
-      .select('checklist_id,user_id,submitted_at,completed')
-      .not('submitted_at', 'is', null).eq('completed', true)
-      .gte('submitted_at', cur.start).lt('submitted_at', cur.end)
-      .order('submitted_at', { ascending: false });
-    const { data: periodRuns = [] } = await (scopeIds.length
-      ? periodRunQ.in('checklist_id', scopeIds)
-      : periodRunQ.eq('checklist_id', '00000000-0000-0000-0000-000000000000'));
+    const latestRuns = runsData?.latestRuns || [];
+    const allPeriodRuns = (runsData?.runs || [])
+      .filter(r => r.submitted_at >= cur.start && r.submitted_at < cur.end)
+      .sort((a, b) => b.submitted_at.localeCompare(a.submitted_at));
+    const periodRuns = allPeriodRuns.filter(r => scopeIds.includes(r.checklist_id));
     const filedByChecklist = {};
     periodRuns.forEach(r => (filedByChecklist[r.checklist_id] ||= []).push(r));
 
@@ -1860,6 +1900,49 @@
       expCard.append(row);
     });
 
+    const CHECKLIST_COLORS = ['#0984E3', '#6C5CE7', '#00B894', '#E17055', '#D85A30', '#BA7517', '#1D9E75', '#A32D2D'];
+    const counts = checklists.map((c, i) => ({
+      id: c.id, name: c.title, color: CHECKLIST_COLORS[i % CHECKLIST_COLORS.length],
+      n: allPeriodRuns.filter(r => r.checklist_id === c.id).length
+    })).filter(c => c.n > 0).sort((a, b) => b.n - a.n);
+
+    const total = counts.reduce((a, c) => a + c.n, 0);
+    const drawBreakdownBar = () => {
+      if (!total) return null;
+      const bar = el('div', { class: 'sev-bar' }, counts.map(c =>
+        el('div', {
+          class: 'sev-segment' + (selectedCls.has(c.id) ? ' sev-active' : ''),
+          style: `width:${c.n / total * 100}%;background:${c.color}`,
+          title: `${c.name}: ${c.n}`,
+          onclick: () => {
+            const next = new Set(selectedCls);
+            if (next.has(c.id)) next.delete(c.id);
+            else next.add(c.id);
+            saveChecklists(next);
+          }
+        })));
+
+      const legend = el('div', { class: 'sev-legend' }, counts.map(c =>
+        el('span', {
+          class: selectedCls.has(c.id) ? 'sev-active' : '',
+          onclick: () => {
+            const next = new Set(selectedCls);
+            if (next.has(c.id)) next.delete(c.id);
+            else next.add(c.id);
+            saveChecklists(next);
+          }
+        }, [el('i', { style: `background:${c.color}` }), `${c.name} ${c.n}`])));
+
+      return el('div', { class: 'kpi-card', style: 'margin-top:14px' }, [
+        el('div', { class: 'kpi-label', style: 'margin-bottom:10px' }, t('kpiChecklists')),
+        bar,
+        legend
+      ]);
+    };
+
+    const breakdown = drawBreakdownBar();
+    if (breakdown) host.append(breakdown);
+
     split.append(latestCard, expCard);
     host.append(split);
 
@@ -1871,7 +1954,7 @@
     renderEventFeed(host, feedEv);
   }
 
-  async function renderAdminPerformanceKpi(host, adminId) {
+  async function renderAdminPerformanceKpi(host, { adminId, saveAdmin }) {
     const admins = state.profiles.filter(p => isAdminPlus(p));
     if (!admins.length) {
       host.append(emptyState(t('noAdminsFound'), t('createOrPromoteAdmin')));
@@ -1933,7 +2016,12 @@
     ]);
     stats.slice().sort((a, b) => b.completed - a.completed).forEach(s => {
       const rate = s.assigned ? Math.round(s.completed / s.assigned * 100) : 0;
-      chart.append(el('div', { class: 'perf-row' + (s.id === adminId ? ' perf-row-active' : '') }, [
+      chart.append(el('div', {
+        class: 'perf-row' + (s.id === adminId ? ' perf-row-active' : ''),
+        onclick: () => {
+          saveAdmin(adminId === s.id ? 'all' : s.id);
+        }
+      }, [
         el('div', { class: 'perf-name', title: s.name }, s.name),
         el('div', { class: 'perf-track' }, [
           el('div', { class: 'perf-fill', style: `width:${s.completed / max * 100}%` }),

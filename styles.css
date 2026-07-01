@@ -2668,8 +2668,10 @@ input[type="checkbox"]:focus, input[type="radio"]:focus {
 .hidden-group-row:first-child { border-top: 0; }
 
 /* admin performance bar chart */
-.perf-row { display: flex; align-items: center; gap: 12px; padding: 8px 0; }
-.perf-row + .perf-row { border-top: 1px solid var(--line); }
+.perf-row { display: flex; align-items: center; gap: 12px; padding: 8px; cursor: pointer; border-radius: 6px; transition: background 0.15s ease; }
+.perf-row:hover { background: rgba(9, 132, 227, 0.04); }
+.perf-row-active { background: rgba(9, 132, 227, 0.08); }
+.perf-row + .perf-row { margin-top: 4px; }
 .perf-name { flex: 0 0 130px; font-size: .82rem; font-weight: 650; color: var(--ink);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .perf-track { flex: 1; height: 12px; border-radius: 6px; overflow: hidden;
