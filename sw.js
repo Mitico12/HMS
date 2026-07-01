@@ -1,4 +1,4 @@
-const CACHE_NAME = 'hms-shell-v11';
+const CACHE_NAME = 'hms-shell-v19';
 const SHELL_ASSETS = [
   './',
   './index.html',
@@ -61,3 +61,4 @@ async function cacheFirst(request) {
   cache.put(request, fresh.clone()).catch(() => {});
   return fresh;
 }
+

@@ -38,6 +38,34 @@
   function fresh(ts) {
     return ts && Date.now() - ts < DATA_TTL;
   }
+  function storageJson(key, fallback) {
+    try {
+      const raw = localStorage.getItem(key);
+      return raw ? JSON.parse(raw) : fallback;
+    } catch (err) {
+      return fallback;
+    }
+  }
+  function storageArray(key) {
+    const value = storageJson(key, []);
+    return Array.isArray(value) ? value : [];
+  }
+  function setStorageJson(key, value) {
+    try { localStorage.setItem(key, JSON.stringify(value)); }
+    catch (err) { /* private mode/quota should not break navigation */ }
+  }
+  function storageValue(key, fallback = '') {
+    try { return localStorage.getItem(key) || fallback; }
+    catch (err) { return fallback; }
+  }
+  function setStorageValue(key, value) {
+    try { localStorage.setItem(key, value); }
+    catch (err) { /* storage may be unavailable */ }
+  }
+  function removeStorageValue(key) {
+    try { localStorage.removeItem(key); }
+    catch (err) { /* storage may be unavailable */ }
+  }
 
   async function loadMyDepartments() {
     state.departmentIds = new Set();
@@ -86,6 +114,7 @@
   }
   const viewStack = [];
   let mobileSidebarOpen = false;
+  let sidebarCollapsed = (() => { try { return localStorage.getItem('sidebarCollapsed') === '1'; } catch (e) { return false; } })();
 
   (async function boot() {
     const res = await requireSession();
@@ -186,14 +215,34 @@
     });
     renderSidebar('groups');
   }
-  function setMobileSidebar(open) {
-    mobileSidebarOpen = open;
+  function isMobileView() { return window.matchMedia('(max-width: 720px)').matches; }
+  function syncNavToggle() {
     const shell = document.querySelector('.app-shell');
-    if (shell) shell.classList.toggle('nav-open', open);
+    if (shell) {
+      shell.classList.toggle('nav-open', mobileSidebarOpen);
+      shell.classList.toggle('nav-collapsed', sidebarCollapsed);
+    }
     const btn = document.querySelector('.mobile-menu-btn');
-    if (btn) btn.setAttribute('aria-expanded', String(open));
+    if (btn) {
+      const expanded = isMobileView() ? mobileSidebarOpen : !sidebarCollapsed;
+      const label = expanded ? 'Close navigation' : 'Open navigation';
+      btn.setAttribute('aria-expanded', String(expanded));
+      btn.setAttribute('aria-label', label);
+      btn.title = label;
+    }
   }
-  function toggleMobileSidebar() { setMobileSidebar(!mobileSidebarOpen); }
+  function setMobileSidebar(open) { mobileSidebarOpen = open; syncNavToggle(); }
+  function setSidebarCollapsed(collapsed) {
+    sidebarCollapsed = collapsed;
+    try { localStorage.setItem('sidebarCollapsed', collapsed ? '1' : '0'); } catch (e) {}
+    syncNavToggle();
+  }
+  // Mobile: slide the overlay sidebar in/out. Desktop/fullscreen: collapse the
+  // fixed sidebar so the content reclaims the width.
+  function toggleMobileSidebar() {
+    if (isMobileView()) setMobileSidebar(!mobileSidebarOpen);
+    else setSidebarCollapsed(!sidebarCollapsed);
+  }
   function closeMobileSidebar() { setMobileSidebar(false); }
   function renderBotnav(active) {
     const nav = $('#botnav'); nav.innerHTML = '';
@@ -268,7 +317,7 @@
         if (dragIdx === null || dragIdx === idx) return;
         const [moved] = orderedGroups.splice(dragIdx, 1);
         orderedGroups.splice(idx, 0, moved);
-        localStorage.setItem('userHomeTileOrder', JSON.stringify(orderedGroups.map(x => `group:${x.id}`)));
+        setStorageJson('userHomeTileOrder', orderedGroups.map(x => `group:${x.id}`));
         dragIdx = null;
         renderSidebar(active);
       });
@@ -288,7 +337,7 @@
   }
   // Order groups by the saved tile/sidebar preference (ids like "group:<id>").
   function sortGroupsBySaved(groups, key) {
-    const saved = JSON.parse(localStorage.getItem(key) || '[]');
+    const saved = storageArray(key);
     const rank = new Map(saved.map((id, i) => [id, i]));
     return groups.slice().sort((a, b) => (rank.get(`group:${a.id}`) ?? 999) - (rank.get(`group:${b.id}`) ?? 999));
   }
@@ -316,10 +365,10 @@
     const view = viewStack[viewStack.length - 1];
     const bar = $('#topbar'); bar.innerHTML = '';
     bar.append(el('button', { class: 'iconbtn mobile-menu-btn', title: 'Open navigation', 'aria-label': 'Open navigation', 'aria-expanded': String(mobileSidebarOpen), onclick: toggleMobileSidebar }, '\u2630'));
-    bar.append(el('button', { class: 'iconbtn', title: t('refresh'), onclick: goIndex }, '⟳'));
     if (viewStack.length > 1) bar.append(el('button', { class: 'iconbtn', onclick: back }, '‹'));
     bar.append(el('h1', {}, view.title));
     bar.append(themeToggleButton());
+    bar.append(el('button', { class: 'iconbtn', title: t('refresh'), onclick: goIndex }, '⟳'));
     bar.append(el('button', { class: 'iconbtn', title: t('signOut'), onclick: signOut }, '⏻'));
     if (view.action) bar.append(view.action);
     const app = $('#app'); app.innerHTML = ''; app.className = 'wrap route-stage';
@@ -327,7 +376,7 @@
     app.append(surface);
     renderBotnav(view.tab || 'groups');
     renderSidebar(view.side || view.tab || 'groups');
-    setMobileSidebar(mobileSidebarOpen);
+    syncNavToggle();
 
     // Entering a group shows the skeleton immediately and holds it for a minimum
     // beat (ROUTE_MIN_LOAD) so the transition reads as deliberate, never a flash.
@@ -501,13 +550,29 @@
       .select('communication_id').eq('user_id', state.profile.id).in('communication_id', ids);
     const readSet = new Set((readRows || []).map(r => r.communication_id));
     const thumbs = await signedUrls('communications', comms.map(c => c.image_path), 600);
-    renderWorkerCommSection(app, t('messages'), comms.filter(c => c.kind === 'message'), readSet, thumbs, t('noMessages'));
-    renderWorkerCommSection(app, t('news'), comms.filter(c => c.kind === 'news'), readSet, thumbs, t('noNews'));
+
+    // Messages: header is a link into the full received-messages log; the home only
+    // surfaces UNREAD ones (read messages live in the log). Cancelled ones are hidden.
+    const hiddenMsgs = hiddenMessageIds();
+    const unreadMsgs = comms.filter(c => c.kind === 'message' && !readSet.has(c.id) && !hiddenMsgs.has(c.id));
+    app.append(el('button', { class: 'comm-subhead comm-subhead-link', onclick: () => go(messagesLogView()) }, [
+      el('span', {}, t('messages')),
+      el('span', { class: 'comm-subhead-go' }, t('viewAllMessages') + ' ›'),
+    ]));
+    if (!unreadMsgs.length) app.append(el('p', { class: 'muted comm-empty' }, t('noNewMessages')));
+    else renderWorkerCommRows(app, unreadMsgs, readSet, thumbs);
+
+    // News: a notification feed (read + unread), minus admin-archived items.
+    renderWorkerCommSection(app, t('news'), comms.filter(c => c.kind === 'news' && !c.archived_at), readSet, thumbs, t('noNews'));
   }
 
   function renderWorkerCommSection(app, title, list, readSet, thumbs, emptyMsg) {
     app.append(el('div', { class: 'comm-subhead' }, title));
     if (!list.length) { app.append(el('p', { class: 'muted comm-empty' }, emptyMsg)); return; }
+    renderWorkerCommRows(app, list, readSet, thumbs);
+  }
+
+  function renderWorkerCommRows(app, list, readSet, thumbs) {
     const wrap = el('div', { class: 'comm-feed' });
     list.forEach(c => {
       const unread = !readSet.has(c.id);
@@ -548,6 +613,52 @@
             ]))));
         }
         app.append(card);
+      },
+    };
+  }
+
+  // The worker's received-messages log — reached from the home "Messages" header.
+  // Holds every message they've received (read + unread); each can be opened or
+  // cancelled (hidden for this worker only).
+  function messagesLogView() {
+    return {
+      title: t('messages'), tab: 'groups',
+      async render(app) {
+        const res = await db.from('communications').select('*').eq('kind', 'message')
+          .order('created_at', { ascending: false }).then(r => r, () => ({ error: true }));
+        if (res.error) { app.append(emptyState(t('messages'), t('runCommunicationsMigration'))); return; }
+        const hidden = hiddenMessageIds();
+        const msgs = (res.data || []).filter(c => !hidden.has(c.id));
+        if (!msgs.length) { app.append(emptyState(t('noMessages'), t('noCommunicationsHint'))); return; }
+        const ids = msgs.map(c => c.id);
+        const { data: readRows = [] } = await db.from('communication_reads')
+          .select('communication_id').eq('user_id', state.profile.id).in('communication_id', ids);
+        const readSet = new Set((readRows || []).map(r => r.communication_id));
+        const thumbs = await signedUrls('communications', msgs.map(c => c.image_path), 600);
+        const wrap = el('div', { class: 'comm-feed' });
+        msgs.forEach(c => {
+          const unread = !readSet.has(c.id);
+          const url = thumbs.get(c.image_path);
+          const snippet = c.title || (c.body || '').slice(0, 80) || t('messages');
+          wrap.append(el('div', { class: 'comm-log-row' }, [
+            el('button', { class: 'comm-row' + (unread ? ' comm-unread' : ''), onclick: () => go(communicationDetail(c)) }, [
+              el('div', { class: 'comm-thumb' }, url ? el('img', { src: url, alt: '' }) : el('span', { class: 'comm-thumb-ico' }, '✉')),
+              el('div', { class: 'comm-main' }, [
+                el('div', { class: 'comm-title' }, snippet),
+                el('div', { class: 'comm-snippet' }, c.title ? (c.body || '').slice(0, 80) : fmt(c.created_at)),
+              ]),
+              unread
+                ? el('span', { class: 'comm-flag', title: t('unread') }, '❗')
+                : el('span', { class: 'comm-time' }, fmt(c.created_at)),
+            ]),
+            el('button', { class: 'btn btn-ghost btn-sm comm-cancel', onclick: () => {
+              setMessageHidden(c.id, true);
+              toast(t('messageCancelled'));
+              go(messagesLogView(), { reset: true });
+            } }, t('cancel')),
+          ]));
+        });
+        app.append(wrap);
       },
     };
   }
@@ -643,10 +754,8 @@
 
   function kpiPeriod(storageKey) {
     const today = localDateString();
-    try {
-      const saved = JSON.parse(localStorage.getItem(storageKey) || 'null');
-      if (saved?.from && saved?.until) return saved;
-    } catch (err) {}
+    const saved = storageJson(storageKey, null);
+    if (saved?.from && saved?.until) return saved;
     return { from: today, until: today };
   }
 
@@ -662,20 +771,20 @@
   }
 
   function visibleKpiCards(cards, storageKey) {
-    const selected = localStorage.getItem(storageKey) || 'all';
+    const selected = storageValue(storageKey, 'all');
     return selected === 'all' ? cards : cards.filter(card => card.id === selected);
   }
 
   function renderKpiToolbar(host, filterKey, periodKey, cards, refreshHome) {
     const period = kpiPeriod(periodKey);
     const filter = el('select', { class: 'kpi-filter', onchange: e => {
-      localStorage.setItem(filterKey, e.target.value);
+      setStorageValue(filterKey, e.target.value);
       refreshHome();
     } }, [
       opt('all', t('showAllKpis')),
       ...cards.map(card => opt(card.id, card.label)),
     ]);
-    const selected = localStorage.getItem(filterKey) || 'all';
+    const selected = storageValue(filterKey, 'all');
     filter.value = cards.some(card => card.id === selected) ? selected : 'all';
     const from = el('input', { type: 'date', value: period.from });
     const until = el('input', { type: 'date', value: period.until });
@@ -684,7 +793,7 @@
       labeled(t('dateUntil'), until),
       el('div', { class: 'kpi-date-actions' }, [
         el('button', { class: 'btn btn-ghost', onclick: () => {
-          localStorage.removeItem(periodKey);
+          removeStorageValue(periodKey);
           refreshHome();
         } }, t('today')),
         el('button', { class: 'btn btn-primary', onclick: () => saveKpiPeriod(periodKey, from.value, until.value, refreshHome) }, t('apply')),
@@ -709,7 +818,7 @@
       return;
     }
     const ordered = from <= until ? { from, until } : { from: until, until: from };
-    localStorage.setItem(storageKey, JSON.stringify(ordered));
+    setStorageJson(storageKey, ordered);
     refreshHome();
   }
 
@@ -726,12 +835,12 @@
       return;
     }
     const ordered = from <= until ? { from, until } : { from: until, until: from };
-    localStorage.setItem(storageKey, JSON.stringify(ordered));
+    setStorageJson(storageKey, ordered);
     go(homeView(), { reset: true });
   }
 
   function renderSortableKpiGrid(host, storageKey, cards, options = {}) {
-    const saved = JSON.parse(localStorage.getItem(storageKey) || '[]');
+    const saved = storageArray(storageKey);
     const rank = new Map(saved.map((id, idx) => [id, idx]));
     cards.sort((a, b) => (rank.get(a.id) ?? 99) - (rank.get(b.id) ?? 99));
     const grid = el('div', { class: 'kpi-grid' });
@@ -756,7 +865,7 @@
           if (dragIdx === null || dragIdx === idx) return;
           const [moved] = cards.splice(dragIdx, 1);
           cards.splice(idx, 0, moved);
-          localStorage.setItem(storageKey, JSON.stringify(cards.map(c => c.id)));
+          setStorageJson(storageKey, cards.map(c => c.id));
           dragIdx = null;
           draw();
         });
@@ -1076,13 +1185,23 @@
 
   const HIDDEN_REPORTS_KEY = 'workerHiddenReportIds';
   function hiddenReportIds() {
-    try { return new Set(JSON.parse(localStorage.getItem(HIDDEN_REPORTS_KEY) || '[]')); }
-    catch (err) { return new Set(); }
+    return new Set(storageArray(HIDDEN_REPORTS_KEY));
   }
   function setReportHidden(id, hidden) {
     const ids = hiddenReportIds();
     if (hidden) ids.add(id); else ids.delete(id);
-    localStorage.setItem(HIDDEN_REPORTS_KEY, JSON.stringify([...ids]));
+    setStorageJson(HIDDEN_REPORTS_KEY, [...ids]);
+  }
+  // Cancelling a message hides it from this worker only (the row stays in the DB
+  // for the admin's read stats); mirrors the per-user hidden-reports pattern.
+  const HIDDEN_MESSAGES_KEY = 'workerHiddenMessageIds';
+  function hiddenMessageIds() {
+    return new Set(storageArray(HIDDEN_MESSAGES_KEY));
+  }
+  function setMessageHidden(id, hidden) {
+    const ids = hiddenMessageIds();
+    if (hidden) ids.add(id); else ids.delete(id);
+    setStorageJson(HIDDEN_MESSAGES_KEY, [...ids]);
   }
 
   function reportActionButton({ primary, iconClass, icon, label, onclick }) {
@@ -1158,8 +1277,7 @@
   const REPORT_FORM_TYPES = ['incident', 'hazard', 'suggestion', 'varsling'];
   function reportFormStorageKey(type) { return `reportForm:${type}`; }
   function readLocalReportFields(type) {
-    try { return JSON.parse(localStorage.getItem(reportFormStorageKey(type)) || '[]'); }
-    catch (_) { return []; }
+    return storageArray(reportFormStorageKey(type));
   }
   async function loadReportFormFields(type) {
     if (!REPORT_FORM_TYPES.includes(type)) return [];
@@ -1633,20 +1751,28 @@
   async function signedUrls(bucket, paths, expires = 300) {
     const clean = [...new Set((paths || []).filter(Boolean))];
     if (!clean.length) return new Map();
-    const store = db.storage.from(bucket);
-    if (typeof store.createSignedUrls === 'function') {
-      const { data, error } = await store.createSignedUrls(clean, expires);
-      if (!error) {
-        return new Map((data || [])
-          .map((row, idx) => [row.path || clean[idx], row.signedUrl])
-          .filter(([, url]) => !!url));
+    try {
+      const store = db.storage.from(bucket);
+      if (typeof store.createSignedUrls === 'function') {
+        const { data, error } = await store.createSignedUrls(clean, expires);
+        if (!error) {
+          return new Map((data || [])
+            .map((row, idx) => [row.path || clean[idx], row.signedUrl])
+            .filter(([, url]) => !!url));
+        }
       }
+      const entries = await Promise.all(clean.map(async path => {
+        try {
+          const { data, error } = await store.createSignedUrl(path, expires);
+          return (!error && data?.signedUrl) ? [path, data.signedUrl] : null;
+        } catch (err) {
+          return null;
+        }
+      }));
+      return new Map(entries.filter(Boolean));
+    } catch (err) {
+      return new Map();
     }
-    const entries = await Promise.all(clean.map(async path => {
-      const { data, error } = await store.createSignedUrl(path, expires);
-      return (!error && data?.signedUrl) ? [path, data.signedUrl] : null;
-    }));
-    return new Map(entries.filter(Boolean));
   }
 
   async function renderIncidentActionLog(host, actions = []) {
