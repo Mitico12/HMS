@@ -1005,242 +1005,391 @@
 
   async function renderAdminKpiDashboard(app) {
     const periodKey = 'adminKpiPeriod', typeKey = 'adminKpiType', filterKey = 'adminKpiChecklist', adminKey = 'adminKpiAdmin', presetKey = 'adminKpiPreset';
-    const preset = storageValue(presetKey, 'today');
-    // Day/Week/Month presets recompute live so the window always tracks the current
-    // date; only a custom calendar range is read back from storage.
-    const period = preset === 'custom' ? kpiPeriod(periodKey) : presetBounds(preset);
-    const prev = previousBounds(period);
-    const cur = periodBounds(period);
-    let type = storageValue(typeKey, 'overview');
-    if (type === 'admin_performance' && !isAdminPlus(state.profile)) type = 'overview';
-    const refresh = () => go(homeView(), { reset: true });
-    const setPreset = (k) => { setStorageValue(presetKey, k); refresh(); };
+    const reportTypeKey = 'adminKpiIncidentReportType', consequenceKey = 'adminKpiIncidentConsequence';
+    const statusKey = 'adminKpiIncidentStatus', rootCauseKey = 'adminKpiRootCause';
+    const activityKey = 'adminKpiOverviewActivity'; // Overview "Reports by type" → Latest-activity drilldown
 
-    // ── toolbar: type (left) · checklist filter · period chip + calendar (right) ──
-    const typeOptions = [opt('overview', t('kpiOverview')), opt('incidents', t('kpiIncidents')), opt('checklists', t('kpiChecklists'))];
-    if (isAdminPlus(state.profile)) typeOptions.push(opt('admin_performance', t('kpiAdminPerformance')));
-    const typeSel = el('select', { class: 'kpi-filter', onchange: e => {
-      setStorageValue(typeKey, e.target.value); refresh();
-    } }, typeOptions);
-    typeSel.value = type;
+    // The dashboard re-renders IN PLACE on every filter change (no router hop / skeleton /
+    // route fade), and the Incidents dataset is fetched ONCE per period and cached here —
+    // so toggling a report-type / consequence / root-cause / status filter recomputes the
+    // cards, bars and activity feed straight from memory with zero network. The cache is
+    // keyed by the period window, so switching Day/Week/Month or the calendar range (or
+    // navigating away and back) transparently refetches. Trade-off: rows filed while the
+    // admin sits on the page won't appear until the period changes or the page reloads.
+    const mount = el('div', { class: 'kpi-dashboard' });
+    app.append(mount);
+    let incCache = null; // { key, all, cats, rootCauseCats, live }
+    let clCache = null;
 
-    // checklists (with quotas) loaded up front; also feeds the filter dropdown
-    let checklists = [];
-    if (type === 'checklists') {
-      const { data } = await db.from('checklists').select('id,title,daily_quota,quota_weekdays');
-      checklists = (data || []).filter(c => c.daily_quota > 0);
-    }
-    const selectedCl = storageValue(filterKey, 'all');
-    const clSel = el('select', { class: 'kpi-filter', onchange: e => {
-      setStorageValue(filterKey, e.target.value); refresh();
-    } }, [opt('all', t('allChecklists')), ...checklists.map(c => opt(c.id, c.title))]);
-    clSel.value = checklists.some(c => c.id === selectedCl) ? selectedCl : 'all';
+    const ensureIncidents = async (key, cur, prev) => {
+      if (incCache && incCache.key === key) return incCache;
+      const [allRes, catsRes, rcRes, live] = await Promise.all([
+        db.from('incidents')
+          .select('id,report_type,consequence_ids,root_cause_ids,is_anonymous,status,created_at,resolved_at,reporter_id,assigned_to')
+          .or(`and(created_at.gte.${prev.start},created_at.lt.${cur.end}),and(resolved_at.gte.${prev.start},resolved_at.lt.${cur.end})`)
+          .limit(5000),
+        db.from('incident_categories').select('id,name').eq('kind', 'consequence'),
+        db.from('incident_categories').select('id,name').eq('kind', 'root_cause'),
+        liveIncidentState(),
+      ]);
+      incCache = { key, all: allRes.data || [], cats: catsRes.data || [], rootCauseCats: rcRes.data || [], live };
+      return incCache;
+    };
 
-    const admins = state.profiles.filter(p => isAdminPlus(p));
-    const selectedAdmin = storageValue(adminKey, 'all');
-    const adminSel = el('select', { class: 'kpi-filter', onchange: e => {
-      setStorageValue(adminKey, e.target.value); refresh();
-    } }, [opt('all', t('allAdmins')), ...admins.map(p => opt(p.id, labelOf(p)))]);
-    adminSel.value = (selectedAdmin === 'all' || admins.some(p => p.id === selectedAdmin)) ? selectedAdmin : 'all';
+    const ensureChecklistRuns = async (key, cur, prev, todayB) => {
+      if (clCache && clCache.key === key) return clCache;
+      const [runsRes, latestRunsRes, todayRes] = await Promise.all([
+        db.from('checklist_runs')
+          .select('checklist_id,user_id,submitted_at,completed')
+          .not('submitted_at', 'is', null)
+          .eq('completed', true)
+          .or(`and(submitted_at.gte.${prev.start},submitted_at.lt.${cur.end})`)
+          .limit(10000),
+        db.from('checklist_runs')
+          .select('checklist_id,user_id,submitted_at,completed')
+          .not('submitted_at', 'is', null)
+          .order('submitted_at', { ascending: false })
+          .limit(3),
+        db.from('checklist_runs')
+          .select('checklist_id')
+          .eq('completed', true)
+          .gte('submitted_at', todayB.start)
+          .lt('submitted_at', todayB.end)
+      ]);
+      clCache = {
+        key,
+        runs: runsRes.data || [],
+        latestRuns: latestRunsRes.data || [],
+        todayRuns: todayRes.data || [],
+      };
+      return clCache;
+    };
 
-    const from = el('input', { type: 'date', value: period.from });
-    const until = el('input', { type: 'date', value: period.until });
-    const panel = el('div', { class: 'kpi-date-panel hidden' }, [
-      labeled(t('dateFrom'), from), labeled(t('dateUntil'), until),
-      el('div', { class: 'kpi-date-actions' }, [
-        el('button', { class: 'btn btn-ghost', onclick: () => { removeStorageValue(periodKey); setPreset('today'); } }, t('today')),
-        el('button', { class: 'btn btn-primary', onclick: () => { setStorageValue(presetKey, 'custom'); saveKpiPeriod(periodKey, from.value, until.value, refresh); } }, t('apply')),
-      ]),
-    ]);
-    const calBtn = el('button', { class: 'iconbtn', title: t('dashboardPeriod'), onclick: () => panel.classList.toggle('hidden') }, '📅');
+    // Overview has no per-click filters — only the period changes it. To make Day/Week/Month
+    // switch instantly, one superset covering all three presets AND their comparison windows
+    // is fetched once and cached; each preset's cur/prev counts are computed client-side.
+    // A custom calendar range caches its own [prev.start, cur.end] window.
+    let ovCache = null;
+    const ensureOverview = async (preset, period) => {
+      const canSeeVarsling = isSuperPlus(state.profile) && canAccessVarsling(state.profile);
+      let start, end, key;
+      if (preset === 'custom') {
+        const c = periodBounds(period), pr = previousBounds(period);
+        start = pr.start; end = c.end; key = `custom|${period.from}|${period.until}`;
+      } else {
+        let minStart = Infinity, maxEnd = -Infinity;
+        for (const k of ['today', 'week', 'month']) {
+          const p = presetBounds(k), c = periodBounds(p), pr = previousBounds(p);
+          minStart = Math.min(minStart, +new Date(pr.start));
+          maxEnd = Math.max(maxEnd, +new Date(c.end));
+        }
+        start = new Date(minStart).toISOString(); end = new Date(maxEnd).toISOString();
+        key = `presets|${localDateString()}`;
+      }
+      if (ovCache && ovCache.key === key) return ovCache;
+      const rows = (q) => q.then(r => r.data || [], () => []);
+      const win = (q, col) => q.gte(col, start).lt(col, end).limit(10000);
+      const titleMap = (table) => db.from(table).select('id,title').then(
+        r => new Map((r.data || []).map(x => [x.id, x.title])), () => new Map());
+      const [
+        incidents, runs, courses, procs, docs, members, vars,
+        clTitles, coTitles, prTitles, seriousIds, live,
+      ] = await Promise.all([
+        rows(db.from('incidents')
+          .select('id,report_type,is_anonymous,reporter_id,assigned_to,status,created_at,resolved_at,consequence_ids')
+          .or(`and(created_at.gte.${start},created_at.lt.${end}),and(resolved_at.gte.${start},resolved_at.lt.${end})`).limit(5000)),
+        rows(win(db.from('checklist_runs').select('checklist_id,user_id,submitted_at').eq('completed', true).not('submitted_at', 'is', null), 'submitted_at')),
+        rows(win(db.from('course_submissions').select('course_id,user_id,passed,score,created_at'), 'created_at')),
+        rows(win(db.from('procedure_submissions').select('procedure_id,user_id,created_at'), 'created_at')),
+        rows(win(db.from('documents').select('name,uploaded_by,created_at'), 'created_at')),
+        rows(win(db.from('profiles').select('id,full_name,username,email,created_at'), 'created_at')),
+        canSeeVarsling ? rows(win(db.from('varslinger').select('id,created_at'), 'created_at')) : Promise.resolve([]),
+        titleMap('checklists'), titleMap('courses'), titleMap('procedures'),
+        seriousConsequenceIds(),
+        liveIncidentState(),
+      ]);
+      ovCache = {
+        key, incidents, runs, courses, procs, docs, members, vars,
+        clTitles, coTitles, prTitles, seriousIds, live, canSeeVarsling,
+      };
+      return ovCache;
+    };
 
-    // Day / Week / Month quick presets — the common ranges without opening the calendar.
-    const presetIcons = { today: '⏱️', week: '📅', month: '🗓️' };
-    const presetSeg = el('div', { class: 'kpi-seg' }, ['today', 'week', 'month'].map(k =>
-      el('button', { class: 'kpi-seg-btn' + (preset === k ? ' on' : ''), onclick: () => setPreset(k) }, [
-        el('span', { style: 'font-size: 0.95rem; line-height: 1;' }, presetIcons[k]),
-        t('period' + k.charAt(0).toUpperCase() + k.slice(1))
-      ])));
+    const paint = async () => {
+      const preset = storageValue(presetKey, 'today');
+      // Day/Week/Month presets recompute live so the window always tracks the current
+      // date; only a custom calendar range is read back from storage.
+      const period = preset === 'custom' ? kpiPeriod(periodKey) : presetBounds(preset);
+      const prev = previousBounds(period);
+      const cur = periodBounds(period);
+      let type = storageValue(typeKey, 'overview');
+      if (type === 'admin_performance' && !isAdminPlus(state.profile)) type = 'overview';
+      const refresh = paint;
+      const setPreset = (k) => { setStorageValue(presetKey, k); refresh(); };
 
-    // Incident status quick-filters — sit horizontally to the right of the type dropdown,
-    // and only on the incidents view. Selection persists like the other KPI filters.
-    const statusKey = 'adminKpiIncidentStatus';
-    const incidentStatus = storageValue(statusKey, 'all');
-    const statusFilter = el('div', { class: 'kpi-status-filter' },
-      ['all', 'open', 'in_progress', 'resolved'].map(s =>
-        el('button', { class: 'chip' + (incidentStatus === s ? ' on' : ''), onclick: () => {
-          setStorageValue(statusKey, s); refresh();
-        } }, s === 'all' ? t('all') : statusLabel(s))));
+      // Incidents/Overview tabs: load (or reuse) the cached dataset up front so the body
+      // (and the incidents root-cause dropdown) render from the same in-memory rows.
+      const inc = type === 'incidents' ? await ensureIncidents(`${period.from}|${period.until}`, cur, prev) : null;
+      const ov = type === 'overview' ? await ensureOverview(preset, period) : null;
 
-    // Root-cause quick-filter — only offered on Incidents (Overview's root-cause bar
-    // always shows the whole period, unfiltered). Selection persists like the other KPI filters.
-    const rootCauseKey = 'adminKpiRootCause';
-    let rootCauseCats = [];
-    if (type === 'incidents') {
-      const { data } = await db.from('incident_categories').select('id,name').eq('kind', 'root_cause');
-      rootCauseCats = data || [];
-    }
-    const selectedRootCause = storageValue(rootCauseKey, 'all');
-    const rootCauseSel = el('select', { class: 'kpi-filter', title: t('filterByRootCause'), onchange: e => {
-      setStorageValue(rootCauseKey, e.target.value); refresh();
-    } }, [opt('all', t('allRootCauses')), ...rootCauseCats.map(c => opt(c.id, c.name))]);
-    rootCauseSel.value = rootCauseCats.some(c => c.id === selectedRootCause) ? selectedRootCause : 'all';
+      // ── toolbar: type (left) · checklist filter · period chip + calendar (right) ──
+      const typeOptions = [opt('overview', t('kpiOverview')), opt('incidents', t('kpiIncidents')), opt('checklists', t('kpiChecklists'))];
+      if (isAdminPlus(state.profile)) typeOptions.push(opt('admin_performance', t('kpiAdminPerformance')));
+      const typeSel = el('select', { class: 'kpi-filter', onchange: e => {
+        setStorageValue(typeKey, e.target.value); refresh();
+      } }, typeOptions);
+      typeSel.value = type;
 
-    app.append(el('div', { class: 'kpi-control-wrap' }, [
-      el('div', { class: 'kpi-toolbar-row' }, [
-        typeSel,
-        type === 'checklists' ? clSel : null,
-        type === 'incidents' ? statusFilter : null,
-        type === 'incidents' ? rootCauseSel : null,
-        el('span', { class: 'spacer' }),
-        type === 'admin_performance' ? adminSel : null,
-        type !== 'admin_performance' ? presetSeg : null,
-        type !== 'admin_performance' ? el('div', { class: 'kpi-period-chip' }, periodLabel(period)) : null,
-        type !== 'admin_performance' ? calBtn : null,
-      ]),
-      panel,
-    ]));
+      // checklists (with quotas) loaded up front; also feeds the filter dropdown
+      let checklists = [];
+      let runsData = null;
+      if (type === 'checklists') {
+        const todayB = todayBounds();
+        const [clRes, runsRes] = await Promise.all([
+          db.from('checklists').select('id,title,daily_quota,quota_weekdays'),
+          ensureChecklistRuns(`${period.from}|${period.until}`, cur, prev, todayB)
+        ]);
+        checklists = (clRes.data || []).filter(c => c.daily_quota > 0);
+        runsData = runsRes;
+      }
+      const selectedCls = new Set((storageValue(filterKey, '') || '').split(',').filter(x => checklists.some(c => c.id === x)));
+      const saveChecklists = (set) => { set.size ? setStorageValue(filterKey, [...set].join(',')) : removeStorageValue(filterKey); refresh(); };
 
-    const host = el('div', {});
-    app.append(host);
+      const selectedAdmin = storageValue(adminKey, 'all');
+      const saveAdmin = (val) => {
+        if (val === 'all') removeStorageValue(adminKey);
+        else setStorageValue(adminKey, val);
+        refresh();
+      };
 
-    if (type === 'overview') await renderOverviewKpi(host, period, cur, prev);
-    else if (type === 'incidents') await renderIncidentsKpi(host, period, cur, prev, incidentStatus, rootCauseSel.value);
-    else if (type === 'checklists') await renderChecklistsKpi(host, period, prev, checklists, selectedCl);
-    else await renderAdminPerformanceKpi(host, adminSel.value);
+      const from = el('input', { type: 'date', value: period.from });
+      const until = el('input', { type: 'date', value: period.until });
+      const panel = el('div', { class: 'kpi-date-panel hidden' }, [
+        labeled(t('dateFrom'), from), labeled(t('dateUntil'), until),
+        el('div', { class: 'kpi-date-actions' }, [
+          el('button', { class: 'btn btn-ghost', onclick: () => { removeStorageValue(periodKey); setPreset('today'); } }, t('today')),
+          el('button', { class: 'btn btn-primary', onclick: () => { setStorageValue(presetKey, 'custom'); saveKpiPeriod(periodKey, from.value, until.value, refresh); } }, t('apply')),
+        ]),
+      ]);
+      const calBtn = el('button', { class: 'iconbtn', title: t('dashboardPeriod'), onclick: () => panel.classList.toggle('hidden') }, '📅');
+
+      // Day / Week / Month quick presets — the common ranges without opening the calendar.
+      const presetIcons = { today: '⏱️', week: '📅', month: '🗓️' };
+      const presetSeg = el('div', { class: 'kpi-seg' }, ['today', 'week', 'month'].map(k =>
+        el('button', { class: 'kpi-seg-btn' + (preset === k ? ' on' : ''), onclick: () => setPreset(k) }, [
+          el('span', { style: 'font-size: 0.95rem; line-height: 1;' }, presetIcons[k]),
+          t('period' + k.charAt(0).toUpperCase() + k.slice(1))
+        ])));
+
+      // Incident status quick-filters — sit horizontally to the right of the type dropdown,
+      // and only on the incidents view. Selection persists like the other KPI filters.
+      const VALID_STATUSES = ['open', 'in_progress', 'resolved'];
+      const incidentStatuses = new Set((storageValue(statusKey, '') || '').split(',').filter(x => VALID_STATUSES.includes(x)));
+      const saveStatuses = (set) => { set.size ? setStorageValue(statusKey, [...set].join(',')) : removeStorageValue(statusKey); refresh(); };
+      const statusFilter = el('div', { class: 'kpi-status-filter' }, [
+        el('button', { class: 'chip' + (incidentStatuses.size === 0 ? ' on' : ''), onclick: () => {
+          removeStorageValue(statusKey); refresh();
+        } }, t('all')),
+        ...VALID_STATUSES.map(s =>
+          el('button', { class: 'chip' + (incidentStatuses.has(s) ? ' on' : ''), onclick: () => {
+            const next = new Set(incidentStatuses);
+            if (next.has(s)) next.delete(s);
+            else next.add(s);
+            saveStatuses(next);
+          } }, statusLabel(s)))
+      ]);
+
+      const rootCauseCats = inc ? inc.rootCauseCats : [];
+      const incidentRootCauses = new Set((storageValue(rootCauseKey, '') || '').split(',').filter(x => x && rootCauseCats.some(c => c.id === x)));
+
+      const INC_TYPES = ['incident', 'hazard', 'suggestion'];
+      const incidentReportTypes = new Set((storageValue(reportTypeKey, '') || '').split(',').filter(x => INC_TYPES.includes(x)));
+      const incidentConsequences = new Set((storageValue(consequenceKey, '') || '').split(',').filter(Boolean));
+
+      // Overview "Reports by type" bar → Latest-activity drilldown. Multi-select: a
+      // comma-joined set of the five types (empty/absent = show everything).
+      const OV_TYPES = ['incident', 'hazard', 'suggestion', 'checklist', 'procedure'];
+      const overviewActivity = new Set((storageValue(activityKey, '') || '').split(',').filter(x => OV_TYPES.includes(x)));
+
+      // Reset all drilldown/quick filters — the bar drilldowns persist in localStorage,
+      // so without this a refresh keeps them stuck. Shown next to the type selector on
+      // the two tabs that carry filters.
+      const anyFilterActive = (type === 'overview' && overviewActivity.size > 0)
+        || (type === 'incidents' && (incidentReportTypes.size > 0 || incidentConsequences.size > 0 || incidentRootCauses.size > 0 || incidentStatuses.size > 0))
+        || (type === 'checklists' && selectedCls.size > 0)
+        || (type === 'admin_performance' && selectedAdmin !== 'all');
+      const resetFiltersBtn = el('button', {
+        class: 'btn btn-ghost btn-sm kpi-reset-btn',
+        onclick: () => {
+          [reportTypeKey, consequenceKey, rootCauseKey, statusKey, activityKey, filterKey, adminKey].forEach(removeStorageValue);
+          refresh();
+        },
+      }, t('resetFilters'));
+      resetFiltersBtn.disabled = !anyFilterActive;
+
+      // Build the whole dashboard off-DOM, then swap it in atomically so filter changes
+      // update with no flash (the old view stays until the new one is fully built).
+      const frag = el('div');
+      frag.append(el('div', { class: 'kpi-control-wrap' }, [
+        el('div', { class: 'kpi-toolbar-row' }, [
+          typeSel,
+          ['overview', 'incidents', 'checklists', 'admin_performance'].includes(type) ? resetFiltersBtn : null,
+          type === 'incidents' ? statusFilter : null,
+          el('span', { class: 'spacer' }),
+          type !== 'admin_performance' ? presetSeg : null,
+          type !== 'admin_performance' ? el('div', { class: 'kpi-period-chip' }, periodLabel(period)) : null,
+          type !== 'admin_performance' ? calBtn : null,
+        ]),
+        panel,
+      ]));
+
+      const host = el('div', {});
+      frag.append(host);
+
+      if (type === 'overview') renderOverviewKpi(host, { cur, prev, data: ov, activitySet: overviewActivity, activityKey, refresh });
+      else if (type === 'incidents') renderIncidentsKpi(host, {
+        cur, prev, data: inc, refresh,
+        statusSet: incidentStatuses, rootCauseSet: incidentRootCauses,
+        reportTypeSet: incidentReportTypes, consequenceSet: incidentConsequences,
+      });
+      else if (type === 'checklists') await renderChecklistsKpi(host, { period, prev, checklists, selectedCls, saveChecklists, refresh, runsData });
+      else await renderAdminPerformanceKpi(host, { adminId: selectedAdmin, saveAdmin });
+
+      mount.replaceChildren(...Array.from(frag.childNodes));
+    };
+
+    await paint();
   }
 
   // ── OVERVIEW — everything that happened in the period ───────
-  async function renderOverviewKpi(host, period, cur, prev, rootCause = 'all') {
-    const seriousIds = await seriousConsequenceIds();
-    const canSeeVarsling = isSuperPlus(state.profile) && canAccessVarsling(state.profile);
-    const [{ data: rootCauseCats }, { data: consequenceCats }] = await Promise.all([
-      db.from('incident_categories').select('id,name').eq('kind', 'root_cause'),
-      db.from('incident_categories').select('id,name').eq('kind', 'consequence'),
-    ]);
+  // Synchronous: computes every card, bar and the activity feed from the cached Overview
+  // superset (see ensureOverview), so switching Day/Week/Month recomputes with zero network.
+  function renderOverviewKpi(host, { cur, prev, data, activitySet = new Set(), activityKey, refresh = () => {} }) {
+    const {
+      incidents = [], runs = [], courses = [], procs = [], docs = [], members = [], vars = [],
+      seriousIds = [], live, canSeeVarsling = false,
+    } = data || {};
+    const curS = +new Date(cur.start), curE = +new Date(cur.end);
+    const prevS = +new Date(prev.start), prevE = +new Date(prev.end);
+    const inW = (ts, s, e) => { if (!ts) return false; const t = +new Date(ts); return t >= s && t < e; };
+    const cCur = (arr, col = 'created_at') => arr.filter(r => inW(r[col], curS, curE)).length;
+    const cPrev = (arr, col = 'created_at') => arr.filter(r => inW(r[col], prevS, prevE)).length;
 
-    // count rows in a table over a date window on a given column (+ optional tweak)
-    const countIn = (table, col, b, tweak) => {
-      let q = db.from(table).select('id', { count: 'exact', head: true }).gte(col, b.start).lt(col, b.end);
-      if (tweak) q = tweak(q);
-      return countRows(q);
-    };
-    // incident rows for a window drive filed / serious / type-breakdown in one fetch
-    const incQ = (b) => db.from('incidents')
-      .select('report_type,consequence_ids,root_cause_ids,created_at')
-      .gte('created_at', b.start).lt('created_at', b.end);
-
-    const [
-      incCur, incPrev, resCur, resPrev, clCur, clPrev, coCur, coPrev,
-      prCur, prPrev, docCur, docPrev, memCur, memPrev, vrCur, vrPrev,
-      backlog, unassigned, oldestRow,
-    ] = await Promise.all([
-      incQ(cur), incQ(prev),
-      countIn('incidents', 'resolved_at', cur, q => q.eq('status', 'resolved')),
-      countIn('incidents', 'resolved_at', prev, q => q.eq('status', 'resolved')),
-      countIn('checklist_runs', 'submitted_at', cur, q => q.eq('completed', true)),
-      countIn('checklist_runs', 'submitted_at', prev, q => q.eq('completed', true)),
-      countIn('course_submissions', 'created_at', cur, q => q.eq('passed', true)),
-      countIn('course_submissions', 'created_at', prev, q => q.eq('passed', true)),
-      countIn('procedure_submissions', 'created_at', cur),
-      countIn('procedure_submissions', 'created_at', prev),
-      countIn('documents', 'created_at', cur),
-      countIn('documents', 'created_at', prev),
-      countIn('profiles', 'created_at', cur),
-      countIn('profiles', 'created_at', prev),
-      canSeeVarsling ? countIn('varslinger', 'created_at', cur) : Promise.resolve(0),
-      canSeeVarsling ? countIn('varslinger', 'created_at', prev) : Promise.resolve(0),
-      countRows(db.from('incidents').select('id', { count: 'exact', head: true }).neq('status', 'resolved')),
-      countRows(db.from('incidents').select('id', { count: 'exact', head: true }).eq('status', 'open').is('assigned_to', null)),
-      db.from('incidents').select('created_at').neq('status', 'resolved').order('created_at', { ascending: true }).limit(1),
-    ]);
-
-    const byRootCause = (r) => rootCause === 'all' || (r.root_cause_ids || []).includes(rootCause);
-    const rowsCur = (incCur.data || []).filter(byRootCause), rowsPrev = (incPrev.data || []).filter(byRootCause);
+    const rowsCur = incidents.filter(r => inW(r.created_at, curS, curE));
+    const rowsPrev = incidents.filter(r => inW(r.created_at, prevS, prevE));
     const inSet = (ids) => (ids || []).some(id => seriousIds.includes(id));
     const filedCur = rowsCur.length, filedPrev = rowsPrev.length;
     const serCur = rowsCur.filter(r => inSet(r.consequence_ids)).length;
     const serPrev = rowsPrev.filter(r => inSet(r.consequence_ids)).length;
-    const oldestDays = oldestRow.data?.[0]
-      ? Math.floor((Date.now() - new Date(oldestRow.data[0].created_at)) / DAYMS) : 0;
-    const num = (x) => Number(x || 0);
+    const resCur = incidents.filter(r => r.status === 'resolved' && inW(r.resolved_at, curS, curE)).length;
+    const resPrev = incidents.filter(r => r.status === 'resolved' && inW(r.resolved_at, prevS, prevE)).length;
+    const clCur = cCur(runs, 'submitted_at'), clPrev = cPrev(runs, 'submitted_at');
+    const coCur = courses.filter(r => r.passed && inW(r.created_at, curS, curE)).length;
+    const coPrev = courses.filter(r => r.passed && inW(r.created_at, prevS, prevE)).length;
+    const prCur = cCur(procs), prPrev = cPrev(procs);
+    const docCur = cCur(docs), docPrev = cPrev(docs);
+    const memCur = cCur(members), memPrev = cPrev(members);
+    const vrCur = cCur(vars), vrPrev = cPrev(vars);
+    const s = live || { backlog: 0, unassigned: 0, oldestDays: 0 };
 
     // ── Right now (live, point-in-time) ──
     host.append(el('div', { class: 'kpi-section-h' }, t('rightNow')));
     host.append(el('div', { class: 'kpi-grid' }, [
-      metricCard({ label: t('openBacklog'), value: backlog, live: true }),
-      metricCard({ label: t('unassigned'), value: unassigned, live: true }),
-      metricCard({ label: t('oldestOpen'), value: oldestDays + 'd', live: true }),
+      metricCard({ label: t('openBacklog'), value: s.backlog, live: true }),
+      metricCard({ label: t('unassigned'), value: s.unassigned, live: true }),
+      metricCard({ label: t('oldestOpen'), value: s.oldestDays + 'd', live: true }),
     ]));
 
     // ── In this period (vs the previous equal-length window) ──
     host.append(el('div', { class: 'kpi-section-h' }, t('inThisPeriod')));
     const cards = [
       metricCard({ label: t('reportsFiled'), value: filedCur, delta: pctChange(filedCur, filedPrev), good: null }),
-      metricCard({ label: t('reportsResolved'), value: num(resCur), delta: pctChange(num(resCur), num(resPrev)), good: isGood(num(resCur), num(resPrev), 'up') }),
+      metricCard({ label: t('reportsResolved'), value: resCur, delta: pctChange(resCur, resPrev), good: isGood(resCur, resPrev, 'up') }),
       metricCard({ label: t('serious'), value: serCur, delta: pctChange(serCur, serPrev), good: isGood(serCur, serPrev, 'down') }),
-      metricCard({ label: t('checklistsDone'), value: num(clCur), delta: pctChange(num(clCur), num(clPrev)), good: isGood(num(clCur), num(clPrev), 'up') }),
-      metricCard({ label: t('coursesPassed'), value: num(coCur), delta: pctChange(num(coCur), num(coPrev)), good: isGood(num(coCur), num(coPrev), 'up') }),
-      metricCard({ label: t('proceduresFiled'), value: num(prCur), delta: pctChange(num(prCur), num(prPrev)), good: null }),
-      metricCard({ label: t('documentsAdded'), value: num(docCur), delta: pctChange(num(docCur), num(docPrev)), good: null }),
-      metricCard({ label: t('newMembers'), value: num(memCur), delta: pctChange(num(memCur), num(memPrev)), good: null }),
+      metricCard({ label: t('checklistsDone'), value: clCur, delta: pctChange(clCur, clPrev), good: isGood(clCur, clPrev, 'up') }),
+      metricCard({ label: t('coursesPassed'), value: coCur, delta: pctChange(coCur, coPrev), good: isGood(coCur, coPrev, 'up') }),
+      metricCard({ label: t('proceduresFiled'), value: prCur, delta: pctChange(prCur, prPrev), good: null }),
+      metricCard({ label: t('documentsAdded'), value: docCur, delta: pctChange(docCur, docPrev), good: null }),
+      metricCard({ label: t('newMembers'), value: memCur, delta: pctChange(memCur, memPrev), good: null }),
     ];
-    if (canSeeVarsling) cards.push(metricCard({ label: t('varslingerFiled'), value: num(vrCur), delta: pctChange(num(vrCur), num(vrPrev)), good: null }));
+    if (canSeeVarsling) cards.push(metricCard({ label: t('varslingerFiled'), value: vrCur, delta: pctChange(vrCur, vrPrev), good: null }));
     host.append(el('div', { class: 'kpi-grid' }, cards));
 
-    renderTypeBreakdownBar(host, rowsCur);
-    renderBreakdownBar(host, rowsCur, consequenceCats, 'consequence_ids', CONSEQUENCE_PALETTE, 'reportsByWorstConsequence', 'consequenceId');
-    renderBreakdownBar(host, rowsCur, rootCauseCats, 'root_cause_ids', ROOT_CAUSE_PALETTE, 'reportsByRootCause', 'rootCauseId');
+    // ── Reports by type — five activity types; clicking one filters Latest activity ──
+    const typeCounts = [
+      { id: 'incident', name: t('reportTypeIncidents'), n: rowsCur.filter(r => (r.report_type || 'incident') === 'incident').length },
+      { id: 'hazard', name: t('reportTypeHazards'), n: rowsCur.filter(r => r.report_type === 'hazard').length },
+      { id: 'suggestion', name: t('reportTypeSuggestions'), n: rowsCur.filter(r => r.report_type === 'suggestion').length },
+      { id: 'checklist', name: t('kpiChecklists'), n: clCur },
+      { id: 'procedure', name: t('procedures'), n: prCur },
+    ].map(c => ({ ...c, color: OVERVIEW_TYPE_PALETTE[c.id] }));
+    // Multi-select: clicking a segment toggles it in/out of the selected set; an empty
+    // set means "show everything". Persisted as a comma-joined list.
+    const saveActivity = (set) => { set.size ? setStorageValue(activityKey, [...set].join(',')) : removeStorageValue(activityKey); refresh(); };
+    renderOverviewTypeBar(host, typeCounts, { activeIds: activitySet, onSelect: c => {
+      const next = new Set(activitySet);
+      next.has(c.id) ? next.delete(c.id) : next.add(c.id);
+      saveActivity(next);
+    }});
 
-    // ── Latest activity (merged timeline across surfaces) ──
-    await renderActivityFeed(host, cur, canSeeVarsling);
+    // ── Latest activity (merged timeline across surfaces), optionally drilled to the selected types ──
+    if (activitySet.size) {
+      host.append(el('div', { class: 'kpi-drillbar' }, [
+        el('span', { class: 'kpi-drill-label' }, `${t('filteredBy')}:`),
+        ...typeCounts.filter(c => activitySet.has(c.id)).map(c => el('button', { class: 'kpi-drill-chip', onclick: () => {
+          const next = new Set(activitySet); next.delete(c.id); saveActivity(next);
+        } }, `x ${c.name}`)),
+        activitySet.size > 1 ? el('button', { class: 'btn btn-ghost btn-sm', onclick: () => saveActivity(new Set()) }, t('clearFilter')) : null,
+      ]));
+    }
+    renderActivityFeed(host, cur, data, activitySet);
   }
 
-  // Merge recent events from every surface into one time-sorted "what happened" feed.
-  async function renderActivityFeed(host, cur, canSeeVarsling) {
-    const LIM = 14;
-    const inWin = (q, col) => q.gte(col, cur.start).lt(col, cur.end).order(col, { ascending: false }).limit(LIM);
-    const rows = (q) => q.then(r => r.data || [], () => []);
+  // Merge recent events from every surface into one time-sorted "what happened" feed,
+  // computed from the cached Overview dataset (no network). When `activitySet` is non-empty,
+  // the feed is drilled to just those bar types' events (report-type reports, their
+  // resolutions, checklist completions or procedure submissions).
+  function renderActivityFeed(host, cur, data, activitySet = new Set()) {
+    const { incidents = [], runs = [], courses = [], procs = [], docs = [], members = [], vars = [],
+      clTitles = new Map(), coTitles = new Map(), prTitles = new Map(), canSeeVarsling = false } = data || {};
+    const curS = +new Date(cur.start), curE = +new Date(cur.end);
+    const inWin = (ts) => { if (!ts) return false; const t = +new Date(ts); return t >= curS && t < curE; };
+    const top = (arr, col) => arr.filter(r => inWin(r[col])).sort((a, b) => +new Date(b[col]) - +new Date(a[col])).slice(0, 14);
 
-    const [incs, resolved, runs, courses, procs, docs, members, vars] = await Promise.all([
-      rows(inWin(db.from('incidents').select('id,report_type,is_anonymous,reporter_id,created_at'), 'created_at')),
-      rows(inWin(db.from('incidents').select('id,report_type,assigned_to,resolved_at').eq('status', 'resolved'), 'resolved_at')),
-      rows(inWin(db.from('checklist_runs').select('checklist_id,user_id,submitted_at').eq('completed', true).not('submitted_at', 'is', null), 'submitted_at')),
-      rows(inWin(db.from('course_submissions').select('course_id,user_id,passed,score,created_at'), 'created_at')),
-      rows(inWin(db.from('procedure_submissions').select('procedure_id,user_id,created_at'), 'created_at')),
-      rows(inWin(db.from('documents').select('name,uploaded_by,created_at'), 'created_at')),
-      rows(inWin(db.from('profiles').select('id,full_name,username,email,created_at'), 'created_at')),
-      canSeeVarsling ? rows(inWin(db.from('varslinger').select('id,created_at'), 'created_at')) : Promise.resolve([]),
-    ]);
+    const incs = top(incidents, 'created_at');
+    const resolved = top(incidents.filter(r => r.status === 'resolved'), 'resolved_at');
+    const runsW = top(runs, 'submitted_at');
+    const coursesW = top(courses, 'created_at');
+    const procsW = top(procs, 'created_at');
+    const docsW = top(docs, 'created_at');
+    const membersW = top(members, 'created_at');
+    const varsW = canSeeVarsling ? top(vars, 'created_at') : [];
 
-    // tiny id→title lookups (empty map if a column/table is unavailable)
-    const titleMap = (table) => db.from(table).select('id,title').then(
-      r => new Map((r.data || []).map(x => [x.id, x.title])), () => new Map());
-    const [clTitles, coTitles, prTitles] = await Promise.all([titleMap('checklists'), titleMap('courses'), titleMap('procedures')]);
-
-    const who = (id) => { const p = state.profiles.find(u => u.id === id); return p ? labelOf(p) : '—'; };
+    const who = (id) => whoName(id);
     const reportTitle = { incident: t('actIncidentReported'), hazard: t('actHazardReported'), suggestion: t('actSuggestionSent') };
     const ev = [];
-    const push = (ts, type, ico, title, sub, id) => { if (ts) ev.push({ ts: +new Date(ts), type, ico, title, sub, id }); };
+    // `cat` places each event under one of the five bar types (or null = only shown when
+    // the feed isn't drilled) so a bar click can filter the feed.
+    const push = (ts, type, ico, title, sub, id, cat = null) => { if (ts) ev.push({ ts: +new Date(ts), type, ico, title, sub, id, cat }); };
 
-    incs.forEach(r => push(r.created_at, r.report_type || 'incident', '📣', reportTitle[r.report_type || 'incident'] || reportTitle.incident, r.is_anonymous ? 'Anonymous' : who(r.reporter_id), r.id));
-    resolved.forEach(r => push(r.resolved_at, 'resolved', '✅', t('actReportResolved'), `${typeLabel(r.report_type)}${r.assigned_to ? ' · ' + who(r.assigned_to) : ''}`, r.id));
-    runs.forEach(r => push(r.submitted_at, 'checklist', '☑️', t('actChecklistDone'), `${clTitles.get(r.checklist_id) || t('checklist')} · ${who(r.user_id)}`));
-    courses.forEach(r => push(r.created_at, r.passed ? 'course-passed' : 'course-attempt', r.passed ? '🎓' : '📚', r.passed ? t('actCoursePassed') : t('actCourseAttempt'), `${coTitles.get(r.course_id) || t('course')} · ${who(r.user_id)}${r.passed ? '' : ' · ' + num0(r.score) + '%'}`));
-    procs.forEach(r => push(r.created_at, 'procedure', '📋', t('actProcedureFiled'), `${prTitles.get(r.procedure_id) || t('procedure')} · ${who(r.user_id)}`));
-    docs.forEach(r => push(r.created_at, 'document', '📄', t('actDocumentAdded'), `${r.name || ''}${r.uploaded_by ? ' · ' + who(r.uploaded_by) : ''}`.trim()));
-    members.forEach(r => push(r.created_at, 'member', '👤', t('actMemberJoined'), labelOf(r)));
-    vars.forEach(r => push(r.created_at, 'varsling', '🔒', t('actVarslingFiled'), t('confidential'), r.id));
+    incs.forEach(r => push(r.created_at, r.report_type || 'incident', '📣', reportTitle[r.report_type || 'incident'] || reportTitle.incident, r.is_anonymous ? 'Anonymous' : who(r.reporter_id), r.id, r.report_type || 'incident'));
+    resolved.forEach(r => push(r.resolved_at, 'resolved', '✅', t('actReportResolved'), `${typeLabel(r.report_type)}${r.assigned_to ? ' · ' + who(r.assigned_to) : ''}`, r.id, r.report_type || 'incident'));
+    runsW.forEach(r => push(r.submitted_at, 'checklist', '☑️', t('actChecklistDone'), `${clTitles.get(r.checklist_id) || t('checklist')} · ${who(r.user_id)}`, null, 'checklist'));
+    coursesW.forEach(r => push(r.created_at, r.passed ? 'course-passed' : 'course-attempt', r.passed ? '🎓' : '📚', r.passed ? t('actCoursePassed') : t('actCourseAttempt'), `${coTitles.get(r.course_id) || t('course')} · ${who(r.user_id)}${r.passed ? '' : ' · ' + num0(r.score) + '%'}`));
+    procsW.forEach(r => push(r.created_at, 'procedure', '📋', t('actProcedureFiled'), `${prTitles.get(r.procedure_id) || t('procedure')} · ${who(r.user_id)}`, null, 'procedure'));
+    docsW.forEach(r => push(r.created_at, 'document', '📄', t('actDocumentAdded'), `${r.name || ''}${r.uploaded_by ? ' · ' + who(r.uploaded_by) : ''}`.trim()));
+    membersW.forEach(r => push(r.created_at, 'member', '👤', t('actMemberJoined'), labelOf(r)));
+    varsW.forEach(r => push(r.created_at, 'varsling', '🔒', t('actVarslingFiled'), t('confidential'), r.id));
 
-    ev.sort((a, b) => b.ts - a.ts);
+    const shown = (activitySet.size === 0 ? ev : ev.filter(e => activitySet.has(e.cat))).sort((a, b) => b.ts - a.ts);
 
     host.append(el('div', { class: 'kpi-section-h' }, t('latestActivity')));
-    if (!ev.length) {
+    if (!shown.length) {
       host.append(el('div', { class: 'kpi-card' }, el('p', { class: 'miss-sub' }, t('noActivityYet'))));
       return;
     }
     const feed = el('div', { class: 'act-feed' });
-    ev.slice(0, 18).forEach(e => feed.append(activityRow(e)));
+    shown.slice(0, 18).forEach(e => feed.append(activityRow(e)));
     host.append(feed);
   }
   const num0 = (x) => Number(x || 0);
@@ -1306,7 +1455,8 @@
   // proportional bar + legend from already-fetched incident rows, and makes each
   // segment jump to the Reports list pre-filtered to that value (Executive Analytics
   // consequence/root-cause click-through).
-  function renderBreakdownBar(host, rows, cats, idsField, palette, labelKey, filterKind) {
+  function renderBreakdownBar(host, rows, cats, idsField, palette, labelKey, filterKind, options = {}) {
+    const { activeIds = new Set(), onSelect = null } = options;
     const counts = (cats || []).map(c => ({
       id: c.id, name: c.name, color: palette[c.name] || '#888780',
       n: rows.filter(r => (r[idsField] || []).includes(c.id)).length,
@@ -1325,16 +1475,18 @@
       if (!g) return toast(t('noIncidentsHint'), 'err');
       go(reportsGroupView(g, { [filterKind]: c.id, [nameKey]: c.name }));
     };
+    const choose = (c) => onSelect ? onSelect(c) : goFiltered(c);
     const bar = el('div', { class: 'sev-bar' }, counts.map(c =>
-      el('div', { style: `width:${c.n / total * 100}%;background:${c.color};cursor:pointer`, title: `${c.name}: ${c.n}`, onclick: () => goFiltered(c) })));
+      el('div', { class: 'sev-segment' + (activeIds.has(c.id) ? ' sev-active' : ''), style: `width:${c.n / total * 100}%;background:${c.color}`, title: `${c.name}: ${c.n}`, onclick: () => choose(c) })));
     const legend = el('div', { class: 'sev-legend' }, counts.map(c =>
-      el('span', { style: 'cursor:pointer', onclick: () => goFiltered(c) }, [el('i', { style: `background:${c.color}` }), `${c.name} ${c.n}`])));
+      el('span', { class: activeIds.has(c.id) ? 'sev-active' : '', onclick: () => choose(c) }, [el('i', { style: `background:${c.color}` }), `${c.name} ${c.n}`])));
     host.append(el('div', { class: 'kpi-card', style: 'margin-top:14px' }, [
       el('div', { class: 'kpi-label', style: 'margin-bottom:10px' }, t(labelKey)), bar, legend,
     ]));
   }
   const REPORT_TYPE_PALETTE = { incident: '#D85A30', hazard: '#BA7517', suggestion: '#1D9E75' };
-  function renderTypeBreakdownBar(host, rows) {
+  function renderTypeBreakdownBar(host, rows, options = {}) {
+    const { activeIds = new Set(), onSelect = null } = options;
     const counts = [
       ['incident', t('reportTypeIncidents')],
       ['hazard', t('reportTypeHazards')],
@@ -1356,10 +1508,11 @@
       if (!g) return toast(t('noIncidentsHint'), 'err');
       go(reportsGroupView(g, { reportType: c.id, reportTypeName: c.name }));
     };
+    const choose = (c) => onSelect ? onSelect(c) : goFiltered(c);
     const bar = el('div', { class: 'sev-bar' }, counts.map(c =>
-      el('div', { style: `width:${c.n / total * 100}%;background:${c.color};cursor:pointer`, title: `${c.name}: ${c.n}`, onclick: () => goFiltered(c) })));
+      el('div', { class: 'sev-segment' + (activeIds.has(c.id) ? ' sev-active' : ''), style: `width:${c.n / total * 100}%;background:${c.color}`, title: `${c.name}: ${c.n}`, onclick: () => choose(c) })));
     const legend = el('div', { class: 'sev-legend' }, counts.map(c =>
-      el('span', { style: 'cursor:pointer', onclick: () => goFiltered(c) }, [el('i', { style: `background:${c.color}` }), `${c.name} ${c.n}`])));
+      el('span', { class: activeIds.has(c.id) ? 'sev-active' : '', onclick: () => choose(c) }, [el('i', { style: `background:${c.color}` }), `${c.name} ${c.n}`])));
     host.append(el('div', { class: 'kpi-card', style: 'margin-top:14px' }, [
       el('div', { class: 'kpi-label', style: 'margin-bottom:10px' }, t('reportsByType')), bar, legend,
     ]));
@@ -1369,39 +1522,168 @@
   const ROOT_CAUSE_PALETTE = { 'Faulty procedures': '#6C5CE7', 'Human error': '#E17055',
     'Equipment failure': '#0984E3', 'Lack of training': '#00B894' };
 
+  // Overview "Reports by type" spans five surfaces (reports + checklists + procedures), so
+  // it needs its own palette and a renderer fed pre-computed counts (unlike renderTypeBreakdownBar
+  // which counts report_type from incident rows). Clicking a segment drills the feed below.
+  const OVERVIEW_TYPE_PALETTE = { incident: '#D85A30', hazard: '#BA7517', suggestion: '#1D9E75', checklist: '#0984E3', procedure: '#6C5CE7' };
+  function renderOverviewTypeBar(host, counts, { activeIds = new Set(), onSelect }) {
+    const items = counts.filter(c => c.n > 0);
+    const total = items.reduce((a, c) => a + c.n, 0);
+    if (!total) {
+      host.append(el('div', { class: 'kpi-card', style: 'margin-top:14px' }, [
+        el('div', { class: 'kpi-label', style: 'margin-bottom:10px' }, t('reportsByType')),
+        el('p', { class: 'muted', style: 'margin:0' }, t('noReports')),
+      ]));
+      return;
+    }
+    const bar = el('div', { class: 'sev-bar' }, items.map(c =>
+      el('div', { class: 'sev-segment' + (activeIds.has(c.id) ? ' sev-active' : ''), style: `width:${c.n / total * 100}%;background:${c.color}`, title: `${c.name}: ${c.n}`, onclick: () => onSelect(c) })));
+    const legend = el('div', { class: 'sev-legend' }, items.map(c =>
+      el('span', { class: activeIds.has(c.id) ? 'sev-active' : '', onclick: () => onSelect(c) }, [el('i', { style: `background:${c.color}` }), `${c.name} ${c.n}`])));
+    host.append(el('div', { class: 'kpi-card', style: 'margin-top:14px' }, [
+      el('div', { class: 'kpi-label', style: 'margin-bottom:10px' }, t('reportsByType')), bar, legend,
+    ]));
+  }
+
   // ── INCIDENTS ───────────────────────────────────────────────
-  async function renderIncidentsKpi(host, period, cur, prev, status = 'all', rootCause = 'all') {
-    // When a status/root-cause quick-filter is active, scope every incident query to it.
-    const withStatus = (q) => status === 'all' ? q : q.eq('status', status);
-    const withRootCause = (q) => rootCause === 'all' ? q : q.contains('root_cause_ids', [rootCause]);
-    const scope = (q) => withRootCause(withStatus(q));
-    const [{ data: cats }, { data: rootCauseCats }] = await Promise.all([
-      db.from('incident_categories').select('id,name').eq('kind', 'consequence'),
-      db.from('incident_categories').select('id,name').eq('kind', 'root_cause'),
-    ]);
+  // Renders the Incidents KPI block synchronously from an already-fetched, in-memory
+  // dataset (`data` = { all, cats, rootCauseCats, live } from ensureIncidents), so every
+  // filter change recomputes the cards, bars and activity feed with zero network.
+  function renderIncidentsKpi(host, { cur, prev, statusSet = new Set(), rootCauseSet = new Set(), reportTypeSet = new Set(), consequenceSet = new Set(), data, refresh = () => {} }) {
+    const reportTypeKey = 'adminKpiIncidentReportType';
+    const consequenceKey = 'adminKpiIncidentConsequence';
+    const rootCauseKey = 'adminKpiRootCause';
+    const { all = [], cats = [], rootCauseCats = [], live } = data || {};
+
+    // Validate sets against existing options
+    const validStatuses = new Set(['open', 'in_progress', 'resolved']);
+    for (const x of statusSet) {
+      if (!validStatuses.has(x)) statusSet.delete(x);
+    }
+    const validReportTypes = new Set(['incident', 'hazard', 'suggestion']);
+    for (const x of reportTypeSet) {
+      if (!validReportTypes.has(x)) reportTypeSet.delete(x);
+    }
+    for (const x of consequenceSet) {
+      if (!cats.some(c => c.id === x)) consequenceSet.delete(x);
+    }
+    for (const x of rootCauseSet) {
+      if (!rootCauseCats.some(c => c.id === x)) rootCauseSet.delete(x);
+    }
+
     const seriousNames = ['Death', 'Injury or sick leave', 'Environmental impact'];
-    const seriousIds = (cats || []).filter(c => seriousNames.includes(c.name)).map(c => c.id);
+    const seriousIds = cats.filter(c => seriousNames.includes(c.name)).map(c => c.id);
 
-    const { data: rows = [] } = await scope(db.from('incidents')
-      .select('id,report_type,consequence_ids,root_cause_ids,is_anonymous').gte('created_at', cur.start).lt('created_at', cur.end));
-    const { data: prevRows = [] } = await scope(db.from('incidents')
-      .select('id,report_type,consequence_ids,root_cause_ids,is_anonymous').gte('created_at', prev.start).lt('created_at', prev.end));
+    // Window bounds as epoch ms — robust against timestamptz formatting (+00:00 vs Z).
+    const curS = +new Date(cur.start), curE = +new Date(cur.end);
+    const prevS = +new Date(prev.start), prevE = +new Date(prev.end);
+    const inWin = (ts, s, e) => { if (!ts) return false; const t = +new Date(ts); return t >= s && t < e; };
 
+    // Client-side equivalent of the old server-side scope() (status + report type +
+    // jsonb-array consequence/root-cause membership).
+    const matches = (r) =>
+      (statusSet.size === 0 || statusSet.has(r.status)) &&
+      (reportTypeSet.size === 0 || reportTypeSet.has(r.report_type || 'incident')) &&
+      (consequenceSet.size === 0 || (r.consequence_ids || []).some(id => consequenceSet.has(id))) &&
+      (rootCauseSet.size === 0 || (r.root_cause_ids || []).some(id => rootCauseSet.has(id)));
+
+    const matchesExcludingType = (r) =>
+      (statusSet.size === 0 || statusSet.has(r.status)) &&
+      (consequenceSet.size === 0 || (r.consequence_ids || []).some(id => consequenceSet.has(id))) &&
+      (rootCauseSet.size === 0 || (r.root_cause_ids || []).some(id => rootCauseSet.has(id)));
+
+    const matchesExcludingConsequence = (r) =>
+      (statusSet.size === 0 || statusSet.has(r.status)) &&
+      (reportTypeSet.size === 0 || reportTypeSet.has(r.report_type || 'incident')) &&
+      (rootCauseSet.size === 0 || (r.root_cause_ids || []).some(id => rootCauseSet.has(id)));
+
+    const matchesExcludingRootCause = (r) =>
+      (statusSet.size === 0 || statusSet.has(r.status)) &&
+      (reportTypeSet.size === 0 || reportTypeSet.has(r.report_type || 'incident')) &&
+      (consequenceSet.size === 0 || (r.consequence_ids || []).some(id => consequenceSet.has(id)));
+
+    const filtered = all.filter(matches);
+    const rows = filtered.filter(r => inWin(r.created_at, curS, curE));
+    const typeRows = all.filter(matchesExcludingType).filter(r => inWin(r.created_at, curS, curE));
+    const consequenceRows = all.filter(matchesExcludingConsequence).filter(r => inWin(r.created_at, curS, curE));
+    const rootCauseRows = all.filter(matchesExcludingRootCause).filter(r => inWin(r.created_at, curS, curE));
+
+    const prevRows = filtered.filter(r => inWin(r.created_at, prevS, prevE));
     const inSet = (ids, set) => (ids || []).some(id => set.includes(id));
     const repCur = rows.length, repPrev = prevRows.length;
     const serCur = rows.filter(r => inSet(r.consequence_ids, seriousIds)).length;
     const serPrev = prevRows.filter(r => inSet(r.consequence_ids, seriousIds)).length;
     const anonCur = repCur ? Math.round(rows.filter(r => r.is_anonymous).length / repCur * 100) : 0;
-    const anonPrev = repPrev ? Math.round(prevRows.filter(r => r.is_anonymous).length / repPrev * 100) : 0;
-
-    const [resCur, resPrev] = await Promise.all([
-      countRows(scope(db.from('incidents').select('id', { count: 'exact', head: true }).eq('status', 'resolved').gte('resolved_at', cur.start).lt('resolved_at', cur.end))),
-      countRows(scope(db.from('incidents').select('id', { count: 'exact', head: true }).eq('status', 'resolved').gte('resolved_at', prev.start).lt('resolved_at', prev.end))),
-    ]);
+    const anonPrev = repPrev ? Math.round(prevRows.filter(r => r.is_anonymous).length / prevRows.length * 100) : 0;
+    const resolvedCur = filtered.filter(r => r.status === 'resolved' && inWin(r.resolved_at, curS, curE));
+    const resCur = resolvedCur.length;
+    const resPrev = filtered.filter(r => r.status === 'resolved' && inWin(r.resolved_at, prevS, prevE)).length;
 
     // ── Right now (live, point-in-time workload) ──
     host.append(el('div', { class: 'kpi-section-h' }, t('rightNow')));
-    host.append(liveStateCards(await liveIncidentState()));
+    const resetDrill = () => {
+      [reportTypeKey, consequenceKey, rootCauseKey].forEach(removeStorageValue);
+      refresh();
+    };
+    const reportTypeLabel = (id) => ({
+      incident: t('reportTypeIncidents'),
+      hazard: t('reportTypeHazards'),
+      suggestion: t('reportTypeSuggestions'),
+    }[id] || id);
+
+    // Save helper functions
+    const saveReportTypes = (set) => { set.size ? setStorageValue(reportTypeKey, [...set].join(',')) : removeStorageValue(reportTypeKey); refresh(); };
+    const saveConsequences = (set) => { set.size ? setStorageValue(consequenceKey, [...set].join(',')) : removeStorageValue(consequenceKey); refresh(); };
+    const saveRootCauses = (set) => { set.size ? setStorageValue(rootCauseKey, [...set].join(',')) : removeStorageValue(rootCauseKey); refresh(); };
+
+    // Build active chips for multi-select
+    const activeChips = [];
+    for (const id of reportTypeSet) {
+      activeChips.push({
+        label: reportTypeLabel(id),
+        onclick: () => {
+          const next = new Set(reportTypeSet);
+          next.delete(id);
+          saveReportTypes(next);
+        }
+      });
+    }
+    for (const id of consequenceSet) {
+      const name = cats.find(c => c.id === id)?.name;
+      if (name) {
+        activeChips.push({
+          label: name,
+          onclick: () => {
+            const next = new Set(consequenceSet);
+            next.delete(id);
+            saveConsequences(next);
+          }
+        });
+      }
+    }
+    for (const id of rootCauseSet) {
+      const name = rootCauseCats.find(c => c.id === id)?.name;
+      if (name) {
+        activeChips.push({
+          label: name,
+          onclick: () => {
+            const next = new Set(rootCauseSet);
+            next.delete(id);
+            saveRootCauses(next);
+          }
+        });
+      }
+    }
+
+    if (activeChips.length) {
+      host.append(el('div', { class: 'kpi-drillbar' }, [
+        el('span', { class: 'kpi-drill-label' }, `${t('filteredBy')}:`),
+        ...activeChips.map(c => el('button', { class: 'kpi-drill-chip', onclick: c.onclick }, `x ${c.label}`)),
+        activeChips.length > 1 ? el('button', { class: 'btn btn-ghost btn-sm', onclick: resetDrill }, t('clearFilter')) : null,
+      ]));
+    }
+
+    host.append(liveStateCards(live || { backlog: 0, unassigned: 0, oldestDays: 0 }));
 
     // ── In this period (vs the previous equal-length window) ──
     host.append(el('div', { class: 'kpi-section-h' }, t('inThisPeriod')));
@@ -1412,18 +1694,28 @@
       metricCard({ label: t('anonymous'), value: anonCur + '%', delta: pctChange(anonCur, anonPrev), good: null }),
     ]));
 
-    renderTypeBreakdownBar(host, rows);
-    renderBreakdownBar(host, rows, cats, 'consequence_ids', CONSEQUENCE_PALETTE, 'reportsByWorstConsequence', 'consequenceId');
-    renderBreakdownBar(host, rows, rootCauseCats, 'root_cause_ids', ROOT_CAUSE_PALETTE, 'reportsByRootCause', 'rootCauseId');
+    renderTypeBreakdownBar(host, typeRows, { activeIds: reportTypeSet, onSelect: c => {
+      const next = new Set(reportTypeSet);
+      if (next.has(c.id)) next.delete(c.id);
+      else next.add(c.id);
+      saveReportTypes(next);
+    }});
+    renderBreakdownBar(host, consequenceRows, cats, 'consequence_ids', CONSEQUENCE_PALETTE, 'reportsByWorstConsequence', 'consequenceId', { activeIds: consequenceSet, onSelect: c => {
+      const next = new Set(consequenceSet);
+      if (next.has(c.id)) next.delete(c.id);
+      else next.add(c.id);
+      saveConsequences(next);
+    }});
+    renderBreakdownBar(host, rootCauseRows, rootCauseCats, 'root_cause_ids', ROOT_CAUSE_PALETTE, 'reportsByRootCause', 'rootCauseId', { activeIds: rootCauseSet, onSelect: c => {
+      const next = new Set(rootCauseSet);
+      if (next.has(c.id)) next.delete(c.id);
+      else next.add(c.id);
+      saveRootCauses(next);
+    }});
 
-    // ── Latest activity — incidents filed + resolved in this window ──
-    const feedRows = (q) => q.then(r => r.data || [], () => []);
-    const [incsReported, incsResolved] = await Promise.all([
-      feedRows(scope(db.from('incidents').select('id,report_type,is_anonymous,reporter_id,created_at'))
-        .gte('created_at', cur.start).lt('created_at', cur.end).order('created_at', { ascending: false }).limit(14)),
-      feedRows(scope(db.from('incidents').select('id,report_type,assigned_to,resolved_at').eq('status', 'resolved'))
-        .gte('resolved_at', cur.start).lt('resolved_at', cur.end).order('resolved_at', { ascending: false }).limit(14)),
-    ]);
+    // ── Latest activity — incidents filed + resolved in this window (from the dataset) ──
+    const incsReported = rows.slice().sort((a, b) => +new Date(b.created_at) - +new Date(a.created_at)).slice(0, 14);
+    const incsResolved = resolvedCur.slice().sort((a, b) => +new Date(b.resolved_at) - +new Date(a.resolved_at)).slice(0, 14);
     const reportTitle = { incident: t('actIncidentReported'), hazard: t('actHazardReported'), suggestion: t('actSuggestionSent') };
     const ev = [];
     incsReported.forEach(r => r.created_at && ev.push({ ts: +new Date(r.created_at), type: r.report_type || 'incident', ico: '📣', title: reportTitle[r.report_type || 'incident'] || reportTitle.incident, sub: r.is_anonymous ? t('anonymous') : whoName(r.reporter_id), id: r.id }));
@@ -1431,10 +1723,9 @@
     renderEventFeed(host, ev);
   }
 
-  // ── CHECKLISTS (quota model) ────────────────────────────────
-  async function renderChecklistsKpi(host, period, prev, checklists, selectedCl) {
+  async function renderChecklistsKpi(host, { period, prev, checklists, selectedCls = new Set(), saveChecklists = () => {}, refresh = () => {}, runsData }) {
     const cur = periodBounds(period);
-    const scope = selectedCl === 'all' ? checklists : checklists.filter(c => c.id === selectedCl);
+    const scope = selectedCls.size === 0 ? checklists : checklists.filter(c => selectedCls.has(c.id));
     const scopeIds = scope.map(c => c.id);
 
     // expected = Σ quota × qualifying days
@@ -1443,15 +1734,28 @@
     // Completion events for the range, current and previous. We count completed
     // checklist_runs (checklist_completions is not reliably written), normalising
     // each submission to its date so the per-day shortfall maths is unchanged.
-    const fetchEvents = async (b) => {
-      const { data = [] } = await db.from('checklist_runs')
-        .select('checklist_id,submitted_at')
-        .eq('completed', true).not('submitted_at', 'is', null)
-        .gte('submitted_at', b.start).lt('submitted_at', b.end)
-        .in('checklist_id', scopeIds.length ? scopeIds : ['00000000-0000-0000-0000-000000000000']);
-      return data.map(r => ({ checklist_id: r.checklist_id, completed_on: localDateString(new Date(r.submitted_at)) }));
+    const getEvents = (b) => {
+      const filtered = (runsData?.runs || []).filter(r => r.submitted_at >= b.start && r.submitted_at < b.end && scopeIds.includes(r.checklist_id));
+      return filtered.map(r => ({ checklist_id: r.checklist_id, completed_on: localDateString(new Date(r.submitted_at)) }));
     };
-    const [ev, evPrev] = await Promise.all([fetchEvents(cur), fetchEvents(prev)]);
+    const ev = getEvents(cur);
+    const evPrev = getEvents(prev);
+
+    // Build active chips for multi-select
+    const activeChips = [];
+    for (const id of selectedCls) {
+      const title = checklists.find(c => c.id === id)?.title;
+      if (title) {
+        activeChips.push({
+          label: title,
+          onclick: () => {
+            const next = new Set(selectedCls);
+            next.delete(id);
+            saveChecklists(next);
+          }
+        });
+      }
+    }
 
     const completions = ev.length;
     const prevPeriod = { from: prev.start.slice(0, 10), until: new Date(new Date(prev.end) - DAYMS).toISOString().slice(0, 10) };
@@ -1509,13 +1813,19 @@
       const set = new Set((c.quota_weekdays || [0, 1, 2, 3, 4, 5, 6]).map(Number));
       return s + (set.has(todayDow) ? c.daily_quota : 0);
     }, 0);
-    const doneTodayQ = db.from('checklist_runs').select('id', { count: 'exact', head: true })
-      .eq('completed', true).gte('submitted_at', todayB.start).lt('submitted_at', todayB.end);
-    const doneToday = num0(await countRows(scopeIds.length
-      ? doneTodayQ.in('checklist_id', scopeIds)
-      : doneTodayQ.eq('checklist_id', '00000000-0000-0000-0000-000000000000')));
+    const doneToday = (runsData?.todayRuns || []).filter(r => scopeIds.includes(r.checklist_id)).length;
     const pendingToday = Math.max(0, dueToday - doneToday);
+
     host.append(el('div', { class: 'kpi-section-h' }, t('rightNow')));
+
+    if (activeChips.length) {
+      host.append(el('div', { class: 'kpi-drillbar' }, [
+        el('span', { class: 'kpi-drill-label' }, `${t('filteredBy')}:`),
+        ...activeChips.map(c => el('button', { class: 'kpi-drill-chip', onclick: c.onclick }, `x ${c.label}`)),
+        activeChips.length > 1 ? el('button', { class: 'btn btn-ghost btn-sm', onclick: () => saveChecklists(new Set()) }, t('clearFilter')) : null,
+      ]));
+    }
+
     host.append(el('div', { class: 'kpi-grid' }, [
       metricCard({ label: t('activeChecklists'), value: scope.length, live: true }),
       metricCard({ label: t('dueToday'), value: dueToday, live: true }),
@@ -1535,22 +1845,11 @@
     const titleOf = (id) => (checklists.find(c => c.id === id)?.title) || t('checklist');
     const userName = (id) => { const p = state.profiles.find(u => u.id === id); return p ? labelOf(p) : '—'; };
 
-    // Last three submissions entered anywhere in the system (ignores date range + filter).
-    const { data: latestRuns = [] } = await db.from('checklist_runs')
-      .select('checklist_id,user_id,submitted_at,completed')
-      .not('submitted_at', 'is', null)
-      .order('submitted_at', { ascending: false })
-      .limit(3);
-
-    // Completed submissions in this range/scope — feeds per-checklist "when filed".
-    const periodRunQ = db.from('checklist_runs')
-      .select('checklist_id,user_id,submitted_at,completed')
-      .not('submitted_at', 'is', null).eq('completed', true)
-      .gte('submitted_at', cur.start).lt('submitted_at', cur.end)
-      .order('submitted_at', { ascending: false });
-    const { data: periodRuns = [] } = await (scopeIds.length
-      ? periodRunQ.in('checklist_id', scopeIds)
-      : periodRunQ.eq('checklist_id', '00000000-0000-0000-0000-000000000000'));
+    const latestRuns = runsData?.latestRuns || [];
+    const allPeriodRuns = (runsData?.runs || [])
+      .filter(r => r.submitted_at >= cur.start && r.submitted_at < cur.end)
+      .sort((a, b) => b.submitted_at.localeCompare(a.submitted_at));
+    const periodRuns = allPeriodRuns.filter(r => scopeIds.includes(r.checklist_id));
     const filedByChecklist = {};
     periodRuns.forEach(r => (filedByChecklist[r.checklist_id] ||= []).push(r));
 
@@ -1601,6 +1900,49 @@
       expCard.append(row);
     });
 
+    const CHECKLIST_COLORS = ['#0984E3', '#6C5CE7', '#00B894', '#E17055', '#D85A30', '#BA7517', '#1D9E75', '#A32D2D'];
+    const counts = checklists.map((c, i) => ({
+      id: c.id, name: c.title, color: CHECKLIST_COLORS[i % CHECKLIST_COLORS.length],
+      n: allPeriodRuns.filter(r => r.checklist_id === c.id).length
+    })).filter(c => c.n > 0).sort((a, b) => b.n - a.n);
+
+    const total = counts.reduce((a, c) => a + c.n, 0);
+    const drawBreakdownBar = () => {
+      if (!total) return null;
+      const bar = el('div', { class: 'sev-bar' }, counts.map(c =>
+        el('div', {
+          class: 'sev-segment' + (selectedCls.has(c.id) ? ' sev-active' : ''),
+          style: `width:${c.n / total * 100}%;background:${c.color}`,
+          title: `${c.name}: ${c.n}`,
+          onclick: () => {
+            const next = new Set(selectedCls);
+            if (next.has(c.id)) next.delete(c.id);
+            else next.add(c.id);
+            saveChecklists(next);
+          }
+        })));
+
+      const legend = el('div', { class: 'sev-legend' }, counts.map(c =>
+        el('span', {
+          class: selectedCls.has(c.id) ? 'sev-active' : '',
+          onclick: () => {
+            const next = new Set(selectedCls);
+            if (next.has(c.id)) next.delete(c.id);
+            else next.add(c.id);
+            saveChecklists(next);
+          }
+        }, [el('i', { style: `background:${c.color}` }), `${c.name} ${c.n}`])));
+
+      return el('div', { class: 'kpi-card', style: 'margin-top:14px' }, [
+        el('div', { class: 'kpi-label', style: 'margin-bottom:10px' }, t('kpiChecklists')),
+        bar,
+        legend
+      ]);
+    };
+
+    const breakdown = drawBreakdownBar();
+    if (breakdown) host.append(breakdown);
+
     split.append(latestCard, expCard);
     host.append(split);
 
@@ -1612,7 +1954,7 @@
     renderEventFeed(host, feedEv);
   }
 
-  async function renderAdminPerformanceKpi(host, adminId) {
+  async function renderAdminPerformanceKpi(host, { adminId, saveAdmin }) {
     const admins = state.profiles.filter(p => isAdminPlus(p));
     if (!admins.length) {
       host.append(emptyState(t('noAdminsFound'), t('createOrPromoteAdmin')));
@@ -1674,7 +2016,12 @@
     ]);
     stats.slice().sort((a, b) => b.completed - a.completed).forEach(s => {
       const rate = s.assigned ? Math.round(s.completed / s.assigned * 100) : 0;
-      chart.append(el('div', { class: 'perf-row' + (s.id === adminId ? ' perf-row-active' : '') }, [
+      chart.append(el('div', {
+        class: 'perf-row' + (s.id === adminId ? ' perf-row-active' : ''),
+        onclick: () => {
+          saveAdmin(adminId === s.id ? 'all' : s.id);
+        }
+      }, [
         el('div', { class: 'perf-name', title: s.name }, s.name),
         el('div', { class: 'perf-track' }, [
           el('div', { class: 'perf-fill', style: `width:${s.completed / max * 100}%` }),

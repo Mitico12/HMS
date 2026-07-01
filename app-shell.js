@@ -1,4 +1,4 @@
-const SHELL_VERSION = 'hms-shell-v31';
+const SHELL_VERSION = 'hms-shell-v43';
 const SHELL_ASSETS = [
   './index.html',
   './user.html',

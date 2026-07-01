@@ -1494,6 +1494,7 @@
       title: t('reportHazard'), tab: 'reports',
       async render(app) {
         const cats = await loadIncidentCategories();
+        const roots = (cats || []).filter(c => c.kind === 'root_cause');
         const cons = (cats || []).filter(c => c.kind === 'consequence');
         const customFields = await loadReportFormFields('hazard');
 
@@ -1502,6 +1503,7 @@
         const when = el('input', { type: 'datetime-local', value: localNow() });
         const where = el('input', { type: 'text', placeholder: t('locationOptional') });
         const photos = el('input', { type: 'file', accept: 'image/*', multiple: 'multiple' });
+        const rootBlock = categoryBlock(t('rootCause'), roots);
         const consBlock = categoryBlock(t('hazardConsequences'), cons);
 
         const anonBox = el('input', { type: 'checkbox' });
@@ -1518,6 +1520,7 @@
             el('div', { style: 'flex:1;min-width:160px' }, labeled(t('whenSpotted'), when)),
             el('div', { style: 'flex:1;min-width:160px' }, labeled(t('locationOptional'), where)),
           ]),
+          rootBlock.field,
           consBlock.field,
           labeled(t('photosOptional'), fileButton(photos)),
           anonRow,
@@ -1537,8 +1540,9 @@
             report_type: 'hazard',
             what_happened: what.value.trim(),
             what_wrong: fix.value.trim() || null,
-            root_cause_ids: [],
+            root_cause_ids: [...rootBlock.picked],
             consequence_ids: [...consBlock.picked],
+            root_cause_other: rootBlock.getOther() || null,
             consequence_other: consBlock.getOther() || null,
             occurred_at: when.value ? new Date(when.value).toISOString() : null,
             location: where.value.trim() || null,

@@ -2284,6 +2284,49 @@ input[type="checkbox"]:focus, input[type="radio"]:focus {
 /* Incident status quick-filters, lined up to the right of the type dropdown */
 .kpi-status-filter { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .kpi-status-filter .chip { margin: 0; }
+.kpi-root-cause-row {
+  margin-top: -4px;
+}
+.kpi-root-cause-row .kpi-filter {
+  flex: 0 1 454px;
+}
+.kpi-drillbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 2px 0 14px;
+}
+.kpi-drill-label {
+  color: var(--steel);
+  font-size: .78rem;
+  font-weight: 700;
+}
+.kpi-drill-chip {
+  min-height: 30px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 5px 10px;
+  background: color-mix(in srgb, var(--primary) 12%, var(--paper));
+  color: var(--ink);
+  font-size: .8rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+.kpi-drill-chip:hover {
+  border-color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 18%, var(--paper));
+}
+
+.kpi-reset-btn {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+.kpi-reset-btn:disabled {
+  opacity: .45;
+  cursor: default;
+  pointer-events: none;
+}
 
 /* ── Dashboard control bar (restored) ── */
 .hidden { display: none !important; }
@@ -2517,7 +2560,12 @@ input[type="checkbox"]:focus, input[type="radio"]:focus {
 .act-row.act-varsling .act-ico { border-color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, var(--paper)); }
 
 .sev-bar { display: flex; height: 14px; border-radius: 7px; overflow: hidden; gap: 2px; }
+.sev-segment { cursor: pointer; min-width: 8px; transition: filter .16s ease, box-shadow .16s ease; }
+.sev-segment:hover { filter: brightness(1.08); }
+.sev-segment.sev-active { box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--paper) 86%, transparent); }
 .sev-legend { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 12px; font-size: .8rem; color: var(--steel); }
+.sev-legend span { cursor: pointer; }
+.sev-legend span.sev-active { color: var(--ink); font-weight: 750; }
 .sev-legend i { width: 9px; height: 9px; border-radius: 2px; display: inline-block; margin-right: 5px; }
 
 .miss-row { padding: 10px 0; border-top: 1px solid var(--line); }
@@ -2620,8 +2668,10 @@ input[type="checkbox"]:focus, input[type="radio"]:focus {
 .hidden-group-row:first-child { border-top: 0; }
 
 /* admin performance bar chart */
-.perf-row { display: flex; align-items: center; gap: 12px; padding: 8px 0; }
-.perf-row + .perf-row { border-top: 1px solid var(--line); }
+.perf-row { display: flex; align-items: center; gap: 12px; padding: 8px; cursor: pointer; border-radius: 6px; transition: background 0.15s ease; }
+.perf-row:hover { background: rgba(9, 132, 227, 0.04); }
+.perf-row-active { background: rgba(9, 132, 227, 0.08); }
+.perf-row + .perf-row { margin-top: 4px; }
 .perf-name { flex: 0 0 130px; font-size: .82rem; font-weight: 650; color: var(--ink);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .perf-track { flex: 1; height: 12px; border-radius: 6px; overflow: hidden;
