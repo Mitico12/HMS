@@ -55,6 +55,56 @@ export async function requireSession({ admin = false, minRank = 0 } = {}) {
   return { ok: true, profile };
 }
 
+// ── Cross-page prefetch cache ──────────────────────────────────
+// index.html warms this right after the profile is known, so user.html can
+// paint its groups without waiting on the network (index and user.html are
+// separate documents, so the data rides across the navigation in sessionStorage,
+// keyed to the user id). Stale-while-revalidate: user.html still refetches in
+// the background and repaints only if something actually changed.
+const PREFETCH_KEY = 'hms:pf:worker';
+const PREFETCH_TTL = 5 * 60 * 1000; // ignore anything older than 5 min
+
+function mergePrefetch(uid, patch) {
+  let cur = {};
+  try { const raw = sessionStorage.getItem(PREFETCH_KEY); if (raw) cur = JSON.parse(raw); } catch (e) { /* ignore */ }
+  if (cur.uid !== uid) cur = { uid };
+  const next = { ...cur, ...patch, uid, t: Date.now() };
+  try { sessionStorage.setItem(PREFETCH_KEY, JSON.stringify(next)); } catch (e) { /* storage may be unavailable */ }
+}
+
+// Returns { groups?, departmentIds?, uid, t } for this user if fresh, else null.
+export function readWorkerPrefetch(uid, { maxAgeMs = PREFETCH_TTL } = {}) {
+  try {
+    const raw = sessionStorage.getItem(PREFETCH_KEY);
+    if (!raw) return null;
+    const p = JSON.parse(raw);
+    if (!uid || p.uid !== uid) return null;
+    if (Date.now() - (p.t || 0) > maxAgeMs) return null;
+    return p;
+  } catch (e) { return null; }
+}
+
+export function cacheWorkerGroups(uid, groups) { if (uid) mergePrefetch(uid, { groups: groups || [] }); }
+export function cacheWorkerDepartments(uid, ids) { if (uid) mergePrefetch(uid, { departmentIds: ids || [] }); }
+
+// Warm the worker cache (main groups + department memberships) in parallel.
+// Never blocks the caller longer than timeoutMs — a slow network must not stall
+// the redirect; user.html falls back to a normal fetch on a cold cache.
+export async function prefetchWorkerData(profile, { timeoutMs = 2500 } = {}) {
+  if (!profile?.id) return;
+  const uid = profile.id;
+  const work = Promise.allSettled([
+    db.from('groups').select('*').order('sort_order'),
+    db.from('user_departments').select('department_id').eq('user_id', uid),
+  ]).then(([g, d]) => {
+    const patch = {};
+    if (g.status === 'fulfilled' && !g.value.error) patch.groups = g.value.data || [];
+    if (d.status === 'fulfilled' && !d.value.error) patch.departmentIds = (d.value.data || []).map(r => r.department_id);
+    if (Object.keys(patch).length) mergePrefetch(uid, patch);
+  }).catch(() => { /* prefetch is best-effort */ });
+  await Promise.race([work, new Promise(r => setTimeout(r, timeoutMs))]);
+}
+
 // Tiny DOM helper: el('div', { class: 'x' }, [children]) or el('div', 'text').
 export function el(tag, props = {}, kids = []) {
   const node = document.createElement(tag);
@@ -79,6 +129,28 @@ export const opt = (v, label) => el('option', { value: v }, label);
 export function labeled(text, inputEl, required = false) {
   return el('label', { class: 'field' },
     [el('span', {}, [text, required ? el('span', { class: 'req' }, ' *') : null]), inputEl]);
+}
+
+// Themed replacement for a native <input type=file> (the raw browser "Choose
+// file" button doesn't follow the app's light/dark theme). Hides the real
+// input and drives it from a styled button + filename readout kept in sync
+// via 'change', so any existing onchange handler on `input` still fires.
+export function fileButton(input, label) {
+  const isImage = (input.getAttribute('accept') || '').includes('image');
+  const nameEl = el('span', { class: 'file-btn-name' }, t('noFileChosen'));
+  const sync = () => {
+    const files = input.files;
+    nameEl.textContent = !files || !files.length ? t('noFileChosen')
+      : files.length === 1 ? files[0].name : t('filesChosenCount', { count: files.length });
+  };
+  input.style.display = 'none';
+  input.addEventListener('change', sync);
+  sync();
+  const btn = el('button', { type: 'button', class: 'btn btn-ghost file-btn-trigger', onclick: () => input.click() }, [
+    el('span', { class: 'file-btn-icon' }, isImage ? '📷' : '📎'),
+    el('span', {}, label || t('chooseFile')),
+  ]);
+  return el('div', { class: 'file-btn' }, [btn, nameEl, input]);
 }
 
 export function initTheme() {
@@ -252,10 +324,11 @@ const TEXT = {
     yourActivity: 'Your activity',
     myReports: 'My reports',
     communications: 'Communications',
-    messages: 'Messages',
     news: 'News',
+    safetyNews: 'Safety news',
+    safetyNewsToggle: 'Mark as safety news',
+    noSafetyNews: 'No safety news.',
     newNews: 'New news',
-    newMessage: 'New message',
     commTitle: 'Title',
     commBody: 'Message',
     commImage: 'Cover image (optional)',
@@ -264,9 +337,6 @@ const TEXT = {
     audienceEveryone: 'Everyone',
     audienceDepartments: 'Specific departments',
     selectDepartments: 'Select departments',
-    recipients: 'Recipients',
-    selectRecipients: 'Select who receives this',
-    pickAtLeastOneRecipient: 'Select at least one recipient.',
     pickAtLeastOneDepartment: 'Select at least one department.',
     messageBodyRequired: 'Add a title or message first.',
     send: 'Send',
@@ -278,20 +348,14 @@ const TEXT = {
     notYetRead: 'Not yet read',
     unread: 'Unread',
     noCommunications: 'No communications yet.',
-    noCommunicationsHint: 'News and messages from your workplace appear here.',
-    noMessages: 'No messages.',
+    noCommunicationsHint: 'News from your workplace appears here.',
     noNews: 'No news.',
-    sentToEveryone: 'Everyone',
     sentToDepartments: 'Departments',
     attachmentsLabel: 'Attachments',
     runCommunicationsMigration: 'Run migration_communications.sql in Supabase first.',
-    cancel: 'Cancel',
     archivedNews: 'Archived',
     newsArchived: 'News archived.',
     newsUnarchived: 'News restored.',
-    messageCancelled: 'Message removed.',
-    noNewMessages: 'No new messages.',
-    viewAllMessages: 'View all messages',
     checklistLogNeedsAttention: 'Needs review',
     markAsReviewed: 'Mark as reviewed',
     logMarkedReviewed: 'Log marked as reviewed.',
@@ -362,6 +426,7 @@ const TEXT = {
     latestScore: 'Latest: {score}% {status} - {date}',
     learnerMustTick: 'The learner must tick this to earn the points.',
     locationOptional: 'Location (optional)',
+    location: 'Location',
     logDeleted: 'Log deleted.',
     logs: 'Logs',
     logsMeta: 'Checklists, reports, procedures, and courses',
@@ -421,6 +486,9 @@ const TEXT = {
     removeImage: 'Remove image',
     profileImage: 'Profile image',
     uploadImage: 'Upload image',
+    chooseFile: 'Choose file',
+    noFileChosen: 'No file chosen',
+    filesChosenCount: '{count} files chosen',
     orChooseLogo: 'Or choose a logo',
     password: 'Password',
     photosOptional: 'Pictures (optional)',
@@ -449,6 +517,12 @@ const TEXT = {
     reportSuggestion: 'Send suggestion',
     saveReportForm: 'Save report form',
     reportsByWorstConsequence: 'Reports by worst consequence',
+    reportsByRootCause: 'Reports by root cause',
+    filteredBy: 'Filtered by',
+    clearFilter: 'Clear filter',
+    resetFilters: 'Reset filters',
+    allRootCauses: 'All root causes',
+    filterByRootCause: 'Filter by root cause',
     reportsClosedInPeriod: 'Reports closed',
     reportsClosedToday: 'Reports closed today',
     reportsInPeriod: 'Reported incidents',
@@ -811,10 +885,11 @@ const TEXT = {
     yourActivity: 'Din aktivitet',
     myReports: 'Mine rapporter',
     communications: 'Kommunikasjon',
-    messages: 'Meldinger',
     news: 'Nyheter',
+    safetyNews: 'Sikkerhetsnyhet',
+    safetyNewsToggle: 'Merk som sikkerhetsnyhet',
+    noSafetyNews: 'Ingen sikkerhetsnyheter.',
     newNews: 'Ny nyhet',
-    newMessage: 'Ny melding',
     commTitle: 'Tittel',
     commBody: 'Melding',
     commImage: 'Forsidebilde (valgfritt)',
@@ -823,9 +898,6 @@ const TEXT = {
     audienceEveryone: 'Alle',
     audienceDepartments: 'Bestemte avdelinger',
     selectDepartments: 'Velg avdelinger',
-    recipients: 'Mottakere',
-    selectRecipients: 'Velg hvem som mottar dette',
-    pickAtLeastOneRecipient: 'Velg minst en mottaker.',
     pickAtLeastOneDepartment: 'Velg minst en avdeling.',
     messageBodyRequired: 'Legg til en tittel eller melding forst.',
     send: 'Send',
@@ -837,20 +909,14 @@ const TEXT = {
     notYetRead: 'Ikke lest enna',
     unread: 'Ulest',
     noCommunications: 'Ingen kommunikasjon enna.',
-    noCommunicationsHint: 'Nyheter og meldinger fra arbeidsplassen din vises her.',
-    noMessages: 'Ingen meldinger.',
+    noCommunicationsHint: 'Nyheter fra arbeidsplassen din vises her.',
     noNews: 'Ingen nyheter.',
-    sentToEveryone: 'Alle',
     sentToDepartments: 'Avdelinger',
     attachmentsLabel: 'Vedlegg',
     runCommunicationsMigration: 'Kjor migration_communications.sql i Supabase forst.',
-    cancel: 'Avbryt',
     archivedNews: 'Arkivert',
     newsArchived: 'Nyhet arkivert.',
     newsUnarchived: 'Nyhet gjenopprettet.',
-    messageCancelled: 'Melding fjernet.',
-    noNewMessages: 'Ingen nye meldinger.',
-    viewAllMessages: 'Se alle meldinger',
     checklistLogNeedsAttention: 'Ma ses gjennom',
     markAsReviewed: 'Marker som gjennomgatt',
     logMarkedReviewed: 'Logg markert som gjennomgatt.',
@@ -907,6 +973,7 @@ const TEXT = {
     label: 'Etikett',
     itemImage: 'Bilde',
     locationOptional: 'Sted (valgfritt)',
+    location: 'Sted',
     logs: 'Logger',
     logsMeta: 'Sjekklister, rapporter, prosedyrer og kurs',
     missingItems: '{count} mangler',
@@ -943,6 +1010,9 @@ const TEXT = {
     removeImage: 'Fjern bilde',
     profileImage: 'Profilbilde',
     uploadImage: 'Last opp bilde',
+    chooseFile: 'Velg fil',
+    noFileChosen: 'Ingen fil valgt',
+    filesChosenCount: '{count} filer valgt',
     orChooseLogo: 'Eller velg en logo',
     password: 'Passord',
     photosOptional: 'Bilder (valgfritt)',
@@ -1222,6 +1292,12 @@ const TEXT = {
     profilePendingChange: 'Du har allerede en ventende profilendring. Vent til en admin godkjenner eller avviser den for du sender en ny.',
     rejected: 'Avvist',
     reportsByWorstConsequence: 'Rapporter etter verste konsekvens',
+    reportsByRootCause: 'Rapporter etter arsak',
+    filteredBy: 'Filtrert etter',
+    clearFilter: 'Fjern filter',
+    resetFilters: 'Nullstill filtre',
+    allRootCauses: 'Alle arsaker',
+    filterByRootCause: 'Filtrer etter arsak',
     reviewTryAgain: 'Se gjennom materialet og prov igjen.',
     selectAll: 'Velg alle',
     selectAssignedUser: 'Velg minst en tildelt bruker.',

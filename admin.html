@@ -46,7 +46,7 @@
 
   <script type="module">
   import { db, requireSession, currentProfile, el, $, fmt, toast, newAuthClient, initTheme, themeToggleButton, initLanguage, languageSelect, currentLanguage, t,
-           roleRank, isAdminPlus, isSuperPlus, isSysadmin, canViewChecklistLogs, canAccessVarsling, isSuspended } from './config.js';
+           roleRank, isAdminPlus, isSuperPlus, isSysadmin, canViewChecklistLogs, canAccessVarsling, isSuspended, fileButton } from './config.js';
   import { coursesGroupView, courseBuild, courseResults } from './courses.js';
   import { navigateShell, setupPageTransition, warmAppShell } from './app-shell.js';
 
@@ -1005,247 +1005,383 @@
 
   async function renderAdminKpiDashboard(app) {
     const periodKey = 'adminKpiPeriod', typeKey = 'adminKpiType', filterKey = 'adminKpiChecklist', adminKey = 'adminKpiAdmin', presetKey = 'adminKpiPreset';
-    const preset = storageValue(presetKey, 'today');
-    // Day/Week/Month presets recompute live so the window always tracks the current
-    // date; only a custom calendar range is read back from storage.
-    const period = preset === 'custom' ? kpiPeriod(periodKey) : presetBounds(preset);
-    const prev = previousBounds(period);
-    const cur = periodBounds(period);
-    let type = storageValue(typeKey, 'overview');
-    if (type === 'admin_performance' && !isAdminPlus(state.profile)) type = 'overview';
-    const refresh = () => go(homeView(), { reset: true });
-    const setPreset = (k) => { setStorageValue(presetKey, k); refresh(); };
+    const reportTypeKey = 'adminKpiIncidentReportType', consequenceKey = 'adminKpiIncidentConsequence';
+    const statusKey = 'adminKpiIncidentStatus', rootCauseKey = 'adminKpiRootCause';
+    const activityKey = 'adminKpiOverviewActivity'; // Overview "Reports by type" → Latest-activity drilldown
 
-    // ── toolbar: type (left) · checklist filter · period chip + calendar (right) ──
-    const typeOptions = [opt('overview', t('kpiOverview')), opt('incidents', t('kpiIncidents')), opt('checklists', t('kpiChecklists'))];
-    if (isAdminPlus(state.profile)) typeOptions.push(opt('admin_performance', t('kpiAdminPerformance')));
-    const typeSel = el('select', { class: 'kpi-filter', onchange: e => {
-      setStorageValue(typeKey, e.target.value); refresh();
-    } }, typeOptions);
-    typeSel.value = type;
+    // The dashboard re-renders IN PLACE on every filter change (no router hop / skeleton /
+    // route fade), and the Incidents dataset is fetched ONCE per period and cached here —
+    // so toggling a report-type / consequence / root-cause / status filter recomputes the
+    // cards, bars and activity feed straight from memory with zero network. The cache is
+    // keyed by the period window, so switching Day/Week/Month or the calendar range (or
+    // navigating away and back) transparently refetches. Trade-off: rows filed while the
+    // admin sits on the page won't appear until the period changes or the page reloads.
+    const mount = el('div', { class: 'kpi-dashboard' });
+    app.append(mount);
+    let incCache = null; // { key, all, cats, rootCauseCats, live }
 
-    // checklists (with quotas) loaded up front; also feeds the filter dropdown
-    let checklists = [];
-    if (type === 'checklists') {
-      const { data } = await db.from('checklists').select('id,title,daily_quota,quota_weekdays');
-      checklists = (data || []).filter(c => c.daily_quota > 0);
-    }
-    const selectedCl = storageValue(filterKey, 'all');
-    const clSel = el('select', { class: 'kpi-filter', onchange: e => {
-      setStorageValue(filterKey, e.target.value); refresh();
-    } }, [opt('all', t('allChecklists')), ...checklists.map(c => opt(c.id, c.title))]);
-    clSel.value = checklists.some(c => c.id === selectedCl) ? selectedCl : 'all';
+    const ensureIncidents = async (key, cur, prev) => {
+      if (incCache && incCache.key === key) return incCache;
+      const [allRes, catsRes, rcRes, live] = await Promise.all([
+        db.from('incidents')
+          .select('id,report_type,consequence_ids,root_cause_ids,is_anonymous,status,created_at,resolved_at,reporter_id,assigned_to')
+          .or(`and(created_at.gte.${prev.start},created_at.lt.${cur.end}),and(resolved_at.gte.${prev.start},resolved_at.lt.${cur.end})`)
+          .limit(5000),
+        db.from('incident_categories').select('id,name').eq('kind', 'consequence'),
+        db.from('incident_categories').select('id,name').eq('kind', 'root_cause'),
+        liveIncidentState(),
+      ]);
+      incCache = { key, all: allRes.data || [], cats: catsRes.data || [], rootCauseCats: rcRes.data || [], live };
+      return incCache;
+    };
 
-    const admins = state.profiles.filter(p => isAdminPlus(p));
-    const selectedAdmin = storageValue(adminKey, 'all');
-    const adminSel = el('select', { class: 'kpi-filter', onchange: e => {
-      setStorageValue(adminKey, e.target.value); refresh();
-    } }, [opt('all', t('allAdmins')), ...admins.map(p => opt(p.id, labelOf(p)))]);
-    adminSel.value = (selectedAdmin === 'all' || admins.some(p => p.id === selectedAdmin)) ? selectedAdmin : 'all';
+    // Overview has no per-click filters — only the period changes it. To make Day/Week/Month
+    // switch instantly, one superset covering all three presets AND their comparison windows
+    // is fetched once and cached; each preset's cur/prev counts are computed client-side.
+    // A custom calendar range caches its own [prev.start, cur.end] window.
+    let ovCache = null;
+    const ensureOverview = async (preset, period) => {
+      const canSeeVarsling = isSuperPlus(state.profile) && canAccessVarsling(state.profile);
+      let start, end, key;
+      if (preset === 'custom') {
+        const c = periodBounds(period), pr = previousBounds(period);
+        start = pr.start; end = c.end; key = `custom|${period.from}|${period.until}`;
+      } else {
+        let minStart = Infinity, maxEnd = -Infinity;
+        for (const k of ['today', 'week', 'month']) {
+          const p = presetBounds(k), c = periodBounds(p), pr = previousBounds(p);
+          minStart = Math.min(minStart, +new Date(pr.start));
+          maxEnd = Math.max(maxEnd, +new Date(c.end));
+        }
+        start = new Date(minStart).toISOString(); end = new Date(maxEnd).toISOString();
+        key = `presets|${localDateString()}`;
+      }
+      if (ovCache && ovCache.key === key) return ovCache;
+      const rows = (q) => q.then(r => r.data || [], () => []);
+      const win = (q, col) => q.gte(col, start).lt(col, end).limit(10000);
+      const titleMap = (table) => db.from(table).select('id,title').then(
+        r => new Map((r.data || []).map(x => [x.id, x.title])), () => new Map());
+      const [
+        incidents, runs, courses, procs, docs, members, vars,
+        clTitles, coTitles, prTitles, seriousIds, live,
+      ] = await Promise.all([
+        rows(db.from('incidents')
+          .select('id,report_type,is_anonymous,reporter_id,assigned_to,status,created_at,resolved_at,consequence_ids')
+          .or(`and(created_at.gte.${start},created_at.lt.${end}),and(resolved_at.gte.${start},resolved_at.lt.${end})`).limit(5000)),
+        rows(win(db.from('checklist_runs').select('checklist_id,user_id,submitted_at').eq('completed', true).not('submitted_at', 'is', null), 'submitted_at')),
+        rows(win(db.from('course_submissions').select('course_id,user_id,passed,score,created_at'), 'created_at')),
+        rows(win(db.from('procedure_submissions').select('procedure_id,user_id,created_at'), 'created_at')),
+        rows(win(db.from('documents').select('name,uploaded_by,created_at'), 'created_at')),
+        rows(win(db.from('profiles').select('id,full_name,username,email,created_at'), 'created_at')),
+        canSeeVarsling ? rows(win(db.from('varslinger').select('id,created_at'), 'created_at')) : Promise.resolve([]),
+        titleMap('checklists'), titleMap('courses'), titleMap('procedures'),
+        seriousConsequenceIds(),
+        liveIncidentState(),
+      ]);
+      ovCache = {
+        key, incidents, runs, courses, procs, docs, members, vars,
+        clTitles, coTitles, prTitles, seriousIds, live, canSeeVarsling,
+      };
+      return ovCache;
+    };
 
-    const from = el('input', { type: 'date', value: period.from });
-    const until = el('input', { type: 'date', value: period.until });
-    const panel = el('div', { class: 'kpi-date-panel hidden' }, [
-      labeled(t('dateFrom'), from), labeled(t('dateUntil'), until),
-      el('div', { class: 'kpi-date-actions' }, [
-        el('button', { class: 'btn btn-ghost', onclick: () => { removeStorageValue(periodKey); setPreset('today'); } }, t('today')),
-        el('button', { class: 'btn btn-primary', onclick: () => { setStorageValue(presetKey, 'custom'); saveKpiPeriod(periodKey, from.value, until.value, refresh); } }, t('apply')),
-      ]),
-    ]);
-    const calBtn = el('button', { class: 'iconbtn', title: t('dashboardPeriod'), onclick: () => panel.classList.toggle('hidden') }, '📅');
+    const paint = async () => {
+      const preset = storageValue(presetKey, 'today');
+      // Day/Week/Month presets recompute live so the window always tracks the current
+      // date; only a custom calendar range is read back from storage.
+      const period = preset === 'custom' ? kpiPeriod(periodKey) : presetBounds(preset);
+      const prev = previousBounds(period);
+      const cur = periodBounds(period);
+      let type = storageValue(typeKey, 'overview');
+      if (type === 'admin_performance' && !isAdminPlus(state.profile)) type = 'overview';
+      const refresh = paint;
+      const setPreset = (k) => { setStorageValue(presetKey, k); refresh(); };
 
-    // Day / Week / Month quick presets — the common ranges without opening the calendar.
-    const presetIcons = { today: '⏱️', week: '📅', month: '🗓️' };
-    const presetSeg = el('div', { class: 'kpi-seg' }, ['today', 'week', 'month'].map(k =>
-      el('button', { class: 'kpi-seg-btn' + (preset === k ? ' on' : ''), onclick: () => setPreset(k) }, [
-        el('span', { style: 'font-size: 0.95rem; line-height: 1;' }, presetIcons[k]),
-        t('period' + k.charAt(0).toUpperCase() + k.slice(1))
-      ])));
+      // Incidents/Overview tabs: load (or reuse) the cached dataset up front so the body
+      // (and the incidents root-cause dropdown) render from the same in-memory rows.
+      const inc = type === 'incidents' ? await ensureIncidents(`${period.from}|${period.until}`, cur, prev) : null;
+      const ov = type === 'overview' ? await ensureOverview(preset, period) : null;
 
-    // Incident status quick-filters — sit horizontally to the right of the type dropdown,
-    // and only on the incidents view. Selection persists like the other KPI filters.
-    const statusKey = 'adminKpiIncidentStatus';
-    const incidentStatus = storageValue(statusKey, 'all');
-    const statusFilter = el('div', { class: 'kpi-status-filter' },
-      ['all', 'open', 'in_progress', 'resolved'].map(s =>
-        el('button', { class: 'chip' + (incidentStatus === s ? ' on' : ''), onclick: () => {
-          setStorageValue(statusKey, s); refresh();
-        } }, s === 'all' ? t('all') : statusLabel(s))));
+      // ── toolbar: type (left) · checklist filter · period chip + calendar (right) ──
+      const typeOptions = [opt('overview', t('kpiOverview')), opt('incidents', t('kpiIncidents')), opt('checklists', t('kpiChecklists'))];
+      if (isAdminPlus(state.profile)) typeOptions.push(opt('admin_performance', t('kpiAdminPerformance')));
+      const typeSel = el('select', { class: 'kpi-filter', onchange: e => {
+        setStorageValue(typeKey, e.target.value); refresh();
+      } }, typeOptions);
+      typeSel.value = type;
 
-    app.append(el('div', { class: 'kpi-control-wrap' }, [
-      el('div', { class: 'kpi-toolbar-row' }, [
-        typeSel,
-        type === 'checklists' ? clSel : null,
-        type === 'incidents' ? statusFilter : null,
-        el('span', { class: 'spacer' }),
-        type === 'admin_performance' ? adminSel : null,
-        type !== 'admin_performance' ? presetSeg : null,
-        type !== 'admin_performance' ? el('div', { class: 'kpi-period-chip' }, periodLabel(period)) : null,
-        type !== 'admin_performance' ? calBtn : null,
-      ]),
-      panel,
-    ]));
+      // checklists (with quotas) loaded up front; also feeds the filter dropdown
+      let checklists = [];
+      if (type === 'checklists') {
+        const { data } = await db.from('checklists').select('id,title,daily_quota,quota_weekdays');
+        checklists = (data || []).filter(c => c.daily_quota > 0);
+      }
+      const selectedCl = storageValue(filterKey, 'all');
+      const clSel = el('select', { class: 'kpi-filter', onchange: e => {
+        setStorageValue(filterKey, e.target.value); refresh();
+      } }, [opt('all', t('allChecklists')), ...checklists.map(c => opt(c.id, c.title))]);
+      clSel.value = checklists.some(c => c.id === selectedCl) ? selectedCl : 'all';
 
-    const host = el('div', {});
-    app.append(host);
+      const admins = state.profiles.filter(p => isAdminPlus(p));
+      const selectedAdmin = storageValue(adminKey, 'all');
+      const adminSel = el('select', { class: 'kpi-filter', onchange: e => {
+        setStorageValue(adminKey, e.target.value); refresh();
+      } }, [opt('all', t('allAdmins')), ...admins.map(p => opt(p.id, labelOf(p)))]);
+      adminSel.value = (selectedAdmin === 'all' || admins.some(p => p.id === selectedAdmin)) ? selectedAdmin : 'all';
 
-    if (type === 'overview') await renderOverviewKpi(host, period, cur, prev);
-    else if (type === 'incidents') await renderIncidentsKpi(host, period, cur, prev, incidentStatus);
-    else if (type === 'checklists') await renderChecklistsKpi(host, period, prev, checklists, selectedCl);
-    else await renderAdminPerformanceKpi(host, adminSel.value);
+      const from = el('input', { type: 'date', value: period.from });
+      const until = el('input', { type: 'date', value: period.until });
+      const panel = el('div', { class: 'kpi-date-panel hidden' }, [
+        labeled(t('dateFrom'), from), labeled(t('dateUntil'), until),
+        el('div', { class: 'kpi-date-actions' }, [
+          el('button', { class: 'btn btn-ghost', onclick: () => { removeStorageValue(periodKey); setPreset('today'); } }, t('today')),
+          el('button', { class: 'btn btn-primary', onclick: () => { setStorageValue(presetKey, 'custom'); saveKpiPeriod(periodKey, from.value, until.value, refresh); } }, t('apply')),
+        ]),
+      ]);
+      const calBtn = el('button', { class: 'iconbtn', title: t('dashboardPeriod'), onclick: () => panel.classList.toggle('hidden') }, '📅');
+
+      // Day / Week / Month quick presets — the common ranges without opening the calendar.
+      const presetIcons = { today: '⏱️', week: '📅', month: '🗓️' };
+      const presetSeg = el('div', { class: 'kpi-seg' }, ['today', 'week', 'month'].map(k =>
+        el('button', { class: 'kpi-seg-btn' + (preset === k ? ' on' : ''), onclick: () => setPreset(k) }, [
+          el('span', { style: 'font-size: 0.95rem; line-height: 1;' }, presetIcons[k]),
+          t('period' + k.charAt(0).toUpperCase() + k.slice(1))
+        ])));
+
+      // Incident status quick-filters — sit horizontally to the right of the type dropdown,
+      // and only on the incidents view. Selection persists like the other KPI filters.
+      const VALID_STATUSES = ['open', 'in_progress', 'resolved'];
+      const incidentStatuses = new Set((storageValue(statusKey, '') || '').split(',').filter(x => VALID_STATUSES.includes(x)));
+      const saveStatuses = (set) => { set.size ? setStorageValue(statusKey, [...set].join(',')) : removeStorageValue(statusKey); refresh(); };
+      const statusFilter = el('div', { class: 'kpi-status-filter' }, [
+        el('button', { class: 'chip' + (incidentStatuses.size === 0 ? ' on' : ''), onclick: () => {
+          removeStorageValue(statusKey); refresh();
+        } }, t('all')),
+        ...VALID_STATUSES.map(s =>
+          el('button', { class: 'chip' + (incidentStatuses.has(s) ? ' on' : ''), onclick: () => {
+            const next = new Set(incidentStatuses);
+            if (next.has(s)) next.delete(s);
+            else next.add(s);
+            saveStatuses(next);
+          } }, statusLabel(s)))
+      ]);
+
+      const rootCauseCats = inc ? inc.rootCauseCats : [];
+      const incidentRootCauses = new Set((storageValue(rootCauseKey, '') || '').split(',').filter(x => x && rootCauseCats.some(c => c.id === x)));
+
+      const INC_TYPES = ['incident', 'hazard', 'suggestion'];
+      const incidentReportTypes = new Set((storageValue(reportTypeKey, '') || '').split(',').filter(x => INC_TYPES.includes(x)));
+      const incidentConsequences = new Set((storageValue(consequenceKey, '') || '').split(',').filter(Boolean));
+
+      // Overview "Reports by type" bar → Latest-activity drilldown. Multi-select: a
+      // comma-joined set of the five types (empty/absent = show everything).
+      const OV_TYPES = ['incident', 'hazard', 'suggestion', 'checklist', 'procedure'];
+      const overviewActivity = new Set((storageValue(activityKey, '') || '').split(',').filter(x => OV_TYPES.includes(x)));
+
+      // Reset all drilldown/quick filters — the bar drilldowns persist in localStorage,
+      // so without this a refresh keeps them stuck. Shown next to the type selector on
+      // the two tabs that carry filters.
+      const anyFilterActive = (type === 'overview' && overviewActivity.size > 0)
+        || (type === 'incidents' && (incidentReportTypes.size > 0 || incidentConsequences.size > 0 || incidentRootCauses.size > 0 || incidentStatuses.size > 0));
+      const resetFiltersBtn = el('button', {
+        class: 'btn btn-ghost btn-sm kpi-reset-btn',
+        onclick: () => {
+          [reportTypeKey, consequenceKey, rootCauseKey, statusKey, activityKey].forEach(removeStorageValue);
+          refresh();
+        },
+      }, t('resetFilters'));
+      resetFiltersBtn.disabled = !anyFilterActive;
+
+      // Build the whole dashboard off-DOM, then swap it in atomically so filter changes
+      // update with no flash (the old view stays until the new one is fully built).
+      const frag = el('div');
+      frag.append(el('div', { class: 'kpi-control-wrap' }, [
+        el('div', { class: 'kpi-toolbar-row' }, [
+          typeSel,
+          ['overview', 'incidents'].includes(type) ? resetFiltersBtn : null,
+          type === 'checklists' ? clSel : null,
+          type === 'incidents' ? statusFilter : null,
+          el('span', { class: 'spacer' }),
+          type === 'admin_performance' ? adminSel : null,
+          type !== 'admin_performance' ? presetSeg : null,
+          type !== 'admin_performance' ? el('div', { class: 'kpi-period-chip' }, periodLabel(period)) : null,
+          type !== 'admin_performance' ? calBtn : null,
+        ]),
+        panel,
+      ]));
+
+      const host = el('div', {});
+      frag.append(host);
+
+      if (type === 'overview') renderOverviewKpi(host, { cur, prev, data: ov, activitySet: overviewActivity, activityKey, refresh });
+      else if (type === 'incidents') renderIncidentsKpi(host, {
+        cur, prev, data: inc, refresh,
+        statusSet: incidentStatuses, rootCauseSet: incidentRootCauses,
+        reportTypeSet: incidentReportTypes, consequenceSet: incidentConsequences,
+      });
+      else if (type === 'checklists') await renderChecklistsKpi(host, period, prev, checklists, selectedCl);
+      else await renderAdminPerformanceKpi(host, adminSel.value);
+
+      mount.replaceChildren(...Array.from(frag.childNodes));
+    };
+
+    await paint();
   }
 
   // ── OVERVIEW — everything that happened in the period ───────
-  async function renderOverviewKpi(host, period, cur, prev) {
-    const seriousIds = await seriousConsequenceIds();
-    const canSeeVarsling = isSuperPlus(state.profile) && canAccessVarsling(state.profile);
+  // Synchronous: computes every card, bar and the activity feed from the cached Overview
+  // superset (see ensureOverview), so switching Day/Week/Month recomputes with zero network.
+  function renderOverviewKpi(host, { cur, prev, data, activitySet = new Set(), activityKey, refresh = () => {} }) {
+    const {
+      incidents = [], runs = [], courses = [], procs = [], docs = [], members = [], vars = [],
+      seriousIds = [], live, canSeeVarsling = false,
+    } = data || {};
+    const curS = +new Date(cur.start), curE = +new Date(cur.end);
+    const prevS = +new Date(prev.start), prevE = +new Date(prev.end);
+    const inW = (ts, s, e) => { if (!ts) return false; const t = +new Date(ts); return t >= s && t < e; };
+    const cCur = (arr, col = 'created_at') => arr.filter(r => inW(r[col], curS, curE)).length;
+    const cPrev = (arr, col = 'created_at') => arr.filter(r => inW(r[col], prevS, prevE)).length;
 
-    // count rows in a table over a date window on a given column (+ optional tweak)
-    const countIn = (table, col, b, tweak) => {
-      let q = db.from(table).select('id', { count: 'exact', head: true }).gte(col, b.start).lt(col, b.end);
-      if (tweak) q = tweak(q);
-      return countRows(q);
-    };
-    // incident rows for a window drive filed / serious / type-breakdown in one fetch
-    const incQ = (b) => db.from('incidents')
-      .select('report_type,consequence_ids,created_at')
-      .gte('created_at', b.start).lt('created_at', b.end);
-
-    const [
-      incCur, incPrev, resCur, resPrev, clCur, clPrev, coCur, coPrev,
-      prCur, prPrev, docCur, docPrev, memCur, memPrev, vrCur, vrPrev,
-      backlog, unassigned, oldestRow,
-    ] = await Promise.all([
-      incQ(cur), incQ(prev),
-      countIn('incidents', 'resolved_at', cur, q => q.eq('status', 'resolved')),
-      countIn('incidents', 'resolved_at', prev, q => q.eq('status', 'resolved')),
-      countIn('checklist_runs', 'submitted_at', cur, q => q.eq('completed', true)),
-      countIn('checklist_runs', 'submitted_at', prev, q => q.eq('completed', true)),
-      countIn('course_submissions', 'created_at', cur, q => q.eq('passed', true)),
-      countIn('course_submissions', 'created_at', prev, q => q.eq('passed', true)),
-      countIn('procedure_submissions', 'created_at', cur),
-      countIn('procedure_submissions', 'created_at', prev),
-      countIn('documents', 'created_at', cur),
-      countIn('documents', 'created_at', prev),
-      countIn('profiles', 'created_at', cur),
-      countIn('profiles', 'created_at', prev),
-      canSeeVarsling ? countIn('varslinger', 'created_at', cur) : Promise.resolve(0),
-      canSeeVarsling ? countIn('varslinger', 'created_at', prev) : Promise.resolve(0),
-      countRows(db.from('incidents').select('id', { count: 'exact', head: true }).neq('status', 'resolved')),
-      countRows(db.from('incidents').select('id', { count: 'exact', head: true }).eq('status', 'open').is('assigned_to', null)),
-      db.from('incidents').select('created_at').neq('status', 'resolved').order('created_at', { ascending: true }).limit(1),
-    ]);
-
-    const rowsCur = incCur.data || [], rowsPrev = incPrev.data || [];
+    const rowsCur = incidents.filter(r => inW(r.created_at, curS, curE));
+    const rowsPrev = incidents.filter(r => inW(r.created_at, prevS, prevE));
     const inSet = (ids) => (ids || []).some(id => seriousIds.includes(id));
     const filedCur = rowsCur.length, filedPrev = rowsPrev.length;
     const serCur = rowsCur.filter(r => inSet(r.consequence_ids)).length;
     const serPrev = rowsPrev.filter(r => inSet(r.consequence_ids)).length;
-    const oldestDays = oldestRow.data?.[0]
-      ? Math.floor((Date.now() - new Date(oldestRow.data[0].created_at)) / DAYMS) : 0;
-    const num = (x) => Number(x || 0);
+    const resCur = incidents.filter(r => r.status === 'resolved' && inW(r.resolved_at, curS, curE)).length;
+    const resPrev = incidents.filter(r => r.status === 'resolved' && inW(r.resolved_at, prevS, prevE)).length;
+    const clCur = cCur(runs, 'submitted_at'), clPrev = cPrev(runs, 'submitted_at');
+    const coCur = courses.filter(r => r.passed && inW(r.created_at, curS, curE)).length;
+    const coPrev = courses.filter(r => r.passed && inW(r.created_at, prevS, prevE)).length;
+    const prCur = cCur(procs), prPrev = cPrev(procs);
+    const docCur = cCur(docs), docPrev = cPrev(docs);
+    const memCur = cCur(members), memPrev = cPrev(members);
+    const vrCur = cCur(vars), vrPrev = cPrev(vars);
+    const s = live || { backlog: 0, unassigned: 0, oldestDays: 0 };
 
     // ── Right now (live, point-in-time) ──
     host.append(el('div', { class: 'kpi-section-h' }, t('rightNow')));
     host.append(el('div', { class: 'kpi-grid' }, [
-      metricCard({ label: t('openBacklog'), value: backlog, live: true }),
-      metricCard({ label: t('unassigned'), value: unassigned, live: true }),
-      metricCard({ label: t('oldestOpen'), value: oldestDays + 'd', live: true }),
+      metricCard({ label: t('openBacklog'), value: s.backlog, live: true }),
+      metricCard({ label: t('unassigned'), value: s.unassigned, live: true }),
+      metricCard({ label: t('oldestOpen'), value: s.oldestDays + 'd', live: true }),
     ]));
 
     // ── In this period (vs the previous equal-length window) ──
     host.append(el('div', { class: 'kpi-section-h' }, t('inThisPeriod')));
     const cards = [
       metricCard({ label: t('reportsFiled'), value: filedCur, delta: pctChange(filedCur, filedPrev), good: null }),
-      metricCard({ label: t('reportsResolved'), value: num(resCur), delta: pctChange(num(resCur), num(resPrev)), good: isGood(num(resCur), num(resPrev), 'up') }),
+      metricCard({ label: t('reportsResolved'), value: resCur, delta: pctChange(resCur, resPrev), good: isGood(resCur, resPrev, 'up') }),
       metricCard({ label: t('serious'), value: serCur, delta: pctChange(serCur, serPrev), good: isGood(serCur, serPrev, 'down') }),
-      metricCard({ label: t('checklistsDone'), value: num(clCur), delta: pctChange(num(clCur), num(clPrev)), good: isGood(num(clCur), num(clPrev), 'up') }),
-      metricCard({ label: t('coursesPassed'), value: num(coCur), delta: pctChange(num(coCur), num(coPrev)), good: isGood(num(coCur), num(coPrev), 'up') }),
-      metricCard({ label: t('proceduresFiled'), value: num(prCur), delta: pctChange(num(prCur), num(prPrev)), good: null }),
-      metricCard({ label: t('documentsAdded'), value: num(docCur), delta: pctChange(num(docCur), num(docPrev)), good: null }),
-      metricCard({ label: t('newMembers'), value: num(memCur), delta: pctChange(num(memCur), num(memPrev)), good: null }),
+      metricCard({ label: t('checklistsDone'), value: clCur, delta: pctChange(clCur, clPrev), good: isGood(clCur, clPrev, 'up') }),
+      metricCard({ label: t('coursesPassed'), value: coCur, delta: pctChange(coCur, coPrev), good: isGood(coCur, coPrev, 'up') }),
+      metricCard({ label: t('proceduresFiled'), value: prCur, delta: pctChange(prCur, prPrev), good: null }),
+      metricCard({ label: t('documentsAdded'), value: docCur, delta: pctChange(docCur, docPrev), good: null }),
+      metricCard({ label: t('newMembers'), value: memCur, delta: pctChange(memCur, memPrev), good: null }),
     ];
-    if (canSeeVarsling) cards.push(metricCard({ label: t('varslingerFiled'), value: num(vrCur), delta: pctChange(num(vrCur), num(vrPrev)), good: null }));
+    if (canSeeVarsling) cards.push(metricCard({ label: t('varslingerFiled'), value: vrCur, delta: pctChange(vrCur, vrPrev), good: null }));
     host.append(el('div', { class: 'kpi-grid' }, cards));
 
-    // ── Reports by type (period) ──
-    const typePalette = { incident: '#D85A30', hazard: '#BA7517', suggestion: '#1D9E75' };
-    const typeCounts = ['incident', 'hazard', 'suggestion'].map(k => ({
-      name: typeLabel(k), color: typePalette[k],
-      n: rowsCur.filter(r => (r.report_type || 'incident') === k).length,
-    }));
-    const typeTotal = typeCounts.reduce((a, c) => a + c.n, 0);
-    if (typeTotal) {
-      const shown = typeCounts.filter(c => c.n);
-      const bar = el('div', { class: 'sev-bar' }, shown.map(c =>
-        el('div', { style: `width:${c.n / typeTotal * 100}%;background:${c.color}`, title: `${c.name}: ${c.n}` })));
-      const legend = el('div', { class: 'sev-legend' }, shown.map(c =>
-        el('span', {}, [el('i', { style: `background:${c.color}` }), `${c.name} ${c.n}`])));
-      host.append(el('div', { class: 'kpi-card', style: 'margin-top:4px' }, [
-        el('div', { class: 'kpi-label', style: 'margin-bottom:10px' }, t('reportsByType')), bar, legend,
+    // ── Reports by type — five activity types; clicking one filters Latest activity ──
+    const typeCounts = [
+      { id: 'incident', name: t('reportTypeIncidents'), n: rowsCur.filter(r => (r.report_type || 'incident') === 'incident').length },
+      { id: 'hazard', name: t('reportTypeHazards'), n: rowsCur.filter(r => r.report_type === 'hazard').length },
+      { id: 'suggestion', name: t('reportTypeSuggestions'), n: rowsCur.filter(r => r.report_type === 'suggestion').length },
+      { id: 'checklist', name: t('kpiChecklists'), n: clCur },
+      { id: 'procedure', name: t('procedures'), n: prCur },
+    ].map(c => ({ ...c, color: OVERVIEW_TYPE_PALETTE[c.id] }));
+    // Multi-select: clicking a segment toggles it in/out of the selected set; an empty
+    // set means "show everything". Persisted as a comma-joined list.
+    const saveActivity = (set) => { set.size ? setStorageValue(activityKey, [...set].join(',')) : removeStorageValue(activityKey); refresh(); };
+    renderOverviewTypeBar(host, typeCounts, { activeIds: activitySet, onSelect: c => {
+      const next = new Set(activitySet);
+      next.has(c.id) ? next.delete(c.id) : next.add(c.id);
+      saveActivity(next);
+    }});
+
+    // ── Latest activity (merged timeline across surfaces), optionally drilled to the selected types ──
+    if (activitySet.size) {
+      host.append(el('div', { class: 'kpi-drillbar' }, [
+        el('span', { class: 'kpi-drill-label' }, `${t('filteredBy')}:`),
+        ...typeCounts.filter(c => activitySet.has(c.id)).map(c => el('button', { class: 'kpi-drill-chip', onclick: () => {
+          const next = new Set(activitySet); next.delete(c.id); saveActivity(next);
+        } }, `x ${c.name}`)),
+        activitySet.size > 1 ? el('button', { class: 'btn btn-ghost btn-sm', onclick: () => saveActivity(new Set()) }, t('clearFilter')) : null,
       ]));
     }
-
-    // ── Latest activity (merged timeline across surfaces) ──
-    await renderActivityFeed(host, cur, canSeeVarsling);
+    renderActivityFeed(host, cur, data, activitySet);
   }
 
-  // Merge recent events from every surface into one time-sorted "what happened" feed.
-  async function renderActivityFeed(host, cur, canSeeVarsling) {
-    const LIM = 14;
-    const inWin = (q, col) => q.gte(col, cur.start).lt(col, cur.end).order(col, { ascending: false }).limit(LIM);
-    const rows = (q) => q.then(r => r.data || [], () => []);
+  // Merge recent events from every surface into one time-sorted "what happened" feed,
+  // computed from the cached Overview dataset (no network). When `activitySet` is non-empty,
+  // the feed is drilled to just those bar types' events (report-type reports, their
+  // resolutions, checklist completions or procedure submissions).
+  function renderActivityFeed(host, cur, data, activitySet = new Set()) {
+    const { incidents = [], runs = [], courses = [], procs = [], docs = [], members = [], vars = [],
+      clTitles = new Map(), coTitles = new Map(), prTitles = new Map(), canSeeVarsling = false } = data || {};
+    const curS = +new Date(cur.start), curE = +new Date(cur.end);
+    const inWin = (ts) => { if (!ts) return false; const t = +new Date(ts); return t >= curS && t < curE; };
+    const top = (arr, col) => arr.filter(r => inWin(r[col])).sort((a, b) => +new Date(b[col]) - +new Date(a[col])).slice(0, 14);
 
-    const [incs, resolved, runs, courses, procs, docs, members, vars] = await Promise.all([
-      rows(inWin(db.from('incidents').select('report_type,is_anonymous,reporter_id,created_at'), 'created_at')),
-      rows(inWin(db.from('incidents').select('report_type,assigned_to,resolved_at').eq('status', 'resolved'), 'resolved_at')),
-      rows(inWin(db.from('checklist_runs').select('checklist_id,user_id,submitted_at').eq('completed', true).not('submitted_at', 'is', null), 'submitted_at')),
-      rows(inWin(db.from('course_submissions').select('course_id,user_id,passed,score,created_at'), 'created_at')),
-      rows(inWin(db.from('procedure_submissions').select('procedure_id,user_id,created_at'), 'created_at')),
-      rows(inWin(db.from('documents').select('name,uploaded_by,created_at'), 'created_at')),
-      rows(inWin(db.from('profiles').select('id,full_name,username,email,created_at'), 'created_at')),
-      canSeeVarsling ? rows(inWin(db.from('varslinger').select('id,created_at'), 'created_at')) : Promise.resolve([]),
-    ]);
+    const incs = top(incidents, 'created_at');
+    const resolved = top(incidents.filter(r => r.status === 'resolved'), 'resolved_at');
+    const runsW = top(runs, 'submitted_at');
+    const coursesW = top(courses, 'created_at');
+    const procsW = top(procs, 'created_at');
+    const docsW = top(docs, 'created_at');
+    const membersW = top(members, 'created_at');
+    const varsW = canSeeVarsling ? top(vars, 'created_at') : [];
 
-    // tiny id→title lookups (empty map if a column/table is unavailable)
-    const titleMap = (table) => db.from(table).select('id,title').then(
-      r => new Map((r.data || []).map(x => [x.id, x.title])), () => new Map());
-    const [clTitles, coTitles, prTitles] = await Promise.all([titleMap('checklists'), titleMap('courses'), titleMap('procedures')]);
-
-    const who = (id) => { const p = state.profiles.find(u => u.id === id); return p ? labelOf(p) : '—'; };
+    const who = (id) => whoName(id);
     const reportTitle = { incident: t('actIncidentReported'), hazard: t('actHazardReported'), suggestion: t('actSuggestionSent') };
     const ev = [];
-    const push = (ts, type, ico, title, sub) => { if (ts) ev.push({ ts: +new Date(ts), type, ico, title, sub }); };
+    // `cat` places each event under one of the five bar types (or null = only shown when
+    // the feed isn't drilled) so a bar click can filter the feed.
+    const push = (ts, type, ico, title, sub, id, cat = null) => { if (ts) ev.push({ ts: +new Date(ts), type, ico, title, sub, id, cat }); };
 
-    incs.forEach(r => push(r.created_at, r.report_type || 'incident', '📣', reportTitle[r.report_type || 'incident'] || reportTitle.incident, r.is_anonymous ? 'Anonymous' : who(r.reporter_id)));
-    resolved.forEach(r => push(r.resolved_at, 'resolved', '✅', t('actReportResolved'), `${typeLabel(r.report_type)}${r.assigned_to ? ' · ' + who(r.assigned_to) : ''}`));
-    runs.forEach(r => push(r.submitted_at, 'checklist', '☑️', t('actChecklistDone'), `${clTitles.get(r.checklist_id) || t('checklist')} · ${who(r.user_id)}`));
-    courses.forEach(r => push(r.created_at, r.passed ? 'course-passed' : 'course-attempt', r.passed ? '🎓' : '📚', r.passed ? t('actCoursePassed') : t('actCourseAttempt'), `${coTitles.get(r.course_id) || t('course')} · ${who(r.user_id)}${r.passed ? '' : ' · ' + num0(r.score) + '%'}`));
-    procs.forEach(r => push(r.created_at, 'procedure', '📋', t('actProcedureFiled'), `${prTitles.get(r.procedure_id) || t('procedure')} · ${who(r.user_id)}`));
-    docs.forEach(r => push(r.created_at, 'document', '📄', t('actDocumentAdded'), `${r.name || ''}${r.uploaded_by ? ' · ' + who(r.uploaded_by) : ''}`.trim()));
-    members.forEach(r => push(r.created_at, 'member', '👤', t('actMemberJoined'), labelOf(r)));
-    vars.forEach(r => push(r.created_at, 'varsling', '🔒', t('actVarslingFiled'), t('confidential')));
+    incs.forEach(r => push(r.created_at, r.report_type || 'incident', '📣', reportTitle[r.report_type || 'incident'] || reportTitle.incident, r.is_anonymous ? 'Anonymous' : who(r.reporter_id), r.id, r.report_type || 'incident'));
+    resolved.forEach(r => push(r.resolved_at, 'resolved', '✅', t('actReportResolved'), `${typeLabel(r.report_type)}${r.assigned_to ? ' · ' + who(r.assigned_to) : ''}`, r.id, r.report_type || 'incident'));
+    runsW.forEach(r => push(r.submitted_at, 'checklist', '☑️', t('actChecklistDone'), `${clTitles.get(r.checklist_id) || t('checklist')} · ${who(r.user_id)}`, null, 'checklist'));
+    coursesW.forEach(r => push(r.created_at, r.passed ? 'course-passed' : 'course-attempt', r.passed ? '🎓' : '📚', r.passed ? t('actCoursePassed') : t('actCourseAttempt'), `${coTitles.get(r.course_id) || t('course')} · ${who(r.user_id)}${r.passed ? '' : ' · ' + num0(r.score) + '%'}`));
+    procsW.forEach(r => push(r.created_at, 'procedure', '📋', t('actProcedureFiled'), `${prTitles.get(r.procedure_id) || t('procedure')} · ${who(r.user_id)}`, null, 'procedure'));
+    docsW.forEach(r => push(r.created_at, 'document', '📄', t('actDocumentAdded'), `${r.name || ''}${r.uploaded_by ? ' · ' + who(r.uploaded_by) : ''}`.trim()));
+    membersW.forEach(r => push(r.created_at, 'member', '👤', t('actMemberJoined'), labelOf(r)));
+    varsW.forEach(r => push(r.created_at, 'varsling', '🔒', t('actVarslingFiled'), t('confidential'), r.id));
 
-    ev.sort((a, b) => b.ts - a.ts);
+    const shown = (activitySet.size === 0 ? ev : ev.filter(e => activitySet.has(e.cat))).sort((a, b) => b.ts - a.ts);
 
     host.append(el('div', { class: 'kpi-section-h' }, t('latestActivity')));
-    if (!ev.length) {
+    if (!shown.length) {
       host.append(el('div', { class: 'kpi-card' }, el('p', { class: 'miss-sub' }, t('noActivityYet'))));
       return;
     }
     const feed = el('div', { class: 'act-feed' });
-    ev.slice(0, 18).forEach(e => feed.append(el('div', { class: `act-row act-${e.type}` }, [
+    shown.slice(0, 18).forEach(e => feed.append(activityRow(e)));
+    host.append(feed);
+  }
+  const num0 = (x) => Number(x || 0);
+  const whoName = (id) => { const p = state.profiles.find(u => u.id === id); return p ? labelOf(p) : '—'; };
+
+  // Latest-activity rows for reports/varslinger jump straight to that report's
+  // detail view, wherever it currently lives (active Reports section or archived
+  // Logs) — incidentView/varslingDetailView fetch by id regardless of archive state.
+  function activityRowTarget(e) {
+    if (!e.id) return null;
+    if (e.type === 'varsling') return () => go(varslingDetailView(e.id));
+    if (e.type === 'resolved' || ['incident', 'hazard', 'suggestion'].includes(e.type)) return () => go(incidentView(e.id));
+    return null;
+  }
+  function activityRow(e) {
+    const onclick = activityRowTarget(e);
+    return el('div', { class: `act-row act-${e.type}` + (onclick ? ' act-clickable' : ''), onclick }, [
       el('span', { class: 'act-ico' }, e.ico),
       el('div', { class: 'act-main' }, [
         el('div', { class: 'act-title' }, e.title),
         el('div', { class: 'act-sub' }, e.sub),
       ]),
       el('span', { class: 'time-pill' }, fmt(new Date(e.ts).toISOString())),
-    ])));
-    host.append(feed);
+    ]);
   }
-  const num0 = (x) => Number(x || 0);
-  const whoName = (id) => { const p = state.profiles.find(u => u.id === id); return p ? labelOf(p) : '—'; };
 
   // Render a pre-built, scoped event list as the shared "Latest activity" feed.
   // (Overview builds its own multi-surface feed in renderActivityFeed; the other
@@ -1258,14 +1394,7 @@
       return;
     }
     const feed = el('div', { class: 'act-feed' });
-    ev.slice(0, 18).forEach(e => feed.append(el('div', { class: `act-row act-${e.type}` }, [
-      el('span', { class: 'act-ico' }, e.ico),
-      el('div', { class: 'act-main' }, [
-        el('div', { class: 'act-title' }, e.title),
-        el('div', { class: 'act-sub' }, e.sub),
-      ]),
-      el('span', { class: 'time-pill' }, fmt(new Date(e.ts).toISOString())),
-    ])));
+    ev.slice(0, 18).forEach(e => feed.append(activityRow(e)));
     host.append(feed);
   }
 
@@ -1289,34 +1418,239 @@
     ]);
   }
 
+  // Shared "breakdown bar" for consequence/root-cause severity strips — renders a
+  // proportional bar + legend from already-fetched incident rows, and makes each
+  // segment jump to the Reports list pre-filtered to that value (Executive Analytics
+  // consequence/root-cause click-through).
+  function renderBreakdownBar(host, rows, cats, idsField, palette, labelKey, filterKind, options = {}) {
+    const { activeIds = new Set(), onSelect = null } = options;
+    const counts = (cats || []).map(c => ({
+      id: c.id, name: c.name, color: palette[c.name] || '#888780',
+      n: rows.filter(r => (r[idsField] || []).includes(c.id)).length,
+    })).filter(c => c.n > 0).sort((a, b) => b.n - a.n);
+    const total = counts.reduce((a, c) => a + c.n, 0);
+    if (!total) {
+      host.append(el('div', { class: 'kpi-card', style: 'margin-top:14px' }, [
+        el('div', { class: 'kpi-label', style: 'margin-bottom:10px' }, t(labelKey)),
+        el('p', { class: 'muted', style: 'margin:0' }, t('noReports')),
+      ]));
+      return;
+    }
+    const nameKey = filterKind === 'consequenceId' ? 'consequenceName' : 'rootCauseName';
+    const goFiltered = (c) => {
+      const g = firstGroup('reports');
+      if (!g) return toast(t('noIncidentsHint'), 'err');
+      go(reportsGroupView(g, { [filterKind]: c.id, [nameKey]: c.name }));
+    };
+    const choose = (c) => onSelect ? onSelect(c) : goFiltered(c);
+    const bar = el('div', { class: 'sev-bar' }, counts.map(c =>
+      el('div', { class: 'sev-segment' + (activeIds.has(c.id) ? ' sev-active' : ''), style: `width:${c.n / total * 100}%;background:${c.color}`, title: `${c.name}: ${c.n}`, onclick: () => choose(c) })));
+    const legend = el('div', { class: 'sev-legend' }, counts.map(c =>
+      el('span', { class: activeIds.has(c.id) ? 'sev-active' : '', onclick: () => choose(c) }, [el('i', { style: `background:${c.color}` }), `${c.name} ${c.n}`])));
+    host.append(el('div', { class: 'kpi-card', style: 'margin-top:14px' }, [
+      el('div', { class: 'kpi-label', style: 'margin-bottom:10px' }, t(labelKey)), bar, legend,
+    ]));
+  }
+  const REPORT_TYPE_PALETTE = { incident: '#D85A30', hazard: '#BA7517', suggestion: '#1D9E75' };
+  function renderTypeBreakdownBar(host, rows, options = {}) {
+    const { activeIds = new Set(), onSelect = null } = options;
+    const counts = [
+      ['incident', t('reportTypeIncidents')],
+      ['hazard', t('reportTypeHazards')],
+      ['suggestion', t('reportTypeSuggestions')],
+    ].map(([id, name]) => ({
+      id, name, color: REPORT_TYPE_PALETTE[id],
+      n: rows.filter(r => (r.report_type || 'incident') === id).length,
+    })).filter(c => c.n > 0);
+    const total = counts.reduce((a, c) => a + c.n, 0);
+    if (!total) {
+      host.append(el('div', { class: 'kpi-card', style: 'margin-top:14px' }, [
+        el('div', { class: 'kpi-label', style: 'margin-bottom:10px' }, t('reportsByType')),
+        el('p', { class: 'muted', style: 'margin:0' }, t('noReports')),
+      ]));
+      return;
+    }
+    const goFiltered = (c) => {
+      const g = firstGroup('reports');
+      if (!g) return toast(t('noIncidentsHint'), 'err');
+      go(reportsGroupView(g, { reportType: c.id, reportTypeName: c.name }));
+    };
+    const choose = (c) => onSelect ? onSelect(c) : goFiltered(c);
+    const bar = el('div', { class: 'sev-bar' }, counts.map(c =>
+      el('div', { class: 'sev-segment' + (activeIds.has(c.id) ? ' sev-active' : ''), style: `width:${c.n / total * 100}%;background:${c.color}`, title: `${c.name}: ${c.n}`, onclick: () => choose(c) })));
+    const legend = el('div', { class: 'sev-legend' }, counts.map(c =>
+      el('span', { class: activeIds.has(c.id) ? 'sev-active' : '', onclick: () => choose(c) }, [el('i', { style: `background:${c.color}` }), `${c.name} ${c.n}`])));
+    host.append(el('div', { class: 'kpi-card', style: 'margin-top:14px' }, [
+      el('div', { class: 'kpi-label', style: 'margin-bottom:10px' }, t('reportsByType')), bar, legend,
+    ]));
+  }
+  const CONSEQUENCE_PALETTE = { 'Operational disruption': '#888780', 'Financial loss': '#BA7517',
+    'Environmental impact': '#1D9E75', 'Injury or sick leave': '#D85A30', 'Death': '#A32D2D' };
+  const ROOT_CAUSE_PALETTE = { 'Faulty procedures': '#6C5CE7', 'Human error': '#E17055',
+    'Equipment failure': '#0984E3', 'Lack of training': '#00B894' };
+
+  // Overview "Reports by type" spans five surfaces (reports + checklists + procedures), so
+  // it needs its own palette and a renderer fed pre-computed counts (unlike renderTypeBreakdownBar
+  // which counts report_type from incident rows). Clicking a segment drills the feed below.
+  const OVERVIEW_TYPE_PALETTE = { incident: '#D85A30', hazard: '#BA7517', suggestion: '#1D9E75', checklist: '#0984E3', procedure: '#6C5CE7' };
+  function renderOverviewTypeBar(host, counts, { activeIds = new Set(), onSelect }) {
+    const items = counts.filter(c => c.n > 0);
+    const total = items.reduce((a, c) => a + c.n, 0);
+    if (!total) {
+      host.append(el('div', { class: 'kpi-card', style: 'margin-top:14px' }, [
+        el('div', { class: 'kpi-label', style: 'margin-bottom:10px' }, t('reportsByType')),
+        el('p', { class: 'muted', style: 'margin:0' }, t('noReports')),
+      ]));
+      return;
+    }
+    const bar = el('div', { class: 'sev-bar' }, items.map(c =>
+      el('div', { class: 'sev-segment' + (activeIds.has(c.id) ? ' sev-active' : ''), style: `width:${c.n / total * 100}%;background:${c.color}`, title: `${c.name}: ${c.n}`, onclick: () => onSelect(c) })));
+    const legend = el('div', { class: 'sev-legend' }, items.map(c =>
+      el('span', { class: activeIds.has(c.id) ? 'sev-active' : '', onclick: () => onSelect(c) }, [el('i', { style: `background:${c.color}` }), `${c.name} ${c.n}`])));
+    host.append(el('div', { class: 'kpi-card', style: 'margin-top:14px' }, [
+      el('div', { class: 'kpi-label', style: 'margin-bottom:10px' }, t('reportsByType')), bar, legend,
+    ]));
+  }
+
   // ── INCIDENTS ───────────────────────────────────────────────
-  async function renderIncidentsKpi(host, period, cur, prev, status = 'all') {
-    // When a status quick-filter is active, scope every incident query to it.
-    const withStatus = (q) => status === 'all' ? q : q.eq('status', status);
-    const { data: cats } = await db.from('incident_categories').select('id,name').eq('kind', 'consequence');
+  // Renders the Incidents KPI block synchronously from an already-fetched, in-memory
+  // dataset (`data` = { all, cats, rootCauseCats, live } from ensureIncidents), so every
+  // filter change recomputes the cards, bars and activity feed with zero network.
+  function renderIncidentsKpi(host, { cur, prev, statusSet = new Set(), rootCauseSet = new Set(), reportTypeSet = new Set(), consequenceSet = new Set(), data, refresh = () => {} }) {
+    const reportTypeKey = 'adminKpiIncidentReportType';
+    const consequenceKey = 'adminKpiIncidentConsequence';
+    const rootCauseKey = 'adminKpiRootCause';
+    const { all = [], cats = [], rootCauseCats = [], live } = data || {};
+
+    // Validate sets against existing options
+    const validStatuses = new Set(['open', 'in_progress', 'resolved']);
+    for (const x of statusSet) {
+      if (!validStatuses.has(x)) statusSet.delete(x);
+    }
+    const validReportTypes = new Set(['incident', 'hazard', 'suggestion']);
+    for (const x of reportTypeSet) {
+      if (!validReportTypes.has(x)) reportTypeSet.delete(x);
+    }
+    for (const x of consequenceSet) {
+      if (!cats.some(c => c.id === x)) consequenceSet.delete(x);
+    }
+    for (const x of rootCauseSet) {
+      if (!rootCauseCats.some(c => c.id === x)) rootCauseSet.delete(x);
+    }
+
     const seriousNames = ['Death', 'Injury or sick leave', 'Environmental impact'];
-    const seriousIds = (cats || []).filter(c => seriousNames.includes(c.name)).map(c => c.id);
+    const seriousIds = cats.filter(c => seriousNames.includes(c.name)).map(c => c.id);
 
-    const { data: rows = [] } = await withStatus(db.from('incidents')
-      .select('id,consequence_ids,is_anonymous').gte('created_at', cur.start).lt('created_at', cur.end));
-    const { data: prevRows = [] } = await withStatus(db.from('incidents')
-      .select('id,consequence_ids,is_anonymous').gte('created_at', prev.start).lt('created_at', prev.end));
+    // Window bounds as epoch ms — robust against timestamptz formatting (+00:00 vs Z).
+    const curS = +new Date(cur.start), curE = +new Date(cur.end);
+    const prevS = +new Date(prev.start), prevE = +new Date(prev.end);
+    const inWin = (ts, s, e) => { if (!ts) return false; const t = +new Date(ts); return t >= s && t < e; };
 
+    // Client-side equivalent of the old server-side scope() (status + report type +
+    // jsonb-array consequence/root-cause membership).
+    const matches = (r) =>
+      (statusSet.size === 0 || statusSet.has(r.status)) &&
+      (reportTypeSet.size === 0 || reportTypeSet.has(r.report_type || 'incident')) &&
+      (consequenceSet.size === 0 || (r.consequence_ids || []).some(id => consequenceSet.has(id))) &&
+      (rootCauseSet.size === 0 || (r.root_cause_ids || []).some(id => rootCauseSet.has(id)));
+
+    const matchesExcludingType = (r) =>
+      (statusSet.size === 0 || statusSet.has(r.status)) &&
+      (consequenceSet.size === 0 || (r.consequence_ids || []).some(id => consequenceSet.has(id))) &&
+      (rootCauseSet.size === 0 || (r.root_cause_ids || []).some(id => rootCauseSet.has(id)));
+
+    const matchesExcludingConsequence = (r) =>
+      (statusSet.size === 0 || statusSet.has(r.status)) &&
+      (reportTypeSet.size === 0 || reportTypeSet.has(r.report_type || 'incident')) &&
+      (rootCauseSet.size === 0 || (r.root_cause_ids || []).some(id => rootCauseSet.has(id)));
+
+    const matchesExcludingRootCause = (r) =>
+      (statusSet.size === 0 || statusSet.has(r.status)) &&
+      (reportTypeSet.size === 0 || reportTypeSet.has(r.report_type || 'incident')) &&
+      (consequenceSet.size === 0 || (r.consequence_ids || []).some(id => consequenceSet.has(id)));
+
+    const filtered = all.filter(matches);
+    const rows = filtered.filter(r => inWin(r.created_at, curS, curE));
+    const typeRows = all.filter(matchesExcludingType).filter(r => inWin(r.created_at, curS, curE));
+    const consequenceRows = all.filter(matchesExcludingConsequence).filter(r => inWin(r.created_at, curS, curE));
+    const rootCauseRows = all.filter(matchesExcludingRootCause).filter(r => inWin(r.created_at, curS, curE));
+
+    const prevRows = filtered.filter(r => inWin(r.created_at, prevS, prevE));
     const inSet = (ids, set) => (ids || []).some(id => set.includes(id));
     const repCur = rows.length, repPrev = prevRows.length;
     const serCur = rows.filter(r => inSet(r.consequence_ids, seriousIds)).length;
     const serPrev = prevRows.filter(r => inSet(r.consequence_ids, seriousIds)).length;
     const anonCur = repCur ? Math.round(rows.filter(r => r.is_anonymous).length / repCur * 100) : 0;
-    const anonPrev = repPrev ? Math.round(prevRows.filter(r => r.is_anonymous).length / repPrev * 100) : 0;
-
-    const [resCur, resPrev] = await Promise.all([
-      countRows(withStatus(db.from('incidents').select('id', { count: 'exact', head: true }).eq('status', 'resolved').gte('resolved_at', cur.start).lt('resolved_at', cur.end))),
-      countRows(withStatus(db.from('incidents').select('id', { count: 'exact', head: true }).eq('status', 'resolved').gte('resolved_at', prev.start).lt('resolved_at', prev.end))),
-    ]);
+    const anonPrev = repPrev ? Math.round(prevRows.filter(r => r.is_anonymous).length / prevRows.length * 100) : 0;
+    const resolvedCur = filtered.filter(r => r.status === 'resolved' && inWin(r.resolved_at, curS, curE));
+    const resCur = resolvedCur.length;
+    const resPrev = filtered.filter(r => r.status === 'resolved' && inWin(r.resolved_at, prevS, prevE)).length;
 
     // ── Right now (live, point-in-time workload) ──
     host.append(el('div', { class: 'kpi-section-h' }, t('rightNow')));
-    host.append(liveStateCards(await liveIncidentState()));
+    const resetDrill = () => {
+      [reportTypeKey, consequenceKey, rootCauseKey].forEach(removeStorageValue);
+      refresh();
+    };
+    const reportTypeLabel = (id) => ({
+      incident: t('reportTypeIncidents'),
+      hazard: t('reportTypeHazards'),
+      suggestion: t('reportTypeSuggestions'),
+    }[id] || id);
+
+    // Save helper functions
+    const saveReportTypes = (set) => { set.size ? setStorageValue(reportTypeKey, [...set].join(',')) : removeStorageValue(reportTypeKey); refresh(); };
+    const saveConsequences = (set) => { set.size ? setStorageValue(consequenceKey, [...set].join(',')) : removeStorageValue(consequenceKey); refresh(); };
+    const saveRootCauses = (set) => { set.size ? setStorageValue(rootCauseKey, [...set].join(',')) : removeStorageValue(rootCauseKey); refresh(); };
+
+    // Build active chips for multi-select
+    const activeChips = [];
+    for (const id of reportTypeSet) {
+      activeChips.push({
+        label: reportTypeLabel(id),
+        onclick: () => {
+          const next = new Set(reportTypeSet);
+          next.delete(id);
+          saveReportTypes(next);
+        }
+      });
+    }
+    for (const id of consequenceSet) {
+      const name = cats.find(c => c.id === id)?.name;
+      if (name) {
+        activeChips.push({
+          label: name,
+          onclick: () => {
+            const next = new Set(consequenceSet);
+            next.delete(id);
+            saveConsequences(next);
+          }
+        });
+      }
+    }
+    for (const id of rootCauseSet) {
+      const name = rootCauseCats.find(c => c.id === id)?.name;
+      if (name) {
+        activeChips.push({
+          label: name,
+          onclick: () => {
+            const next = new Set(rootCauseSet);
+            next.delete(id);
+            saveRootCauses(next);
+          }
+        });
+      }
+    }
+
+    if (activeChips.length) {
+      host.append(el('div', { class: 'kpi-drillbar' }, [
+        el('span', { class: 'kpi-drill-label' }, `${t('filteredBy')}:`),
+        ...activeChips.map(c => el('button', { class: 'kpi-drill-chip', onclick: c.onclick }, `x ${c.label}`)),
+        activeChips.length > 1 ? el('button', { class: 'btn btn-ghost btn-sm', onclick: resetDrill }, t('clearFilter')) : null,
+      ]));
+    }
+
+    host.append(liveStateCards(live || { backlog: 0, unassigned: 0, oldestDays: 0 }));
 
     // ── In this period (vs the previous equal-length window) ──
     host.append(el('div', { class: 'kpi-section-h' }, t('inThisPeriod')));
@@ -1327,34 +1661,32 @@
       metricCard({ label: t('anonymous'), value: anonCur + '%', delta: pctChange(anonCur, anonPrev), good: null }),
     ]));
 
-    // severity strip
-    const palette = { 'Operational disruption': '#888780', 'Financial loss': '#BA7517',
-      'Environmental impact': '#1D9E75', 'Injury or sick leave': '#D85A30', 'Death': '#A32D2D' };
-    const counts = (cats || []).map(c => ({
-      name: c.name, color: palette[c.name] || '#888780',
-      n: rows.filter(r => (r.consequence_ids || []).includes(c.id)).length,
-    })).filter(c => c.n > 0).sort((a, b) => b.n - a.n);
-    const total = counts.reduce((a, c) => a + c.n, 0) || 1;
-    const bar = el('div', { class: 'sev-bar' }, counts.map(c =>
-      el('div', { style: `width:${c.n / total * 100}%;background:${c.color}`, title: `${c.name}: ${c.n}` })));
-    const legend = el('div', { class: 'sev-legend' }, counts.map(c =>
-      el('span', {}, [el('i', { style: `background:${c.color}` }), `${c.name} ${c.n}`])));
-    host.append(el('div', { class: 'kpi-card', style: 'margin-top:14px' }, [
-      el('div', { class: 'kpi-label', style: 'margin-bottom:10px' }, t('reportsByWorstConsequence')), bar, legend,
-    ]));
+    renderTypeBreakdownBar(host, typeRows, { activeIds: reportTypeSet, onSelect: c => {
+      const next = new Set(reportTypeSet);
+      if (next.has(c.id)) next.delete(c.id);
+      else next.add(c.id);
+      saveReportTypes(next);
+    }});
+    renderBreakdownBar(host, consequenceRows, cats, 'consequence_ids', CONSEQUENCE_PALETTE, 'reportsByWorstConsequence', 'consequenceId', { activeIds: consequenceSet, onSelect: c => {
+      const next = new Set(consequenceSet);
+      if (next.has(c.id)) next.delete(c.id);
+      else next.add(c.id);
+      saveConsequences(next);
+    }});
+    renderBreakdownBar(host, rootCauseRows, rootCauseCats, 'root_cause_ids', ROOT_CAUSE_PALETTE, 'reportsByRootCause', 'rootCauseId', { activeIds: rootCauseSet, onSelect: c => {
+      const next = new Set(rootCauseSet);
+      if (next.has(c.id)) next.delete(c.id);
+      else next.add(c.id);
+      saveRootCauses(next);
+    }});
 
-    // ── Latest activity — incidents filed + resolved in this window ──
-    const feedRows = (q) => q.then(r => r.data || [], () => []);
-    const [incsReported, incsResolved] = await Promise.all([
-      feedRows(withStatus(db.from('incidents').select('report_type,is_anonymous,reporter_id,created_at'))
-        .gte('created_at', cur.start).lt('created_at', cur.end).order('created_at', { ascending: false }).limit(14)),
-      feedRows(withStatus(db.from('incidents').select('report_type,assigned_to,resolved_at').eq('status', 'resolved'))
-        .gte('resolved_at', cur.start).lt('resolved_at', cur.end).order('resolved_at', { ascending: false }).limit(14)),
-    ]);
+    // ── Latest activity — incidents filed + resolved in this window (from the dataset) ──
+    const incsReported = rows.slice().sort((a, b) => +new Date(b.created_at) - +new Date(a.created_at)).slice(0, 14);
+    const incsResolved = resolvedCur.slice().sort((a, b) => +new Date(b.resolved_at) - +new Date(a.resolved_at)).slice(0, 14);
     const reportTitle = { incident: t('actIncidentReported'), hazard: t('actHazardReported'), suggestion: t('actSuggestionSent') };
     const ev = [];
-    incsReported.forEach(r => r.created_at && ev.push({ ts: +new Date(r.created_at), type: r.report_type || 'incident', ico: '📣', title: reportTitle[r.report_type || 'incident'] || reportTitle.incident, sub: r.is_anonymous ? t('anonymous') : whoName(r.reporter_id) }));
-    incsResolved.forEach(r => r.resolved_at && ev.push({ ts: +new Date(r.resolved_at), type: 'resolved', ico: '✅', title: t('actReportResolved'), sub: `${typeLabel(r.report_type)}${r.assigned_to ? ' · ' + whoName(r.assigned_to) : ''}` }));
+    incsReported.forEach(r => r.created_at && ev.push({ ts: +new Date(r.created_at), type: r.report_type || 'incident', ico: '📣', title: reportTitle[r.report_type || 'incident'] || reportTitle.incident, sub: r.is_anonymous ? t('anonymous') : whoName(r.reporter_id), id: r.id }));
+    incsResolved.forEach(r => r.resolved_at && ev.push({ ts: +new Date(r.resolved_at), type: 'resolved', ico: '✅', title: t('actReportResolved'), sub: `${typeLabel(r.report_type)}${r.assigned_to ? ' · ' + whoName(r.assigned_to) : ''}`, id: r.id }));
     renderEventFeed(host, ev);
   }
 
@@ -1613,14 +1945,14 @@
 
     // ── Latest activity — most recent resolutions by admins ──
     const feedRows = (q) => q.then(r => r.data || [], () => []);
-    let rq = db.from('incidents').select('report_type,assigned_to,resolved_at')
+    let rq = db.from('incidents').select('id,report_type,assigned_to,resolved_at')
       .eq('status', 'resolved').not('resolved_at', 'is', null).not('assigned_to', 'is', null)
       .order('resolved_at', { ascending: false }).limit(18);
     if (adminId !== 'all') rq = rq.eq('assigned_to', adminId);
     const resolvedRows = await feedRows(rq);
     const ev = resolvedRows.map(r => ({
       ts: +new Date(r.resolved_at), type: 'resolved', ico: '✅',
-      title: t('actReportResolved'), sub: `${typeLabel(r.report_type)} · ${whoName(r.assigned_to)}`,
+      title: t('actReportResolved'), sub: `${typeLabel(r.report_type)} · ${whoName(r.assigned_to)}`, id: r.id,
     }));
     renderEventFeed(host, ev);
   }
@@ -2483,7 +2815,7 @@
       wrap.append(
         el('div', { class: 'logo-picker-top' }, [
           preview,
-          el('div', { class: 'logo-picker-controls' }, [labeled(t('uploadImage'), file), clearBtn].filter(Boolean)),
+          el('div', { class: 'logo-picker-controls' }, [labeled(t('uploadImage'), fileButton(file)), clearBtn].filter(Boolean)),
         ]),
         el('div', { class: 'sub', style: 'margin:4px 0' }, t('orChooseLogo')),
         presets,
@@ -2632,7 +2964,7 @@
               ]),
               labeled(t('label'), inp),
               labeled(t('type'), typeSel),
-              labeled(t('itemImage'), imageInput),
+              labeled(t('itemImage'), fileButton(imageInput)),
             ]);
             if (it.image) {
               card.append(el('div', { class: 'checklist-image-preview' }, [
@@ -2819,11 +3151,15 @@
     } else {
       card.append(labeled(it.label, el('textarea', {})));
     }
-    card.append(labeled(t('photosOptional'), el('input', { type: 'file', accept: 'image/*' })));
+    card.append(labeled(t('photosOptional'), fileButton(el('input', { type: 'file', accept: 'image/*' }))));
     return card;
   }
 
-  function reportsGroupView(g) {
+  // opts (optional): { reportType, reportTypeName, consequenceId, consequenceName, rootCauseId, rootCauseName } —
+  // arriving from a clicked Executive Analytics bar segment; pre-filters the list to
+  // reports carrying that type/consequence/root-cause and shows a clearable "Filtered by" chip.
+  function reportsGroupView(g, opts = {}) {
+    const hasPreset = !!(opts.reportType || opts.consequenceId || opts.rootCauseId);
     return {
       title: groupName(g), tab: 'groups',
       action: isSuperPlus(state.profile) ? el('button', { class: 'iconbtn', title: t('editReportForms'), onclick: () => go(categoriesView()) }, '☰') : null,
@@ -2840,17 +3176,31 @@
           ? await countRows(db.from('varslinger').select('id', { count: 'exact', head: true }).eq('status', 'open'))
           : null;
 
-        const filters = { status: 'all', type: 'incident', assignee: 'all', reporter: 'all' };
+        const filters = { status: 'all', type: opts.reportType || (hasPreset ? 'all' : 'incident'), assignee: 'all', reporter: 'all' };
         let currentRows = data.slice();
+
+        if (hasPreset) {
+          const label = opts.reportTypeName || opts.consequenceName || opts.rootCauseName;
+          app.append(el('div', { class: 'kpi-card', style: 'margin-bottom:12px;display:flex;align-items:center;gap:10px;flex-wrap:wrap' }, [
+            el('span', {}, `${t('filteredBy')}: ${label}`),
+            el('button', { class: 'btn btn-ghost', onclick: () => go(reportsGroupView(g), { reset: true }) }, `✕ ${t('clearFilter')}`),
+          ]));
+        }
 
         const typeChips = {};
         const typeBar = el('div', { style: 'display:flex;gap:8px;flex-wrap:wrap;align-items:center' });
         [
+          ['all', t('all')],
           ['incident', t('reportTypeIncidents')],
           ['hazard', t('reportTypeHazards')],
           ['suggestion', t('reportTypeSuggestions')],
         ].forEach(([key, label]) => {
           const chip = el('button', { class: `chip report-type-chip report-type-chip-${key}`, onclick: () => {
+            if (opts.reportType && key !== opts.reportType) {
+              if (key === 'all') go(reportsGroupView(g), { reset: true });
+              else go(reportsGroupView(g, { reportType: key, reportTypeName: label }), { reset: true });
+              return;
+            }
             filters.type = key; markActive(typeChips, key); apply();
           } }, [label, openByType[key] ? el('span', { class: 'report-type-count' }, String(openByType[key])) : null]);
           typeChips[key] = chip;
@@ -2909,7 +3259,7 @@
         app.append(listHost);
 
         const matchesStatus = (i) => filters.status === 'all' || i.status === filters.status;
-        const matchesType = (i) => (i.report_type || 'incident') === filters.type;
+        const matchesType = (i) => filters.type === 'all' || (i.report_type || 'incident') === filters.type;
         const matchesAssignee = (i) =>
           filters.assignee === 'all' ? true
             : filters.assignee === 'unassigned' ? !i.assigned_to
@@ -2918,6 +3268,11 @@
           filters.reporter === 'all' ? true
             : filters.reporter === 'anon' ? !!i.is_anonymous
               : (!i.is_anonymous && i.reporter_id === filters.reporter);
+        const matchesPreset = (i) =>
+          opts.reportType ? (i.report_type || 'incident') === opts.reportType
+            : opts.consequenceId ? (i.consequence_ids || []).includes(opts.consequenceId)
+            : opts.rootCauseId ? (i.root_cause_ids || []).includes(opts.rootCauseId)
+              : true;
 
         function markActive(group, active) {
           for (const [key, chip] of Object.entries(group)) chip.classList.toggle('on', key === active);
@@ -2925,7 +3280,7 @@
 
         function apply() {
           currentRows = data.filter(i =>
-            matchesStatus(i) && matchesType(i) && matchesAssignee(i) && matchesReporter(i));
+            matchesStatus(i) && matchesType(i) && matchesAssignee(i) && matchesReporter(i) && matchesPreset(i));
           listHost.innerHTML = '';
           if (!currentRows.length) { listHost.append(el('p', { class: 'muted' }, data.length ? 'Nothing matches these filters.' : t('noIncidentsHint'))); return; }
           for (const i of currentRows) {
@@ -2939,7 +3294,7 @@
           }
         }
 
-        markActive(typeChips, 'incident');
+        markActive(typeChips, filters.type);
         markActive(statusChips, 'all');
         apply();
       },
@@ -3458,6 +3813,7 @@
         el('p', { class: 'muted', style: 'margin:0 0 12px' }, t('varslingDesc')),
         labeled(t('varslingTitle'), el('input', { type: 'text', placeholder: t('varslingTitle') }), true),
         labeled(t('varslingDetails'), el('textarea', { placeholder: t('varslingDetails') })),
+        labeled(t('locationOptional'), el('input', { type: 'text', placeholder: t('locationOptional') })),
         el('label', { class: 'check-item' }, [el('input', { type: 'checkbox' }), el('span', {}, t('submitAnonymously'))]),
       );
       return;
@@ -3465,7 +3821,7 @@
     if (type === 'suggestion') {
       host.append(
         labeled(t('suggestionText'), el('textarea', { placeholder: t('suggestionText'), style: 'min-height:180px' }), true),
-        labeled(t('photosOptional'), el('input', { type: 'file', accept: 'image/*', multiple: 'multiple' })),
+        labeled(t('photosOptional'), fileButton(el('input', { type: 'file', accept: 'image/*', multiple: 'multiple' }))),
         el('label', { class: 'check-item' }, [el('input', { type: 'checkbox' }), el('span', {}, t('reportAnonymously'))]),
       );
       return;
@@ -3480,7 +3836,7 @@
       ]),
       type === 'incident' ? previewCategoryBlock(t('rootCause')) : null,
       previewCategoryBlock(type === 'hazard' ? t('hazardConsequences') : t('consequence')),
-      labeled(t('photosOptional'), el('input', { type: 'file', accept: 'image/*', multiple: 'multiple' })),
+      labeled(t('photosOptional'), fileButton(el('input', { type: 'file', accept: 'image/*', multiple: 'multiple' }))),
       el('label', { class: 'check-item' }, [el('input', { type: 'checkbox' }), el('span', {}, t('reportAnonymously'))]),
     ].filter(Boolean);
     host.append(...core);
@@ -3713,7 +4069,7 @@
         const listHost = el('div', { class: 'library-grid' });
         app.append(el('div', { class: 'card' }, [
           el('h3', {}, t('uploadDocument')),
-          file,
+          fileButton(file),
           visibility.field,
           el('button', { class: 'btn btn-primary', style: 'margin-top:12px', onclick: upload }, t('upload')),
         ]), listHost);
@@ -4334,6 +4690,7 @@
           ]),
           el('p', { class: 'muted', style: 'margin:6px 0 0' }, `${who} · ${fmt(r.created_at)}`),
           el('p', { style: 'margin-top:12px;white-space:pre-wrap' }, r.description || ''),
+          r.location ? el('p', { class: 'muted', style: 'margin-top:8px' }, `${t('location')}: ${r.location}`) : null,
         ]));
         const customCard = customFieldsCard(r.custom_fields);
         if (customCard) app.append(customCard);
@@ -5059,19 +5416,14 @@
   }
   function truncate(s, n) { return s && s.length > n ? s.slice(0, n) + '…' : (s || ''); }
 
-  // ── COMMUNICATIONS (admin: compose News / private Messages, see read receipts) ──
+  // ── COMMUNICATIONS (admin: compose News, safety or regular; see read receipts) ──
   // The set of users a communication targets — drives the read-statistic denominator.
   function communicationTargetUsers(comm) {
-    if (comm.kind === 'message') return [...new Set(comm.recipient_ids || [])];
     if (comm.audience === 'all') return state.profiles.map(p => p.id);
     const want = new Set(comm.department_ids || []);
     return state.profiles.filter(p => departmentIdsForUser(p.id).some(d => want.has(d))).map(p => p.id);
   }
   function commAudienceText(comm) {
-    if (comm.kind === 'message') {
-      const names = (comm.recipient_ids || []).map(id => { const p = state.profiles.find(x => x.id === id); return p ? labelOf(p) : null; }).filter(Boolean);
-      return names.length <= 2 ? (names.join(', ') || t('recipients')) : `${names.length} ${t('recipients').toLowerCase()}`;
-    }
     if (comm.audience === 'all') return t('audienceEveryone');
     const names = (comm.department_ids || []).map(id => (state.departments.find(d => d.id === id) || {}).name).filter(Boolean);
     return names.join(', ') || t('sentToDepartments');
@@ -5086,11 +5438,10 @@
         app.append(el('div', { class: 'card section-head comm-compose-bar' }, [
           el('h3', {}, t('communications')),
           el('div', { class: 'comm-compose-actions' }, [
-            el('button', { class: 'btn btn-primary', onclick: () => go(communicationCompose('news')) }, '＋ ' + t('newNews')),
-            el('button', { class: 'btn', onclick: () => go(communicationCompose('message')) }, '＋ ' + t('newMessage')),
+            el('button', { class: 'btn btn-primary', onclick: () => go(communicationCompose()) }, '＋ ' + t('newNews')),
           ]),
         ]));
-        const res = await db.from('communications').select('*').order('created_at', { ascending: false });
+        const res = await db.from('communications').select('*').eq('kind', 'news').order('created_at', { ascending: false });
         if (res.error) { app.append(emptyState(t('communications'), t('runCommunicationsMigration'))); return; }
         const comms = res.data || [];
         const ids = comms.map(c => c.id);
@@ -5103,10 +5454,10 @@
           readByComm.get(r.communication_id).add(r.user_id);
         });
         const thumbs = await signedUrls('communications', comms.map(c => c.image_path), 600);
-        const news = comms.filter(c => c.kind === 'news');
-        renderCommAdminSection(app, t('news'), news.filter(c => !c.archived_at), readByComm, thumbs);
-        renderCommAdminSection(app, t('messages'), comms.filter(c => c.kind === 'message'), readByComm, thumbs);
-        const archived = news.filter(c => c.archived_at);
+        const active = comms.filter(c => !c.archived_at);
+        renderCommAdminSection(app, t('safetyNews'), active.filter(c => c.is_safety), readByComm, thumbs);
+        renderCommAdminSection(app, t('news'), active.filter(c => !c.is_safety), readByComm, thumbs);
+        const archived = comms.filter(c => c.archived_at);
         if (archived.length) renderCommAdminSection(app, t('archivedNews'), archived, readByComm, thumbs);
       },
     };
@@ -5121,10 +5472,10 @@
       const read = readByComm.get(c.id) || new Set();
       const readCount = target.filter(id => read.has(id)).length;
       const url = thumbs.get(c.image_path);
-      wrap.append(el('div', { class: 'comm-admin-row', onclick: () => go(communicationDetailAdmin(c)) }, [
-        el('div', { class: 'comm-thumb' }, url ? el('img', { src: url, alt: '' }) : el('span', { class: 'comm-thumb-ico' }, c.kind === 'news' ? '📰' : '✉')),
+      wrap.append(el('div', { class: 'comm-admin-row' + (c.is_safety ? ' comm-safety' : ''), onclick: () => go(communicationDetailAdmin(c)) }, [
+        el('div', { class: 'comm-thumb' }, url ? el('img', { src: url, alt: '' }) : el('span', { class: 'comm-thumb-ico' }, c.is_safety ? '🚨' : '📰')),
         el('div', { class: 'comm-main' }, [
-          el('div', { class: 'comm-title' }, c.title || (c.body || '').slice(0, 60) || (c.kind === 'news' ? t('news') : t('messages'))),
+          el('div', { class: 'comm-title' }, c.title || (c.body || '').slice(0, 60) || t('news')),
           el('div', { class: 'comm-sub' }, `${commAudienceText(c)} · ${fmt(c.created_at)}`),
         ]),
         el('span', { class: 'comm-read-pill' }, t('readByCount', { read: readCount, total: target.length })),
@@ -5135,12 +5486,13 @@
 
   function communicationDetailAdmin(comm) {
     return {
-      title: comm.title || (comm.kind === 'news' ? t('news') : t('messages')), tab: 'groups', side: 'communications',
+      title: comm.title || t('news'), tab: 'groups', side: 'communications',
       async render(app) {
         await loadProfiles();
         const media = await signedUrls('communications', [comm.image_path, ...(comm.attachments || []).map(a => a.path)], 600);
-        const card = el('div', { class: 'card comm-detail' });
+        const card = el('div', { class: 'card comm-detail' + (comm.is_safety ? ' comm-safety' : '') });
         if (comm.image_path && media.get(comm.image_path)) card.append(el('img', { src: media.get(comm.image_path), class: 'comm-detail-img', alt: '' }));
+        if (comm.is_safety) card.append(el('span', { class: 'pill comm-safety-pill' }, t('safetyNews')));
         if (comm.title) card.append(el('h2', { class: 'comm-detail-title' }, comm.title));
         if (comm.body) card.append(el('p', { class: 'comm-detail-body' }, comm.body));
         if ((comm.attachments || []).length) {
@@ -5152,17 +5504,15 @@
         app.append(card);
 
         // News can be archived (moved to the Communications log + hidden from workers).
-        if (comm.kind === 'news') {
-          const archived = !!comm.archived_at;
-          const btn = el('button', { class: 'btn ' + (archived ? 'btn-ghost' : 'btn-primary'), onclick: async () => {
-            btn.disabled = true;
-            const { error } = await db.from('communications').update({ archived_at: archived ? null : new Date().toISOString() }).eq('id', comm.id);
-            if (error) { btn.disabled = false; return toast(error.message, 'err'); }
-            toast(archived ? t('newsUnarchived') : t('newsArchived'));
-            go(communicationsView(), { reset: true });
-          } }, archived ? t('unarchive') : t('archive'));
-          app.append(el('div', { class: 'comm-detail-actions' }, btn));
-        }
+        const archived = !!comm.archived_at;
+        const archiveBtn = el('button', { class: 'btn ' + (archived ? 'btn-ghost' : 'btn-primary'), onclick: async () => {
+          archiveBtn.disabled = true;
+          const { error } = await db.from('communications').update({ archived_at: archived ? null : new Date().toISOString() }).eq('id', comm.id);
+          if (error) { archiveBtn.disabled = false; return toast(error.message, 'err'); }
+          toast(archived ? t('newsUnarchived') : t('newsArchived'));
+          go(communicationsView(), { reset: true });
+        } }, archived ? t('unarchive') : t('archive'));
+        app.append(el('div', { class: 'comm-detail-actions' }, archiveBtn));
 
         const target = communicationTargetUsers(comm);
         const { data: readRows = [] } = await db.from('communication_reads').select('user_id,read_at').eq('communication_id', comm.id);
@@ -5185,35 +5535,30 @@
     };
   }
 
-  function communicationCompose(kind) {
-    const isNews = kind === 'news';
+  function communicationCompose() {
     return {
-      title: isNews ? t('newNews') : t('newMessage'), tab: 'groups', side: 'communications',
+      title: t('newNews'), tab: 'groups', side: 'communications',
       async render(app) {
         await loadProfiles(); await loadDepartments(); await loadUserDepartments();
         const title = el('input', { type: 'text', placeholder: t('commTitle') });
         const body = el('textarea', { placeholder: t('commBody') });
         const image = el('input', { type: 'file', accept: 'image/*' });
         const files = el('input', { type: 'file', multiple: 'multiple' });
+        const safetyBox = el('input', { type: 'checkbox' });
 
         const audSel = el('select', { class: 'kpi-filter' }, [opt('all', t('audienceEveryone')), opt('department', t('audienceDepartments'))]);
         const deptBox = el('div', { class: 'comm-pick hidden' });
         state.departments.forEach(d => deptBox.append(el('label', { class: 'check-item' }, [el('input', { type: 'checkbox', value: d.id }), el('span', {}, d.name)])));
         audSel.addEventListener('change', () => deptBox.classList.toggle('hidden', audSel.value !== 'department'));
 
-        const userBox = el('div', { class: 'comm-pick' });
-        state.profiles.filter(p => p.id !== state.profile.id).forEach(p =>
-          userBox.append(el('label', { class: 'check-item' }, [el('input', { type: 'checkbox', value: p.id }), el('span', {}, labelOf(p))])));
-
         const sendBtn = el('button', { class: 'btn btn-primary comm-send', onclick: send }, t('send'));
         app.append(el('div', { class: 'card' }, [
           labeled(t('commTitle'), title),
           labeled(t('commBody'), body),
-          labeled(t('commImage'), image),
-          labeled(t('commAttachments'), files),
-          isNews
-            ? el('div', {}, [labeled(t('broadcastAudience'), audSel), deptBox])
-            : el('div', {}, [el('div', { class: 'muted', style: 'margin:6px 0 4px' }, t('selectRecipients')), userBox]),
+          labeled(t('commImage'), fileButton(image)),
+          labeled(t('commAttachments'), fileButton(files)),
+          el('label', { class: 'check-item' }, [safetyBox, el('span', {}, t('safetyNewsToggle'))]),
+          el('div', {}, [labeled(t('broadcastAudience'), audSel), deptBox]),
           sendBtn,
         ]));
 
@@ -5221,17 +5566,11 @@
           const titleVal = title.value.trim();
           const bodyVal = body.value.trim();
           if (!titleVal && !bodyVal) return toast(t('messageBodyRequired'), 'err');
-          let audience = 'all', departmentIds = [], recipientIds = [];
-          if (isNews) {
-            audience = audSel.value;
-            if (audience === 'department') {
-              departmentIds = [...deptBox.querySelectorAll('input:checked')].map(x => x.value);
-              if (!departmentIds.length) return toast(t('pickAtLeastOneDepartment'), 'err');
-            }
-          } else {
-            audience = 'users';
-            recipientIds = [...userBox.querySelectorAll('input:checked')].map(x => x.value);
-            if (!recipientIds.length) return toast(t('pickAtLeastOneRecipient'), 'err');
+          const audience = audSel.value;
+          let departmentIds = [];
+          if (audience === 'department') {
+            departmentIds = [...deptBox.querySelectorAll('input:checked')].map(x => x.value);
+            if (!departmentIds.length) return toast(t('pickAtLeastOneDepartment'), 'err');
           }
           sendBtn.disabled = true; sendBtn.textContent = t('sending');
           try {
@@ -5240,22 +5579,22 @@
             let imagePath = null;
             if (image.files[0]) {
               const f = image.files[0];
-              const path = `${kind}/${uid()}-${safe(f.name)}`;
+              const path = `news/${uid()}-${safe(f.name)}`;
               const { error } = await db.storage.from('communications').upload(path, f);
               if (error) throw error;
               imagePath = path;
             }
             const attachments = [];
             for (const f of [...files.files]) {
-              const path = `${kind}/${uid()}-${safe(f.name)}`;
+              const path = `news/${uid()}-${safe(f.name)}`;
               const { error } = await db.storage.from('communications').upload(path, f);
               if (error) throw error;
               attachments.push({ path, name: f.name, type: f.type, size: f.size });
             }
             const { error } = await db.from('communications').insert({
-              author_id: state.profile.id, kind, title: titleVal || null, body: bodyVal || null,
-              image_path: imagePath, attachments, audience,
-              department_ids: departmentIds, recipient_ids: recipientIds,
+              author_id: state.profile.id, kind: 'news', title: titleVal || null, body: bodyVal || null,
+              image_path: imagePath, attachments, audience, department_ids: departmentIds,
+              is_safety: safetyBox.checked,
             });
             if (error) throw error;
             toast(t('communicationSent'));

@@ -947,6 +947,34 @@ input[type="checkbox"]:focus, input[type="radio"]:focus {
   background: transparent;
 }
 
+.file-btn {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.file-btn-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.file-btn-icon {
+  font-size: 1.05em;
+}
+
+.file-btn-name {
+  color: var(--steel);
+  font-size: .85rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 1;
+}
+
 .btn-danger {
   border-color: color-mix(in srgb, var(--danger) 42%, var(--line));
   background: var(--danger-soft);
@@ -1630,32 +1658,28 @@ input[type="checkbox"]:focus, input[type="radio"]:focus {
   background: var(--paper);
 }
 
-/* clickable "Messages" header → received-messages log */
-.comm-subhead-link {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 10px;
-  width: 100%;
-  background: none;
-  border: none;
-  cursor: pointer;
-  padding: 0;
-}
-.comm-subhead-go {
-  font-size: .72rem;
-  font-weight: 800;
-  letter-spacing: .02em;
-  text-transform: none;
-  color: var(--primary);
-}
-.comm-subhead-link:hover .comm-subhead-go { text-decoration: underline; }
-
-/* a row in the messages log = the notification card + a cancel button */
-.comm-log-row { display: flex; align-items: stretch; gap: 8px; }
-.comm-log-row .comm-row { flex: 1 1 auto; }
-.comm-cancel { flex: 0 0 auto; align-self: center; }
 .comm-detail-actions { margin: 14px 0 4px; }
+
+/* Safety news: red title + red border, everywhere a news item is shown. */
+.comm-row.comm-safety,
+.comm-admin-row.comm-safety {
+  border-color: var(--danger);
+}
+.comm-row.comm-safety .comm-title,
+.comm-admin-row.comm-safety .comm-title,
+.comm-detail.comm-safety .comm-detail-title {
+  color: var(--danger);
+}
+.comm-detail.comm-safety {
+  border: 1px solid var(--danger);
+}
+.comm-safety-pill {
+  display: inline-block;
+  margin-bottom: 8px;
+  background: var(--danger-soft);
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 42%, var(--line));
+}
 
 .todo-checklist-card {
   border-color: color-mix(in srgb, var(--primary) 45%, var(--line));
@@ -2260,6 +2284,49 @@ input[type="checkbox"]:focus, input[type="radio"]:focus {
 /* Incident status quick-filters, lined up to the right of the type dropdown */
 .kpi-status-filter { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .kpi-status-filter .chip { margin: 0; }
+.kpi-root-cause-row {
+  margin-top: -4px;
+}
+.kpi-root-cause-row .kpi-filter {
+  flex: 0 1 454px;
+}
+.kpi-drillbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 2px 0 14px;
+}
+.kpi-drill-label {
+  color: var(--steel);
+  font-size: .78rem;
+  font-weight: 700;
+}
+.kpi-drill-chip {
+  min-height: 30px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 5px 10px;
+  background: color-mix(in srgb, var(--primary) 12%, var(--paper));
+  color: var(--ink);
+  font-size: .8rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+.kpi-drill-chip:hover {
+  border-color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 18%, var(--paper));
+}
+
+.kpi-reset-btn {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+.kpi-reset-btn:disabled {
+  opacity: .45;
+  cursor: default;
+  pointer-events: none;
+}
 
 /* ── Dashboard control bar (restored) ── */
 .hidden { display: none !important; }
@@ -2438,6 +2505,12 @@ input[type="checkbox"]:focus, input[type="radio"]:focus {
 .act-row:hover {
   transform: translateX(4px);
 }
+.act-row.act-clickable {
+  cursor: pointer;
+}
+.act-row.act-clickable:hover {
+  background: color-mix(in srgb, var(--primary) 6%, transparent);
+}
 .act-ico {
   position: absolute;
   left: -44px;
@@ -2487,7 +2560,12 @@ input[type="checkbox"]:focus, input[type="radio"]:focus {
 .act-row.act-varsling .act-ico { border-color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, var(--paper)); }
 
 .sev-bar { display: flex; height: 14px; border-radius: 7px; overflow: hidden; gap: 2px; }
+.sev-segment { cursor: pointer; min-width: 8px; transition: filter .16s ease, box-shadow .16s ease; }
+.sev-segment:hover { filter: brightness(1.08); }
+.sev-segment.sev-active { box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--paper) 86%, transparent); }
 .sev-legend { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 12px; font-size: .8rem; color: var(--steel); }
+.sev-legend span { cursor: pointer; }
+.sev-legend span.sev-active { color: var(--ink); font-weight: 750; }
 .sev-legend i { width: 9px; height: 9px; border-radius: 2px; display: inline-block; margin-right: 5px; }
 
 .miss-row { padding: 10px 0; border-top: 1px solid var(--line); }
