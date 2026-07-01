@@ -1,4 +1,4 @@
-const CACHE_NAME = 'hms-shell-v21';
+const CACHE_NAME = 'hms-shell-v24';
 const SHELL_ASSETS = [
   './',
   './index.html',
@@ -9,8 +9,6 @@ const SHELL_ASSETS = [
   './config.js',
   './courses.js',
   './app-shell.js',
-  './AI/styles.css',
-  './AI/admin_widget_snippet.js',
 ];
 
 self.addEventListener('install', event => {
