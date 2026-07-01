@@ -1,4 +1,4 @@
-const SHELL_VERSION = 'hms-shell-v19';
+const SHELL_VERSION = 'hms-shell-v26';
 const SHELL_ASSETS = [
   './index.html',
   './user.html',
@@ -83,4 +83,3 @@ function isHttp() {
 function prefersReducedMotion() {
   return window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches;
 }
-

@@ -517,6 +517,33 @@
     });
     renderBotnav('groups');
     renderSidebar('analytics');
+    mountAIAssistant();
+  }
+  async function mountAIAssistant() {
+    if (document.getElementById('ai-assistant-root')) return;
+    try {
+      const available = await optionalAssetExists('./admin_widget_snippet.js');
+      if (!available) {
+        console.warn('HMS AI Assistant unavailable; optional AI module was not found.');
+        return;
+      }
+      const mod = await import('./admin_widget_snippet.js');
+      mod.initAIAssistant?.({
+        db, el, toast, t, labeled,
+        openKind, logsView, go, usersView, departmentsView, communicationsView,
+        homeView, state, groupView, checklistEdit,
+      });
+    } catch (err) {
+      console.warn('HMS AI Assistant unavailable; continuing without widget.', err);
+    }
+  }
+  async function optionalAssetExists(url) {
+    try {
+      const res = await fetch(url, { method: 'HEAD', cache: 'no-store' });
+      return res.ok;
+    } catch (_) {
+      return false;
+    }
   }
   function isMobileView() { return window.matchMedia('(max-width: 720px)').matches; }
   function syncNavToggle() {
