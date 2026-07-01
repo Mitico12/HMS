@@ -2625,6 +2625,19 @@ input[type="checkbox"]:focus, input[type="radio"]:focus {
 }
 .cl-split .kpi-card { min-width: 0; margin: 0; }
 @media (max-width: 760px) { .cl-split { grid-template-columns: 1fr; } }
+.cl-latest, .cl-expected { align-content: start; }
+.cl-latest .act-feed {
+  background: none;
+  border: none;
+  box-shadow: none;
+  padding: 0 0 0 44px;
+  margin-top: 8px;
+}
+.cl-latest .act-feed::before {
+  left: 14px;
+  top: 6px;
+  bottom: 6px;
+}
 
 /* Even split used in the user profile (assigned ⟷ latest submitted). */
 .profile-split { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 4px; align-items: start; }

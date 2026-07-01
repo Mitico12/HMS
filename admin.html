@@ -630,8 +630,12 @@
     ];
     for (const item of fixed) nav.append(sidebarButton(item, active));
     const hidden = hiddenGroupIds();
+    const firstReports = firstGroup('reports');
+    const firstProcedures = firstGroup('procedures');
+    const firstCourses = firstGroup('courses');
+    const fixedIds = new Set([firstReports?.id, firstProcedures?.id, firstCourses?.id].filter(Boolean));
     const extras = isAdmin
-      ? state.groups.filter(g => !['reports', 'procedures', 'courses'].includes(g.kind) && !hidden.has(g.id))
+      ? state.groups.filter(g => !fixedIds.has(g.id) && !hidden.has(g.id))
       : [];
     if (extras.length) {
       nav.append(el('div', { class: 'sidebar-section-label' }, t('contentGroups')));
@@ -1025,7 +1029,7 @@
       if (incCache && incCache.key === key) return incCache;
       const [allRes, catsRes, rcRes, live] = await Promise.all([
         db.from('incidents')
-          .select('id,report_type,consequence_ids,root_cause_ids,is_anonymous,status,created_at,resolved_at,reporter_id,assigned_to')
+          .select('id,report_type,consequence_ids,root_cause_ids,is_anonymous,status,created_at,resolved_at,reporter_id,assigned_to,what_happened')
           .or(`and(created_at.gte.${prev.start},created_at.lt.${cur.end}),and(resolved_at.gte.${prev.start},resolved_at.lt.${cur.end})`)
           .limit(5000),
         db.from('incident_categories').select('id,name').eq('kind', 'consequence'),
@@ -1038,18 +1042,13 @@
 
     const ensureChecklistRuns = async (key, cur, prev, todayB) => {
       if (clCache && clCache.key === key) return clCache;
-      const [runsRes, latestRunsRes, todayRes] = await Promise.all([
+      const [runsRes, todayRes] = await Promise.all([
         db.from('checklist_runs')
-          .select('checklist_id,user_id,submitted_at,completed')
+          .select('id,checklist_id,user_id,submitted_at,completed')
           .not('submitted_at', 'is', null)
           .eq('completed', true)
           .or(`and(submitted_at.gte.${prev.start},submitted_at.lt.${cur.end})`)
           .limit(10000),
-        db.from('checklist_runs')
-          .select('checklist_id,user_id,submitted_at,completed')
-          .not('submitted_at', 'is', null)
-          .order('submitted_at', { ascending: false })
-          .limit(3),
         db.from('checklist_runs')
           .select('checklist_id')
           .eq('completed', true)
@@ -1059,7 +1058,6 @@
       clCache = {
         key,
         runs: runsRes.data || [],
-        latestRuns: latestRunsRes.data || [],
         todayRuns: todayRes.data || [],
       };
       return clCache;
@@ -1098,9 +1096,9 @@
         rows(db.from('incidents')
           .select('id,report_type,is_anonymous,reporter_id,assigned_to,status,created_at,resolved_at,consequence_ids')
           .or(`and(created_at.gte.${start},created_at.lt.${end}),and(resolved_at.gte.${start},resolved_at.lt.${end})`).limit(5000)),
-        rows(win(db.from('checklist_runs').select('checklist_id,user_id,submitted_at').eq('completed', true).not('submitted_at', 'is', null), 'submitted_at')),
-        rows(win(db.from('course_submissions').select('course_id,user_id,passed,score,created_at'), 'created_at')),
-        rows(win(db.from('procedure_submissions').select('procedure_id,user_id,created_at'), 'created_at')),
+        rows(win(db.from('checklist_runs').select('id,checklist_id,user_id,submitted_at').eq('completed', true).not('submitted_at', 'is', null), 'submitted_at')),
+        rows(win(db.from('course_submissions').select('id,course_id,user_id,passed,score,created_at'), 'created_at')),
+        rows(win(db.from('procedure_submissions').select('id,procedure_id,user_id,created_at'), 'created_at')),
         rows(win(db.from('documents').select('name,uploaded_by,created_at'), 'created_at')),
         rows(win(db.from('profiles').select('id,full_name,username,email,created_at'), 'created_at')),
         canSeeVarsling ? rows(win(db.from('varslinger').select('id,created_at'), 'created_at')) : Promise.resolve([]),
@@ -1374,11 +1372,11 @@
 
     incs.forEach(r => push(r.created_at, r.report_type || 'incident', '📣', reportTitle[r.report_type || 'incident'] || reportTitle.incident, r.is_anonymous ? 'Anonymous' : who(r.reporter_id), r.id, r.report_type || 'incident'));
     resolved.forEach(r => push(r.resolved_at, 'resolved', '✅', t('actReportResolved'), `${typeLabel(r.report_type)}${r.assigned_to ? ' · ' + who(r.assigned_to) : ''}`, r.id, r.report_type || 'incident'));
-    runsW.forEach(r => push(r.submitted_at, 'checklist', '☑️', t('actChecklistDone'), `${clTitles.get(r.checklist_id) || t('checklist')} · ${who(r.user_id)}`, null, 'checklist'));
-    coursesW.forEach(r => push(r.created_at, r.passed ? 'course-passed' : 'course-attempt', r.passed ? '🎓' : '📚', r.passed ? t('actCoursePassed') : t('actCourseAttempt'), `${coTitles.get(r.course_id) || t('course')} · ${who(r.user_id)}${r.passed ? '' : ' · ' + num0(r.score) + '%'}`));
-    procsW.forEach(r => push(r.created_at, 'procedure', '📋', t('actProcedureFiled'), `${prTitles.get(r.procedure_id) || t('procedure')} · ${who(r.user_id)}`, null, 'procedure'));
+    runsW.forEach(r => push(r.submitted_at, 'checklist', '☑️', t('actChecklistDone'), `${clTitles.get(r.checklist_id) || t('checklist')} · ${who(r.user_id)}`, r.id, 'checklist'));
+    coursesW.forEach(r => push(r.created_at, r.passed ? 'course-passed' : 'course-attempt', r.passed ? '🎓' : '📚', r.passed ? t('actCoursePassed') : t('actCourseAttempt'), `${coTitles.get(r.course_id) || t('course')} · ${who(r.user_id)}${r.passed ? '' : ' · ' + num0(r.score) + '%'}`, r.user_id));
+    procsW.forEach(r => push(r.created_at, 'procedure', '📋', t('actProcedureFiled'), `${prTitles.get(r.procedure_id) || t('procedure')} · ${who(r.user_id)}`, r.id, 'procedure'));
     docsW.forEach(r => push(r.created_at, 'document', '📄', t('actDocumentAdded'), `${r.name || ''}${r.uploaded_by ? ' · ' + who(r.uploaded_by) : ''}`.trim()));
-    membersW.forEach(r => push(r.created_at, 'member', '👤', t('actMemberJoined'), labelOf(r)));
+    membersW.forEach(r => push(r.created_at, 'member', '👤', t('actMemberJoined'), labelOf(r), r.id));
     varsW.forEach(r => push(r.created_at, 'varsling', '🔒', t('actVarslingFiled'), t('confidential'), r.id));
 
     const shown = (activitySet.size === 0 ? ev : ev.filter(e => activitySet.has(e.cat))).sort((a, b) => b.ts - a.ts);
@@ -1402,6 +1400,9 @@
     if (!e.id) return null;
     if (e.type === 'varsling') return () => go(varslingDetailView(e.id));
     if (e.type === 'resolved' || ['incident', 'hazard', 'suggestion'].includes(e.type)) return () => go(incidentView(e.id));
+    if (e.type === 'checklist') return () => go(checklistLogDetailByIdView(e.id));
+    if (e.type === 'procedure') return () => go(procedureSubmissionByIdView(e.id));
+    if (['course-passed', 'course-attempt', 'member'].includes(e.type)) return () => go(userDetailView(e.id));
     return null;
   }
   function activityRow(e) {
@@ -1410,10 +1411,65 @@
       el('span', { class: 'act-ico' }, e.ico),
       el('div', { class: 'act-main' }, [
         el('div', { class: 'act-title' }, e.title),
+        e.desc ? el('div', { class: 'act-desc', style: 'font-size: .82rem; color: var(--steel); margin: 3px 0 4px 0; line-height: 1.3;' }, e.desc) : null,
         el('div', { class: 'act-sub' }, e.sub),
       ]),
       el('span', { class: 'time-pill' }, fmt(new Date(e.ts).toISOString())),
     ]);
+  }
+
+  function checklistLogDetailByIdView(runId) {
+    return {
+      title: t('checklist'), tab: 'groups',
+      async render(app) {
+        app.append(el('div', { class: 'loading' }, 'Loading log details...'));
+        const { data: run, error } = await db.from('checklist_runs').select('*').eq('id', runId).single();
+        if (error || !run) {
+          app.innerHTML = '';
+          app.append(emptyState(t('error'), 'Log not found'));
+          return;
+        }
+        const { data: checklist } = await db.from('checklists').select('*').eq('id', run.checklist_id).single();
+        app.innerHTML = '';
+        const view = checklistLogDetailView(run, checklist);
+        await view.render(app);
+      }
+    };
+  }
+
+  function procedureSubmissionByIdView(submissionId) {
+    return {
+      title: 'Procedure entry', tab: 'groups',
+      async render(app) {
+        app.append(el('div', { class: 'loading' }, 'Loading submission...'));
+        const { data: s, error } = await db.from('procedure_submissions').select('*').eq('id', submissionId).single();
+        if (error || !s) {
+          app.innerHTML = '';
+          app.append(emptyState(t('error'), 'Entry not found'));
+          return;
+        }
+        const { data: p } = await db.from('procedures').select('*').eq('id', s.procedure_id).single();
+        if (!p) {
+          app.innerHTML = '';
+          app.append(emptyState(t('error'), 'Procedure not found'));
+          return;
+        }
+        app.innerHTML = '';
+        app.append(el('h2', { class: 'display', style: 'margin-top:0' }, p.title));
+        const card = el('div', { class: 'card' }, [
+          el('div', { class: 'muted', style: 'font-size:.8rem;margin-bottom:8px' }, `${nameOf(s.user_id)} · ${fmt(s.created_at)}`),
+        ]);
+        for (const f of p.fields || []) {
+          const v = s.answers[f.key];
+          card.append(el('div', { style: 'margin-bottom:6px' }, [
+            el('span', { class: 'muted', style: 'font-size:.82rem' }, f.label + ': '),
+            el('span', {}, v === true ? 'Yes' : v === false ? 'No'
+              : Array.isArray(v) ? (v.length ? v.join(', ') : '—') : String(v ?? '—')),
+          ]));
+        }
+        app.append(card);
+      }
+    };
   }
 
   // Render a pre-built, scoped event list as the shared "Latest activity" feed.
@@ -1718,8 +1774,8 @@
     const incsResolved = resolvedCur.slice().sort((a, b) => +new Date(b.resolved_at) - +new Date(a.resolved_at)).slice(0, 14);
     const reportTitle = { incident: t('actIncidentReported'), hazard: t('actHazardReported'), suggestion: t('actSuggestionSent') };
     const ev = [];
-    incsReported.forEach(r => r.created_at && ev.push({ ts: +new Date(r.created_at), type: r.report_type || 'incident', ico: '📣', title: reportTitle[r.report_type || 'incident'] || reportTitle.incident, sub: r.is_anonymous ? t('anonymous') : whoName(r.reporter_id), id: r.id }));
-    incsResolved.forEach(r => r.resolved_at && ev.push({ ts: +new Date(r.resolved_at), type: 'resolved', ico: '✅', title: t('actReportResolved'), sub: `${typeLabel(r.report_type)}${r.assigned_to ? ' · ' + whoName(r.assigned_to) : ''}`, id: r.id }));
+    incsReported.forEach(r => r.created_at && ev.push({ ts: +new Date(r.created_at), type: r.report_type || 'incident', ico: '📣', title: reportTitle[r.report_type || 'incident'] || reportTitle.incident, desc: r.what_happened && r.what_happened.length > 140 ? r.what_happened.slice(0, 137) + '...' : (r.what_happened || ''), sub: r.is_anonymous ? t('anonymous') : whoName(r.reporter_id), id: r.id }));
+    incsResolved.forEach(r => r.resolved_at && ev.push({ ts: +new Date(r.resolved_at), type: 'resolved', ico: '✅', title: t('actReportResolved'), desc: r.what_happened && r.what_happened.length > 140 ? r.what_happened.slice(0, 137) + '...' : (r.what_happened || ''), sub: `${typeLabel(r.report_type)}${r.assigned_to ? ' · ' + whoName(r.assigned_to) : ''}`, id: r.id }));
     renderEventFeed(host, ev);
   }
 
@@ -1845,7 +1901,6 @@
     const titleOf = (id) => (checklists.find(c => c.id === id)?.title) || t('checklist');
     const userName = (id) => { const p = state.profiles.find(u => u.id === id); return p ? labelOf(p) : '—'; };
 
-    const latestRuns = runsData?.latestRuns || [];
     const allPeriodRuns = (runsData?.runs || [])
       .filter(r => r.submitted_at >= cur.start && r.submitted_at < cur.end)
       .sort((a, b) => b.submitted_at.localeCompare(a.submitted_at));
@@ -1855,17 +1910,22 @@
 
     const split = el('div', { class: 'cl-split' });
 
-    // ── Latest checklists — last three entered in the system ──
+    // ── Latest activity — checklist submissions in this window/scope ──
     const latestCard = el('div', { class: 'kpi-card cl-latest' });
-    latestCard.append(el('div', { class: 'kpi-label', style: 'margin-bottom:8px' }, t('latestChecklists')));
-    if (!latestRuns.length) latestCard.append(el('p', { class: 'miss-sub' }, t('noRecentChecklists')));
-    else latestRuns.forEach(r => latestCard.append(el('div', { class: 'miss-row' }, [
-      el('div', { class: 'miss-top' }, [
-        el('span', { style: 'flex:1' }, titleOf(r.checklist_id)),
-        el('span', { class: 'time-pill' }, fmt(r.submitted_at)),
-      ]),
-      el('p', { class: 'miss-sub' }, `${userName(r.user_id)}${r.completed ? ' · ✓' : ''}`),
-    ])));
+    latestCard.append(el('div', { class: 'kpi-label', style: 'margin-bottom:8px' }, t('latestActivity')));
+
+    const feedEv = periodRuns.slice(0, 18).map(r => ({
+      ts: +new Date(r.submitted_at), type: 'checklist', ico: '☑️',
+      title: t('actChecklistDone'), sub: `${titleOf(r.checklist_id)} · ${userName(r.user_id)}`,
+    }));
+
+    if (!feedEv.length) {
+      latestCard.append(el('p', { class: 'miss-sub' }, t('noActivityYet')));
+    } else {
+      const feed = el('div', { class: 'act-feed' });
+      feedEv.forEach(e => feed.append(activityRow(e)));
+      latestCard.append(feed);
+    }
 
     // ── Expected vs received — one row per checklist that has a daily quota ──
     const expCard = el('div', { class: 'kpi-card cl-expected' });
@@ -1945,13 +2005,6 @@
 
     split.append(latestCard, expCard);
     host.append(split);
-
-    // ── Latest activity — checklist submissions in this window/scope ──
-    const feedEv = periodRuns.slice(0, 18).map(r => ({
-      ts: +new Date(r.submitted_at), type: 'checklist', ico: '☑️',
-      title: t('actChecklistDone'), sub: `${titleOf(r.checklist_id)} · ${userName(r.user_id)}`,
-    }));
-    renderEventFeed(host, feedEv);
   }
 
   async function renderAdminPerformanceKpi(host, { adminId, saveAdmin }) {
@@ -2923,9 +2976,12 @@
       g.kind === 'documents' ? documentsGroupView(g) :
       g.kind === 'courses' ? coursesGroupView(g, { go, back, state, departmentPicker, importBtn }) :
       proceduresGroupView(g);
-    view.side = g.kind === 'reports' ? 'incidents'
-      : g.kind === 'procedures' ? 'procedures'
-      : g.kind === 'courses' ? 'courses'
+    const firstReports = firstGroup('reports');
+    const firstProcedures = firstGroup('procedures');
+    const firstCourses = firstGroup('courses');
+    view.side = (g.id === firstReports?.id) ? 'incidents'
+      : (g.id === firstProcedures?.id) ? 'procedures'
+      : (g.id === firstCourses?.id) ? 'courses'
       : `group:${g.id}`;
     view.minLoad = true; // entering a group runs the deliberate load window
     return view;
