@@ -6,6 +6,7 @@
   <script>try{document.documentElement.dataset.theme=localStorage.getItem('theme')||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light')}catch(e){}</script>
   <title>Nicosoft HMS manager</title>
   <link rel="stylesheet" href="./styles.css">
+  <link rel="stylesheet" href="./AI/styles.css">
   <style>
     /* Users page polish. Keeps the old global styles, but keeps access controls out of account details. */
     .user-stack { display: grid; gap: 12px; }
@@ -49,6 +50,7 @@
            roleRank, isAdminPlus, isSuperPlus, isSysadmin, canViewChecklistLogs, canAccessVarsling, isSuspended } from './config.js';
   import { coursesGroupView, courseBuild, courseResults } from './courses.js';
   import { navigateShell, setupPageTransition, warmAppShell } from './app-shell.js';
+  import { initAIAssistant } from './AI/admin_widget_snippet.js';
 
   initTheme();
   initLanguage();
@@ -517,6 +519,11 @@
     });
     renderBotnav('groups');
     renderSidebar('analytics');
+    initAIAssistant({
+      db, el, toast, t, labeled,
+      openKind, logsView, go, usersView, departmentsView, communicationsView,
+      homeView, state, groupView, checklistEdit,
+    });
   }
   function isMobileView() { return window.matchMedia('(max-width: 720px)').matches; }
   function syncNavToggle() {
