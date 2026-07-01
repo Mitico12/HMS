@@ -562,9 +562,38 @@ h1, h2, h3, p {
   text-overflow: ellipsis;
 }
 
-.iconbtn.mobile-menu-btn,
+.iconbtn.mobile-menu-btn {
+  display: inline-grid;
+}
+
 .sidebar-backdrop {
   display: none;
+}
+
+/* Desktop: the hamburger collapses/expands the fixed sidebar and the
+   content reflows into the freed space (mobile uses the overlay below). */
+@media (min-width: 721px) {
+  .sidebar {
+    transition: transform .28s cubic-bezier(.21, .6, .35, 1);
+  }
+
+  .app-shell .topbar,
+  .app-shell .wrap {
+    transition: margin-left .28s cubic-bezier(.21, .6, .35, 1),
+                inset .28s cubic-bezier(.21, .6, .35, 1);
+  }
+
+  .app-shell.nav-collapsed .sidebar {
+    transform: translateX(calc(-100% - 30px));
+  }
+
+  .app-shell.nav-collapsed .topbar {
+    inset: 0 0 auto 0;
+  }
+
+  .app-shell.nav-collapsed .wrap {
+    margin-left: 0;
+  }
 }
 
 .botnav {
@@ -1984,6 +2013,10 @@ input[type="checkbox"]:focus, input[type="radio"]:focus {
 
   .app-shell.nav-open .sidebar {
     transform: translateX(0);
+  }
+
+  .app-shell.nav-open .topbar {
+    z-index: 60;
   }
 
   .app-shell.nav-open .sidebar-backdrop {
