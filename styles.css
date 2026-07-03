@@ -2679,6 +2679,12 @@ input[type="checkbox"]:focus, input[type="radio"]:focus {
 .tile-hide:hover { color: #d43c32; border-color: color-mix(in srgb, #d43c32 48%, var(--line)); }
 .hidden-group-row { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-top: 1px solid var(--line); }
 .hidden-group-row:first-child { border-top: 0; }
+.trash-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin: 20px 0 6px; padding-top: 14px; border-top: 1px solid var(--line); }
+.trash-head h3 { margin: 0 0 4px; }
+.trash-head p { margin: 0; }
+.trash-glyph { color: var(--danger); }
+.trash-row { align-items: flex-start; }
+.trash-row .btn { flex: 0 0 auto; }
 
 /* admin performance bar chart */
 .perf-row { display: flex; align-items: center; gap: 12px; padding: 8px; cursor: pointer; border-radius: 6px; transition: background 0.15s ease; }
@@ -3057,4 +3063,158 @@ input[type="checkbox"]:focus, input[type="radio"]:focus {
     width: auto;
     height: 480px;
   }
+}
+
+/* Department-grouped rows */
+.dept-group-row {
+  margin-bottom: 20px;
+  background: var(--paper-2);
+  border-radius: 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+}
+.dept-group-row-unassigned {
+  opacity: 0.75;
+  border-style: dashed;
+}
+.dept-group-row-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 8px;
+  gap: 10px;
+}
+.dept-group-row-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+}
+.dept-group-row-title {
+  margin: 0;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dept-group-row-count {
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 12%, transparent);
+  padding: 1px 7px;
+  border-radius: 10px;
+  flex-shrink: 0;
+}
+.dept-group-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.dept-group-row-scroll-container {
+  position: relative;
+  width: 100%;
+}
+.dept-group-row-items {
+  display: flex;
+  gap: 12px;
+  overflow-x: auto;
+  padding-bottom: 10px;
+  white-space: nowrap;
+  scroll-behavior: smooth;
+  scrollbar-width: thin;
+  scrollbar-color: var(--steel) transparent;
+}
+.dept-group-row-items::-webkit-scrollbar {
+  height: 5px;
+}
+.dept-group-row-items::-webkit-scrollbar-track {
+  background: transparent;
+}
+.dept-group-row-items::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--steel) 60%, transparent);
+  border-radius: 3px;
+}
+.dept-group-row-items::-webkit-scrollbar-thumb:hover {
+  background: var(--primary);
+}
+.dept-group-row-empty {
+  color: var(--steel);
+  font-size: 0.82rem;
+  font-style: italic;
+  padding: 10px 0;
+}
+/* Smaller cards inside horizontal scroll rows */
+.dept-group-row-items .library-card {
+  flex: 0 0 200px;
+  min-height: 180px;
+  white-space: normal;
+  margin: 0;
+  padding: 10px;
+  gap: 6px;
+}
+.dept-group-row-items .library-art {
+  aspect-ratio: 2;
+}
+.dept-group-row-items .library-icon {
+  font-size: clamp(1.6rem, 4vw, 2.4rem);
+}
+.dept-group-row-items .library-title {
+  font-size: 0.82rem;
+  min-height: 0;
+}
+.dept-group-row-items .library-meta {
+  font-size: 0.75rem;
+}
+.dept-group-row-items .library-sub {
+  font-size: 0.7rem;
+}
+.dept-group-row-items .library-actions .btn {
+  font-size: 0.72rem;
+  padding: 3px 8px;
+}
+.dept-group-row-items .library-card[draggable="true"] {
+  cursor: grab;
+}
+.dept-group-row-items .library-card[draggable="true"]:active {
+  cursor: grabbing;
+}
+.dept-group-row-items .library-card.dragging {
+  opacity: 0.45;
+  box-shadow: none;
+}
+
+/* Connection Status Dot Indicator */
+.status-dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  margin: 0 4px;
+  flex: 0 0 auto;
+  background: var(--steel);
+  transition: background-color .25s ease, box-shadow .25s ease, transform .25s ease, opacity .25s ease;
+}
+.status-dot.online {
+  background: var(--ok);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 14%, transparent), 0 0 10px color-mix(in srgb, var(--ok) 54%, transparent);
+}
+.status-dot.reconnecting {
+  background: var(--warning);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--warning) 16%, transparent), 0 0 10px color-mix(in srgb, var(--warning) 54%, transparent);
+  animation: status-dot-pulse 1.2s infinite ease-in-out;
+}
+.status-dot.offline {
+  background: var(--danger);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 14%, transparent), 0 0 10px color-mix(in srgb, var(--danger) 48%, transparent);
+}
+@keyframes status-dot-pulse {
+  0%, 100% { transform: scale(.88); opacity: .62; }
+  50% { transform: scale(1.18); opacity: 1; }
 }

@@ -23,7 +23,7 @@
   <div id="screen"></div>
 
   <script type="module">
-    import { db, currentProfile, prefetchWorkerData, el, $, toast, initTheme, themeToggleButton, initLanguage, languageSelect, t } from './config.js';
+    import { db, currentProfile, prefetchWorkerData, signInWithIdentifier, el, $, toast, initTheme, themeToggleButton, initLanguage, languageSelect, t, roleRank } from './config.js';
     import { navigateShell, replaceShell, setupPageTransition, warmAppShell } from './app-shell.js';
 
     initTheme();
@@ -31,7 +31,11 @@
     setupPageTransition();
     warmAppShell();
     const screen = $('#screen');
-    const isAdmin = (profile) => ['admin', 'super_admin'].includes(profile?.role);
+    // Anyone who may enter the admin console (verneombud and above — mirrors
+    // admin.html's requireSession gate) gets the worker/admin choice screen.
+    // The old ['admin','super_admin'] check predates the 5-tier role model and
+    // sent superusers/sysadmins straight to the worker app.
+    const isAdmin = (profile) => roleRank(profile) >= 1;
     const openPage = (page) => replaceShell(page);
     // Warm the worker data cache as soon as we know who's signed in. Admins dwell
     // on the app-choice screen, so prefetch in the background there; a worker is
@@ -109,15 +113,7 @@
       const password = $('#pw').value;
       if (!rawIdent || !password) return toast(t('enterLogin'), 'err');
 
-      let email = rawIdent;
-      if (!rawIdent.includes('@')) {
-        const { data: resolved, error } = await db.rpc('get_email_for_username', { p_username: rawIdent });
-        if (error) return toast(error.message, 'err');
-        if (!resolved) return toast(t('userEmailNotFound'), 'err');
-        email = resolved;
-      }
-
-      const { error } = await db.auth.signInWithPassword({ email, password });
+      const { error } = await signInWithIdentifier(rawIdent, password);
       if (error) return toast(error.message, 'err');
       const profile = await currentProfile();
       if (!profile) return toast('Signed in, but no profile was found for this account.', 'err');

@@ -20,12 +20,10 @@ export function initAIAssistant(ctx = {}) {
   const fab = el('button', { class: 'ai-assistant-fab', title: 'HMS AI Assistant', onclick: togglePanel }, '✦');
 
   const panel = el('div', { class: 'ai-assistant-panel hidden' });
-
-  const settingsBtn = el('button', { class: 'iconbtn', title: 'Settings', onclick: toggleSettings }, '⚙');
   const closeBtn = el('button', { class: 'iconbtn', title: 'Close', onclick: togglePanel }, '×');
   const header = el('div', { class: 'ai-assistant-header' }, [
     el('h3', {}, [el('span', {}, '✦'), document.createTextNode(' HMS AI Assistant')]),
-    el('div', { class: 'actions' }, [settingsBtn, closeBtn])
+    el('div', { class: 'actions' }, [closeBtn])
   ]);
 
   const msgArea = el('div', { class: 'ai-assistant-messages' });
@@ -51,26 +49,6 @@ export function initAIAssistant(ctx = {}) {
 
   panel.append(header, msgArea, suggestions, inputRow);
 
-  const settingsOverlay = el('div', { class: 'ai-settings-overlay hidden' });
-  const keyInput = el('input', { type: 'password', placeholder: 'Enter Gemini API Key...', value: localStorage.getItem('hms_gemini_key') || '' });
-  const useEdgeCheck = el('input', { type: 'checkbox' });
-  useEdgeCheck.checked = localStorage.getItem('hms_use_edge_function') !== 'false';
-
-  const settingsCard = el('div', { class: 'ai-settings-card' }, [
-    el('h4', {}, 'AI Assistant Settings'),
-    labeled('Gemini API Key (Local fallback)', keyInput),
-    el('label', { style: 'display:flex;flex-direction:row;align-items:center;gap:8px;font-size:0.84rem;margin:4px 0' }, [
-      useEdgeCheck,
-      el('span', {}, 'Use secure Supabase Edge Function')
-    ]),
-    el('div', { class: 'ai-settings-actions' }, [
-      el('button', { class: 'btn btn-ghost', onclick: toggleSettings }, 'Cancel'),
-      el('button', { class: 'btn btn-primary', onclick: saveSettings }, 'Save')
-    ])
-  ]);
-  settingsOverlay.append(settingsCard);
-  panel.append(settingsOverlay);
-
   root.append(fab, panel);
   document.body.append(root);
 
@@ -83,17 +61,6 @@ export function initAIAssistant(ctx = {}) {
     if (isOpen) {
       inp.focus();
     }
-  }
-
-  function toggleSettings() {
-    settingsOverlay.classList.toggle('hidden');
-  }
-
-  function saveSettings() {
-    localStorage.setItem('hms_gemini_key', keyInput.value.trim());
-    localStorage.setItem('hms_use_edge_function', useEdgeCheck.checked ? 'true' : 'false');
-    toast(t('saved'));
-    toggleSettings();
   }
 
   function appendMessage(sender, text, extraEl = null) {
@@ -139,7 +106,9 @@ export function initAIAssistant(ctx = {}) {
 
   function tryNavigation(text) {
     const lower = text.toLowerCase();
-    const isNav = lower.includes('go') || lower.includes('show') || lower.includes('open') || lower.includes('take me') || lower.includes('navigate');
+    // Word-boundary match — a bare includes('go') hijacked any message
+    // containing "go" as a substring ('category', 'goggles', ...).
+    const isNav = /\b(go|show|open|navigate)\b/.test(lower) || lower.includes('take me');
 
     if (!isNav) return false;
 
@@ -196,40 +165,14 @@ export function initAIAssistant(ctx = {}) {
   }
 
   async function generateChecklist(prompt) {
-    const useEdge = localStorage.getItem('hms_use_edge_function') !== 'false';
-    const localKey = localStorage.getItem('hms_gemini_key');
-
-    if (useEdge) {
-      try {
-        const { data, error } = await db.functions.invoke('generate-checklist', { body: { prompt } });
-        if (error) throw error;
-        return typeof data === 'string' ? JSON.parse(data) : data;
-      } catch (e) {
-        console.error("Failed to invoke Edge Function:", e);
-        const status = e?.context?.status || e?.status;
-        if (status && status !== 404 && !localKey) throw e;
-      }
-    }
-
-    if (localKey) {
-      const systemInstruction = "You are the HMS Assistant, an AI helper for the Nicosoft HMS Admin Console. Users can chat with you, ask questions, or ask you to create checklists. You must always respond in valid JSON matching this schema: { response: 'Your markdown response message', checklist: null | { title: 'Checklist Title', items: [{ label: 'Item text', type: 'check'|'choice'|'number'|'text', options: [], expectedValues: [], expectedMin, expectedMax, fixOnNo: true }] } }";
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${localKey}`;
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: prompt }] }],
-          systemInstruction: { parts: [{ text: systemInstruction }] },
-          generationConfig: { responseMimeType: 'application/json', temperature: 0.2 }
-        })
-      });
-      if (!res.ok) {
-        const errText = await res.text();
-        throw new Error(`Gemini API Error: ${errText}`);
-      }
-      const data = await res.json();
-      const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
-      return JSON.parse(text);
+    try {
+      const { data, error } = await db.functions.invoke('generate-checklist', { body: { prompt } });
+      if (error) throw error;
+      return typeof data === 'string' ? JSON.parse(data) : data;
+    } catch (e) {
+      console.error("Failed to invoke Edge Function:", e);
+      const status = e?.context?.status || e?.status;
+      if (status && status !== 404 && status !== 500) throw e;
     }
 
     return offlineChecklistGenerator(prompt);
@@ -241,7 +184,7 @@ export function initAIAssistant(ctx = {}) {
 
     if (!isChecklistRequest) {
       return {
-        response: `I'm your HMS Assistant. I can help you generate checklists (e.g. "Create checklist for kitchen cleaning") or navigate the admin console (e.g. "go to accounts"). Since you are currently running in offline / local fallback mode without a configured Gemini key, I'm happy to chat or answer questions. If you want to see a checklist demo, try typing "Create a kitchen sanitation checklist"!`
+        response: `I'm your HMS Assistant. I can help you generate checklists (e.g. "Create checklist for kitchen cleaning") or navigate the admin console (e.g. "go to accounts"). The secure AI service is currently unavailable, so I'm using the offline demo mode. If you want to see a checklist demo, try typing "Create a kitchen sanitation checklist"!`
       };
     }
 
@@ -310,9 +253,9 @@ export function initAIAssistant(ctx = {}) {
   }
 
   function applyChecklist(data) {
-    const targetGroup = state.groups.find(g => g.kind === 'checklist') || state.groups[0];
-    if (!targetGroup) {
-      toast("No groups found to put the checklist in.", "err");
+    const targetGroup = state.groups.find(g => g.kind === 'checklist' && g.id);
+    if (!targetGroup?.id) {
+      toast("No checklist group found. Create a checklist group first.", "err");
       return;
     }
 
@@ -341,7 +284,7 @@ export function initAIAssistant(ctx = {}) {
     });
 
     togglePanel();
-    go(checklistEdit(targetGroup, { title: data.title || "AI Generated Checklist", items: formattedItems }));
+    go(checklistEdit(targetGroup, null, { title: data.title || "AI Generated Checklist", items: formattedItems }));
     toast("Checklist draft pre-populated!", "ok");
   }
 }

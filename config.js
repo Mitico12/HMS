@@ -23,6 +23,88 @@ export function newAuthClient() {
   });
 }
 
+function cleanSignupProfile({ email, full_name, username, mobile_number } = {}) {
+  return {
+    email: String(email || '').trim(),
+    full_name: String(full_name || '').trim(),
+    username: String(username || '').trim(),
+    mobile_number: String(mobile_number || '').trim(),
+  };
+}
+
+export async function signUpWithProfile(authClient, { email, password, full_name, username, mobile_number = '', emailRedirectTo } = {}) {
+  const clean = cleanSignupProfile({ email, full_name, username, mobile_number });
+  const metadata = {
+    full_name: clean.full_name,
+    username: clean.username,
+  };
+  if (clean.mobile_number) metadata.mobile_number = clean.mobile_number;
+
+  const result = await authClient.auth.signUp({
+    email: clean.email,
+    password,
+    options: { data: metadata, emailRedirectTo },
+  });
+  if (result.error) return result;
+
+  const userId = result.data?.user?.id;
+  if (userId) {
+    await db.rpc('sync_signup_profile', {
+      p_user_id: userId,
+      p_email: clean.email,
+      p_full_name: clean.full_name,
+      p_username: clean.username,
+      p_mobile_number: clean.mobile_number || null,
+    }).then(() => {}, () => {});
+  }
+  return result;
+}
+
+// Sign in with an email OR a username (shared by index/user/admin login forms).
+// Usernames resolve server-side through the login-with-username edge function,
+// so the browser never calls the enumerable get_email_for_username RPC. While
+// the function isn't deployed yet (or is unreachable) we fall back to the old
+// RPC path, so login keeps working during the transition.
+export async function signInWithIdentifier(rawIdent, password) {
+  const ident = String(rawIdent || '').trim();
+  if (ident.includes('@')) return db.auth.signInWithPassword({ email: ident, password });
+
+  const { data, error } = await db.functions.invoke('login-with-username', {
+    body: { username: ident, password },
+  });
+  if (!error) {
+    const payload = typeof data === 'string' ? JSON.parse(data) : data;
+    if (payload?.access_token && payload?.refresh_token) {
+      return db.auth.setSession({
+        access_token: payload.access_token,
+        refresh_token: payload.refresh_token,
+      });
+    }
+    return { data: null, error: { message: t('invalidCredentials') } };
+  }
+  // The function answered with 400/401/429 → real login failure, keep it generic.
+  const status = error?.context?.status ?? error?.status;
+  if (status === 400 || status === 401) return { data: null, error: { message: t('invalidCredentials') } };
+  if (status === 429) return { data: null, error: { message: error.message || t('invalidCredentials') } };
+
+  // Function missing / not deployed / network hiccup → legacy RPC fallback.
+  const { data: resolved, error: rpcErr } = await db.rpc('get_email_for_username', { p_username: ident });
+  if (rpcErr) return { data: null, error: rpcErr };
+  if (!resolved) return { data: null, error: { message: t('userEmailNotFound') } };
+  return db.auth.signInWithPassword({ email: resolved, password });
+}
+
+// Mask an email for display: "claude@gmail.zz" → "cl***@g***.zz".
+// Superusers/sysadmins un-mask via the audited reveal_email() RPC.
+export function maskEmail(email) {
+  if (!email) return '';
+  const [local = '', domain = ''] = String(email).split('@');
+  if (!domain) return local.slice(0, 2) + '***';
+  const dot = domain.lastIndexOf('.');
+  const tld = dot > 0 ? domain.slice(dot) : '';
+  return `${local.slice(0, 2)}***@${domain.slice(0, 1)}***${tld}`;
+}
+
 // Return the signed-in user's profile (with role), or null.
 export async function currentProfile() {
   const { data: { user } } = await db.auth.getUser();
@@ -117,7 +199,9 @@ export function el(tag, props = {}, kids = []) {
   }
   for (const kid of [].concat(kids)) {
     if (kid == null) continue;
-    node.appendChild(typeof kid === 'string' ? document.createTextNode(kid) : kid);
+    // Coerce anything that isn't a DOM node (numbers, booleans…) to text —
+    // appendChild(number) throws and blanks the whole view otherwise.
+    node.appendChild(kid instanceof Node ? kid : document.createTextNode(String(kid)));
   }
   return node;
 }
@@ -151,6 +235,91 @@ export function fileButton(input, label) {
     el('span', {}, label || t('chooseFile')),
   ]);
   return el('div', { class: 'file-btn' }, [btn, nameEl, input]);
+}
+
+let connectionStatus = typeof navigator === 'undefined' || navigator.onLine ? 'online' : 'offline';
+let connectionMonitorStarted = false;
+let connectionReconnectTimer = null;
+
+function connectionStatusTitle(status) {
+  switch (status) {
+    case 'online': return 'Live and connected';
+    case 'reconnecting': return 'Reconnecting...';
+    case 'offline': return 'Offline';
+    default: return '';
+  }
+}
+
+function setConnectionStatus(status) {
+  if (connectionStatus === status) return;
+  connectionStatus = status;
+  document.querySelectorAll('.status-dot').forEach(dot => {
+    dot.className = `status-dot ${status}`;
+    dot.title = connectionStatusTitle(status);
+    dot.setAttribute('aria-label', connectionStatusTitle(status));
+  });
+}
+
+async function checkConnection() {
+  if (!navigator.onLine) {
+    setConnectionStatus('offline');
+    return;
+  }
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 4000);
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/profiles?select=id&limit=1`, {
+      method: 'GET',
+      cache: 'no-store',
+      headers: { apikey: SUPABASE_ANON_KEY, Accept: 'application/json' },
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+    if (res.status < 500) {
+      if (connectionReconnectTimer) clearTimeout(connectionReconnectTimer);
+      connectionReconnectTimer = null;
+      setConnectionStatus('online');
+      return;
+    }
+    throw new Error(`Health check failed: ${res.status}`);
+  } catch (err) {
+    if (connectionStatus === 'online') {
+      setConnectionStatus('reconnecting');
+      if (!connectionReconnectTimer) {
+        connectionReconnectTimer = setTimeout(() => {
+          if (connectionStatus === 'reconnecting') setConnectionStatus('offline');
+          connectionReconnectTimer = null;
+        }, 12000);
+      }
+    } else if (connectionStatus !== 'reconnecting') {
+      setConnectionStatus('offline');
+    }
+  }
+}
+
+export function startConnectionMonitor() {
+  if (connectionMonitorStarted || typeof window === 'undefined') return;
+  connectionMonitorStarted = true;
+  window.addEventListener('online', () => {
+    setConnectionStatus('reconnecting');
+    checkConnection();
+  });
+  window.addEventListener('offline', () => {
+    if (connectionReconnectTimer) clearTimeout(connectionReconnectTimer);
+    connectionReconnectTimer = null;
+    setConnectionStatus('offline');
+  });
+  checkConnection();
+  setInterval(checkConnection, 15000);
+}
+
+export function connectionStatusDot() {
+  startConnectionMonitor();
+  return el('span', {
+    class: `status-dot ${connectionStatus}`,
+    title: connectionStatusTitle(connectionStatus),
+    'aria-label': connectionStatusTitle(connectionStatus),
+  });
 }
 
 export function initTheme() {
@@ -195,11 +364,14 @@ const TEXT = {
     currentWorkspace: 'Current workspace',
     deleted: 'Deleted',
     emailUsernameTempPasswordRequired: 'Email, username and temporary password are required.',
+    nameEmailUsernamePasswordRequired: 'Name, email, username and password are required.',
+    nameEmailUsernameTempPasswordRequired: 'Name, email, username and temporary password are required.',
     exampleKitchen: 'e.g. Kitchen',
     excelLibraryLoadFailed: 'Could not load the spreadsheet library.',
     expectedGot: 'expected {expected}, got {got}',
     finalReportSaved: 'Final report saved',
     finalReportVisibleHint: 'The final report is visible to the reporter once saved.',
+    folders: 'Folders',
     groupAdded: 'Group added',
     importBelowRoleOnly: 'You can only import users below your own role.',
     manageCourses: 'Manage courses',
@@ -402,6 +574,15 @@ const TEXT = {
     emailUsernamePasswordRequired: 'Email, username and password are required.',
     enterLogin: 'Enter your username or email and password.',
     entries: 'Entries',
+    error: 'Error',
+    checklistEmptySubmit: 'Fill in at least one item before submitting.',
+    checklistPartialConfirm: '{done} of {total} items are filled in. Submit anyway?',
+    invalidCredentials: 'Invalid username or password.',
+    showEmail: 'Show email',
+    emailAccessLogged: 'Access is logged',
+    emailAccessLog: 'Email access log',
+    noEmailReveals: 'No email reveals yet.',
+    allUsersLabel: 'all users',
     everyChecklistHitQuota: 'Every checklist hit its daily quota in this range.',
     executiveAnalytics: 'Executive Analytics',
     field: 'Field {n}',
@@ -428,11 +609,10 @@ const TEXT = {
     locationOptional: 'Location (optional)',
     location: 'Location',
     logDeleted: 'Log deleted.',
-    logs: 'Logs',
-    logsMeta: 'Checklists, reports, procedures, and courses',
+    logs: 'Archive',
+    logsMeta: 'Archived checklists, reports, procedures, and courses',
     missingItems: '{count} missing',
     missing: 'Missing',
-    myReports: 'My reports',
     name: 'Name',
     nameRequired: 'Name is required.',
     needAccount: 'Need an account? ',
@@ -598,7 +778,6 @@ const TEXT = {
     varslingAccessGranted: 'Varsling access granted.',
     varslingAccessRevoked: 'Varsling access revoked.',
     noVarslinger: 'No varslinger.',
-    confidential: 'Confidential',
     submitAnonymously: 'Submit anonymously',
     assigned: 'Assigned',
     assignedToComplete: 'Assigned to complete',
@@ -612,7 +791,6 @@ const TEXT = {
     accountSuspendedBody: 'Your account is under sys-admin review and is temporarily locked. Another sys-admin must resolve the case.',
     sysadminReviewTitle: 'Sys-admin action requires review',
     sysadminReviewBody: 'Give a clear reason for this sys-admin action.',
-    noThirdSysadminWarning: '',
     emergencyTitle: '🚨 Sys-admin emergency',
     emergencyBody: 'A sys-admin opened a case against another sys-admin. Review and decide.',
     upholdAction: 'Uphold',
@@ -735,6 +913,20 @@ const TEXT = {
     hideGroup: 'Hide group',
     groupHidden: 'Group hidden.',
     groupRestored: 'Group restored.',
+    moveToTrash: 'Move to trash',
+    confirmMoveToTrash: 'Move to trash:',
+    movedToTrash: 'Moved to trash.',
+    trashBin: 'Trash bin',
+    trashRetentionHint: 'Deleted items stay here for 30 days before permanent deletion.',
+    trashEmpty: 'Trash is empty.',
+    trashDayLeft: '1 day left',
+    trashDaysLeft: '{count} days left',
+    deleteNow: 'Delete now',
+    confirmDeleteTrashNow: 'Permanently delete all items in trash now? This cannot be undone.',
+    trashDeleted: 'Trash deleted.',
+    recover: 'Recover',
+    restoredFromTrash: 'Recovered from trash.',
+    runTrashMigration: 'Run migration_trash_soft_delete.sql to enable the trash bin.',
     departments: 'Departments',
     departmentName: 'Department name',
     departmentsAdminHint: 'Manage departments and assign workers below.',
@@ -771,11 +963,14 @@ const TEXT = {
     currentWorkspace: 'Naverende arbeidsomrade',
     deleted: 'Slettet',
     emailUsernameTempPasswordRequired: 'E-post, brukernavn og midlertidig passord er pakrevd.',
+    nameEmailUsernamePasswordRequired: 'Navn, e-post, brukernavn og passord er pakrevd.',
+    nameEmailUsernameTempPasswordRequired: 'Navn, e-post, brukernavn og midlertidig passord er pakrevd.',
     exampleKitchen: 'f.eks. Kjokken',
     excelLibraryLoadFailed: 'Kunne ikke laste regnearkbiblioteket.',
     expectedGot: 'forventet {expected}, fikk {got}',
     finalReportSaved: 'Sluttrapport lagret',
     finalReportVisibleHint: 'Sluttrapporten er synlig for melderen nar den lagres.',
+    folders: 'Mapper',
     groupAdded: 'Gruppe lagt til',
     importBelowRoleOnly: 'Du kan bare importere brukere under din egen rolle.',
     manageCourses: 'Administrer kurs',
@@ -954,6 +1149,15 @@ const TEXT = {
     email: 'E-post',
     enterLogin: 'Skriv inn brukernavn eller e-post og passord.',
     entries: 'Innsendinger',
+    error: 'Feil',
+    checklistEmptySubmit: 'Fyll ut minst ett punkt før du sender inn.',
+    checklistPartialConfirm: '{done} av {total} punkter er fylt ut. Sende inn likevel?',
+    invalidCredentials: 'Ugyldig brukernavn eller passord.',
+    showEmail: 'Vis e-post',
+    emailAccessLogged: 'Tilgang loggføres',
+    emailAccessLog: 'E-posttilgangslogg',
+    noEmailReveals: 'Ingen e-postvisninger ennå.',
+    allUsersLabel: 'alle brukere',
     field: 'Felt {n}',
     fields: 'felt',
     finalReport: 'Sluttrapport',
@@ -974,11 +1178,10 @@ const TEXT = {
     itemImage: 'Bilde',
     locationOptional: 'Sted (valgfritt)',
     location: 'Sted',
-    logs: 'Logger',
-    logsMeta: 'Sjekklister, rapporter, prosedyrer og kurs',
+    logs: 'Arkiv',
+    logsMeta: 'Arkiverte sjekklister, rapporter, prosedyrer og kurs',
     missingItems: '{count} mangler',
     missing: 'Mangler',
-    myReports: 'Mine rapporter',
     name: 'Navn',
     needAccount: 'Trenger du konto? ',
     newChecklist: 'Ny sjekkliste',
@@ -1109,7 +1312,6 @@ const TEXT = {
     varslingAccessGranted: 'Varslingstilgang gitt.',
     varslingAccessRevoked: 'Varslingstilgang fjernet.',
     noVarslinger: 'Ingen varslinger.',
-    confidential: 'Konfidensiell',
     submitAnonymously: 'Send anonymt',
     assigned: 'Tildelt',
     assignedToComplete: 'Tildelt for fullføring',
@@ -1123,7 +1325,6 @@ const TEXT = {
     accountSuspendedBody: 'Kontoen din er under sys-admin-vurdering og er midlertidig låst. En annen sys-admin må avgjøre saken.',
     sysadminReviewTitle: 'Sys-admin-handling krever vurdering',
     sysadminReviewBody: 'Gi en tydelig begrunnelse for denne sys-admin-handlingen.',
-    noThirdSysadminWarning: '',
     emergencyTitle: '🚨 Sys-admin-nødsituasjon',
     emergencyBody: 'En sys-admin opprettet en sak mot en annen sys-admin. Vurder og bestem.',
     upholdAction: 'Oppretthold',
@@ -1234,6 +1435,20 @@ const TEXT = {
     hideGroup: 'Skjul gruppe',
     groupHidden: 'Gruppe skjult.',
     groupRestored: 'Gruppe gjenopprettet.',
+    moveToTrash: 'Flytt til papirkurv',
+    confirmMoveToTrash: 'Flytt til papirkurv:',
+    movedToTrash: 'Flyttet til papirkurv.',
+    trashBin: 'Papirkurv',
+    trashRetentionHint: 'Slettede elementer blir her i 30 dager for permanent sletting.',
+    trashEmpty: 'Papirkurven er tom.',
+    trashDayLeft: '1 dag igjen',
+    trashDaysLeft: '{count} dager igjen',
+    deleteNow: 'Slett na',
+    confirmDeleteTrashNow: 'Slette alle elementer i papirkurven permanent na? Dette kan ikke angres.',
+    trashDeleted: 'Papirkurv slettet.',
+    recover: 'Gjenopprett',
+    restoredFromTrash: 'Gjenopprettet fra papirkurv.',
+    runTrashMigration: 'Kjor migration_trash_soft_delete.sql for a aktivere papirkurven.',
     accountCreatedGrantAccess: 'Konto opprettet. Bekreft e-posten din, og be deretter en admin om tilgang.',
     accountCreatedWaitApproval: 'Konto opprettet. Bekreft e-posten din, og vent pa godkjenning fra admin.',
     actionNotePlaceholder: 'Registrer en handling eller et notat...',
@@ -1359,7 +1574,7 @@ export function setLanguage(lang) {
 
 export function t(key, vars = {}) {
   const lang = currentLanguage();
-  const template = TEXT[lang]?.[key] || TEXT[DEFAULT_LANG][key] || key;
+  const template = TEXT[lang]?.[key] ?? TEXT[DEFAULT_LANG][key] ?? key;
   return Object.entries(vars).reduce((out, [name, value]) => out.replaceAll(`{${name}}`, value ?? ''), template);
 }
 

@@ -27,7 +27,12 @@
  *    courses: 'Courses',
  * ============================================================ */
 
-import { db, el, opt, labeled, t, toast } from './config.js';
+import { db, el, opt, labeled, t, toast, maskEmail } from './config.js';
+
+const displayName = p => {
+  const name = (p?.full_name || '').trim();
+  return name && !name.includes('@') ? name : '';
+};
 
 // ── item ⇄ group linking ("import") — mirrors the helpers in admin.html ──
 // A course belongs to a group when owned (group_id) or imported (group_ids).
@@ -346,7 +351,7 @@ export function coursesGroupView(g, ctx) {
  * ============================================================ */
 function courseAssign(course, ctx) {
   ensureStyles();
-  const labelOf = p => p?.full_name || p?.email || p?.username || 'Unknown user';
+  const labelOf = p => displayName(p) || p?.username || maskEmail(p?.email || p?.full_name) || 'Unknown user';
   return {
     title: 'Assign course', tab: 'groups',
     async render(app) {
@@ -653,7 +658,7 @@ export function courseResults(course, ctx) {
       if (!subs.length) return app.append(el('p', { class: 'c-meta' }, 'No attempts yet.'));
       const nameOf = id => {
         const p = (ctx.state.profiles || []).find(x => x.id === id);
-        return p?.full_name || p?.email || 'Unknown';
+        return displayName(p) || p?.username || maskEmail(p?.email || p?.full_name) || 'Unknown';
       };
       const qs = course.questions || [];
       const passCount = subs.filter(s => s.passed).length;

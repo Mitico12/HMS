@@ -1,4 +1,4 @@
-const CACHE_NAME = 'hms-shell-v47';
+const CACHE_NAME = 'hms-shell-v67';
 const SHELL_ASSETS = [
   './',
   './index.html',
@@ -55,13 +55,4 @@ async function networkFirst(request) {
     const isDoc = request.mode === 'navigate' || request.destination === 'document';
     return (await cache.match(request)) || (isDoc ? cache.match('./index.html') : Response.error());
   }
-}
-
-async function cacheFirst(request) {
-  const cache = await caches.open(CACHE_NAME);
-  const cached = await cache.match(request);
-  if (cached) return cached;
-  const fresh = await fetch(request);
-  if (fresh && fresh.ok && fresh.type === 'basic') cache.put(request, fresh.clone()).catch(() => {});
-  return fresh;
 }

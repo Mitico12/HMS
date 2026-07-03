@@ -45,7 +45,7 @@
   <div id="screen"></div>
 
   <script type="module">
-  import { db, requireSession, currentProfile, el, $, fmt, toast, newAuthClient, initTheme, themeToggleButton, initLanguage, languageSelect, currentLanguage, t,
+  import { db, requireSession, currentProfile, signInWithIdentifier, signUpWithProfile, maskEmail, el, $, fmt, toast, newAuthClient, initTheme, themeToggleButton, connectionStatusDot, initLanguage, languageSelect, currentLanguage, t,
            roleRank, isAdminPlus, isSuperPlus, isSysadmin, canViewChecklistLogs, canAccessVarsling, isSuspended, fileButton } from './config.js';
   import { coursesGroupView, courseBuild, courseResults } from './courses.js';
   import { navigateShell, setupPageTransition, warmAppShell } from './app-shell.js';
@@ -266,6 +266,12 @@
     const withUsername = await db.from('profiles')
       .select('id, full_name, username, email, mobile_number, role, is_verified, can_access_varsling, is_suspended, suspended_reason')
       .order('full_name');
+    if (withUsername.error && !missingOptionalColumn(withUsername.error)) {
+      // Real error (not a missing column) — surface it instead of degrading.
+      toast(withUsername.error.message, 'err');
+      state.profiles = [];
+      return state.profiles;
+    }
     if (withUsername.error) {
       // Older databases may not have the username column yet. The SQL patch below adds it.
       let fallback = await db.from('profiles')
@@ -354,10 +360,13 @@
       if (useSort) qb = qb.order('sort_order');
       return qb.order('created_at', { ascending: !desc });
     };
+    // Fall back ONLY on missing-column/table errors (fresh install where the
+    // sort_order / group_ids migrations haven't run) — a real error must
+    // surface to the caller, not silently degrade to a narrower query.
     let q = await run(true, true);
-    if (q.error) q = await run(true, false);   // no sort_order column
-    if (q.error) q = await run(false, true);   // no group_ids column (migration pending)
-    if (q.error) q = await run(false, false);
+    if (q.error && missingOptionalColumn(q.error)) q = await run(true, false);   // no sort_order column
+    if (q.error && missingOptionalColumn(q.error)) q = await run(false, true);   // no group_ids column
+    if (q.error && missingOptionalColumn(q.error)) q = await run(false, false);
     return q;
   }
   async function importItemToGroup(table, item, gid) {
@@ -415,14 +424,21 @@
   const importBtn = (g, opts) => el('button', { class: 'iconbtn', title: t('import'),
     onclick: () => importItemsModal(g, opts) }, '⬇');
 
-  const nameOf = (id) => state.profiles.find(p => p.id === id)?.full_name || '—';
-  const emailOf = (id) => state.profiles.find(p => p.id === id)?.email || '';
-  const labelOf = (p) => p?.full_name || p?.username || p?.email || 'Unnamed user';
+  // Emails are masked everywhere in the UI (Giorgio's privacy design); the only
+  // way to see one in clear is the audited "Show email" reveal for superusers+.
+  // Note: handle_new_user() stores the EMAIL as full_name when no name was
+  // given at signup, so an email-shaped full_name must be masked too.
+  const displayName = (p) => {
+    const fn = (p?.full_name || '').trim();
+    return fn && !fn.includes('@') ? fn : '';
+  };
+  const labelOf = (p) => displayName(p) || p?.username || maskEmail(p?.email || p?.full_name) || 'Unnamed user';
+  const nameOf = (id) => { const p = state.profiles.find(x => x.id === id); return p ? labelOf(p) : '—'; };
   const assignableIncidentProfiles = () => state.profiles
     .filter(p => p && p.id && isAdminPlus(p) && (isSysadmin(state.profile) || !isSysadmin(p)))
     .sort((a, b) => labelOf(a).localeCompare(labelOf(b)));
   // Reporter identity for the UI, hidden when the report is anonymous.
-  const reporterOf = (inc) => inc.is_anonymous ? 'Anonymous' : (emailOf(inc.reporter_id) || nameOf(inc.reporter_id));
+  const reporterOf = (inc) => inc.is_anonymous ? 'Anonymous' : labelOf(state.profiles.find(p => p.id === inc.reporter_id));
 
   // ── auth screens ───────────────────────────────────────
   function showAuth() {
@@ -441,7 +457,7 @@
              labeled(t('password'), el('input', { type: 'password', id: 'pw', autocomplete: 'current-password' }))]
           : [labeled(t('email'), el('input', { type: 'email', id: 'em', autocomplete: 'email' })),
              labeled('Username', el('input', { type: 'text', id: 'un', autocomplete: 'username' })),
-             labeled('Full name', el('input', { type: 'text', id: 'fn' })),
+             labeled('Full name', el('input', { type: 'text', id: 'fn', autocomplete: 'name' }), true),
              labeled(t('password'), el('input', { type: 'password', id: 'pw', autocomplete: 'new-password' }))]),
         el('button', { class: 'btn btn-primary btn-block', style: 'margin-top:8px', onclick: submit },
           mode === 'login' ? t('signIn') : t('createAccount')),
@@ -454,24 +470,20 @@
       const password = $('#pw').value;
       if (mode === 'signup') {
         const email = $('#em').value.trim(), username = $('#un').value.trim(), full_name = $('#fn').value.trim();
-        if (!email || !username || !password) return toast(t('emailUsernamePasswordRequired'), 'err');
+        if (!email || !full_name || !username || !password) return toast(t('nameEmailUsernamePasswordRequired'), 'err');
         const { data: free } = await db.rpc('username_available', { p_username: username });
         if (free === false) return toast(t('usernameTaken'), 'err');
-        const { error } = await db.auth.signUp({ email, password,
-          options: { data: { full_name, username }, emailRedirectTo: new URL('confirmed.html', location.href).href } });
+        const { error } = await signUpWithProfile(db, {
+          email, password, full_name, username,
+          emailRedirectTo: new URL('confirmed.html', location.href).href,
+        });
         if (error) return toast(error.message, 'err');
         toast(t('accountCreatedGrantAccess'));
         mode = 'login'; render();
       } else {
         const ident = $('#lid').value.trim();
         if (!ident || !password) return toast(t('enterLogin'), 'err');
-        let email = ident;
-        if (!ident.includes('@')) {
-          const { data: resolved } = await db.rpc('get_email_for_username', { p_username: ident });
-          if (!resolved) return toast(t('userEmailNotFound'), 'err');
-          email = resolved;
-        }
-        const { error } = await db.auth.signInWithPassword({ email, password });
+        const { error } = await signInWithIdentifier(ident, password);
         if (error) return toast(error.message, 'err');
         location.reload();
       }
@@ -485,7 +497,7 @@
     screen.append(el('div', { class: 'auth-screen' },
       el('div', { class: 'auth-card' },
         el('div', { class: 'brand' }, 'No admin access'),
-        el('div', { class: 'tag' }, `You're signed in as ${profile.email}, but this is the admin console. An existing admin can promote you.`),
+        el('div', { class: 'tag' }, `You're signed in as ${labelOf(profile)}, but this is the admin console. An existing admin can promote you.`),
         el('button', { class: 'btn btn-ghost btn-block', onclick: signOut }, 'Sign out')
       )));
   }
@@ -500,7 +512,12 @@
       )));
   }
   function goIndex() { navigateShell('./index.html'); }
-  async function signOut() { await db.auth.signOut(); goIndex(); }
+  async function signOut() {
+    if (monitor.timer) clearInterval(monitor.timer);
+    if (caseMonitor.timer) clearInterval(caseMonitor.timer);
+    await db.auth.signOut();
+    goIndex();
+  }
 
   // ── app shell ──────────────────────────────────────────
   function showApp() {
@@ -620,7 +637,6 @@
       { id: 'analytics', ic: '▦', label: t('executiveAnalytics'), open: () => go(homeView(), { reset: true }) },
       { id: 'incidents', ic: '⚠', label: t('reports'), badge: true, open: () => openKind('reports') },
       { id: 'logs', ic: '☑', label: t('logs'), open: () => go(logsView()) },
-      { id: 'procedures', ic: '▤', label: t('procedureSubmissions'), open: () => openKind('procedures') },
       { id: 'courses', ic: '▣', label: t('manageCourses'), open: () => openKind('courses') },
       { id: 'users', ic: 'U', label: t('accounts'), count: pendingAccounts, open: () => go(usersView()) },
       { id: 'departments', ic: 'D', label: t('departments'), open: () => go(departmentsView()) },
@@ -633,35 +649,43 @@
     const firstReports = firstGroup('reports');
     const firstProcedures = firstGroup('procedures');
     const firstCourses = firstGroup('courses');
-    const fixedIds = new Set([firstReports?.id, firstProcedures?.id, firstCourses?.id].filter(Boolean));
-    const extras = isAdmin
-      ? state.groups.filter(g => !fixedIds.has(g.id) && !hidden.has(g.id))
+    const mainDocuments = firstGroup('documents');
+    const mainChecklist = firstGroup('checklist') || state.groups.find(g => g.kind === 'checklist');
+    const fixedIds = new Set([firstReports?.id, firstCourses?.id].filter(Boolean));
+    const contentIds = new Set([firstProcedures?.id, mainDocuments?.id, mainChecklist?.id].filter(Boolean));
+    const contentGroups = isAdmin
+      ? [firstProcedures, mainDocuments, mainChecklist].filter(g => g && !hidden.has(g.id))
       : [];
-    if (extras.length) {
+    const folders = isAdmin
+      ? state.groups.filter(g => !fixedIds.has(g.id) && !contentIds.has(g.id) && !hidden.has(g.id))
+      : [];
+    folders.sort((a, b) => {
+      const getRank = (g) => {
+        if (g.name?.trim().toLowerCase() === 'forms') return 4;
+        return 5 + (g.sort_order || 0) * 0.001;
+      };
+      return getRank(a) - getRank(b);
+    });
+    if (contentGroups.length) {
       nav.append(el('div', { class: 'sidebar-section-label' }, t('contentGroups')));
+      contentGroups.forEach(g => nav.append(sidebarGroupLink(g, active)));
+    }
+    if (folders.length) {
+      nav.append(el('div', { class: 'sidebar-section-label' }, t('folders')));
       let dragIdx = null;
       let didDrag = false;
-      extras.forEach((g, idx) => {
-        const btn = el('button', {
-          class: `sidebar-link sidebar-link-draggable ${active === `group:${g.id}` ? 'active' : ''}`,
-          draggable: 'true',
-          onclick: () => { if (didDrag) { didDrag = false; return; } go(groupView(g)); },
-        }, [
-          el('span', { class: 'ic' }, g.icon || '•'),
-          el('span', { class: 'label' }, groupName(g)),
-          el('span', { class: 'sidebar-hide', title: t('hideGroup'),
-            onclick: e => { e.stopPropagation(); setGroupHidden(g.id, true); toast(t('groupHidden')); go(homeView(), { reset: true }); } }, '🛇'),
-        ]);
+      folders.forEach((g, idx) => {
+        const btn = sidebarGroupLink(g, active, { draggable: true, onclick: () => { if (didDrag) { didDrag = false; return; } go(groupView(g)); } });
         btn.addEventListener('dragstart', e => { dragIdx = idx; didDrag = true; e.dataTransfer.effectAllowed = 'move'; btn.classList.add('dragging'); });
         btn.addEventListener('dragend', () => { dragIdx = null; btn.classList.remove('dragging'); });
         btn.addEventListener('dragover', e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; });
         btn.addEventListener('drop', async e => {
           e.preventDefault();
           if (dragIdx === null || dragIdx === idx) return;
-          const [moved] = extras.splice(dragIdx, 1);
-          extras.splice(idx, 0, moved);
+          const [moved] = folders.splice(dragIdx, 1);
+          folders.splice(idx, 0, moved);
           dragIdx = null;
-          applyExtrasOrder(extras);
+          applyExtrasOrder(folders);
           await saveSortOrder('groups', state.groups);
           renderSidebar(active);
         });
@@ -684,7 +708,7 @@
       el('div', { class: 'sidebar-avatar' }, userInitial),
       el('div', { class: 'sidebar-user' }, [
         el('div', { class: 'sidebar-user-name' }, userName),
-        el('div', { class: 'sidebar-user-meta' }, state.profile?.email || state.profile?.username || ''),
+        el('div', { class: 'sidebar-user-meta' }, state.profile?.username ? `@${state.profile.username}` : maskEmail(state.profile?.email)),
       ]),
     ]));
     updateReportsBadge();
@@ -707,6 +731,16 @@
   }
   function firstGroup(kind) {
     return state.groups.find(g => g.kind === kind);
+  }
+  function checklistHomeGroup(g, existing = null) {
+    if (existing?.group_id) return { id: existing.group_id };
+    if (g?.id) return g;
+    return firstGroup('checklist') || state.groups.find(x => x.kind === 'checklist' && x.id) || null;
+  }
+  function procedureHomeGroup(g, existing = null) {
+    if (existing?.group_id) return { id: existing.group_id };
+    if (g?.id) return g;
+    return firstGroup('procedures') || state.groups.find(x => x.kind === 'procedures' && x.id) || null;
   }
   function openKind(kind) {
     const group = firstGroup(kind);
@@ -734,7 +768,9 @@
     const bar = $('#topbar'); bar.innerHTML = '';
     bar.append(el('button', { class: 'iconbtn mobile-menu-btn', title: 'Open navigation', 'aria-label': 'Open navigation', 'aria-expanded': String(mobileSidebarOpen), onclick: toggleMobileSidebar }, '\u2630'));
     if (viewStack.length > 1) bar.append(el('button', { class: 'iconbtn', onclick: back }, '‹'));
+    if (view.titleAction) (Array.isArray(view.titleAction) ? view.titleAction : [view.titleAction]).filter(Boolean).forEach(a => bar.append(a));
     bar.append(el('h1', {}, view.title));
+    bar.append(connectionStatusDot());
     bar.append(el('span', { class: 'role-pill' }, roleName(state.profile.role)));
     bar.append(themeToggleButton());
     bar.append(el('button', { class: 'iconbtn', title: t('refresh'), onclick: goIndex }, '⟳'));
@@ -820,6 +856,9 @@
     return {
       title: 'Executive Analytics', tab: 'groups', side: 'analytics',
       async render(app) {
+        // Read-only: the old Forms/Procedures self-repair (rename + auto-insert
+        // + move) that ran here on every render was moved into
+        // migration_active_user_gate.sql — a dashboard must not write.
         const { data } = await db.from('groups').select('*').order('sort_order');
         state.groups = visibleGroups(data || []);
         await loadProfiles();
@@ -839,6 +878,7 @@
   function visibleGroups(groups) {
     const seenDefaultKinds = new Set();
     return groups.filter(g => {
+      if (g.deleted_at) return false;
       const key = (g.name || '').trim().toLowerCase();
       const isDefault = ['checklists', 'reports', 'documents', 'documentation', 'procedures'].includes(key);
       if (!isDefault) return true;
@@ -871,9 +911,32 @@
   }
   const pendingGroupDeleteRequests = () => state.groupDeleteRequests || [];
   const pendingDeleteForGroup = (groupId) => pendingGroupDeleteRequests().find(r => r.group_id === groupId);
+  const trashTypeLabel = (type) => ({
+    group: t('groups'),
+    report: t('reports'),
+    checklist: t('checklists'),
+    procedure: t('procedures'),
+    document: t('documents'),
+    course: t('courses'),
+    communication: t('communications'),
+    varsling: t('varsling'),
+  }[type] || type);
+  function trashDaysLeft(row) {
+    if (!row.delete_expires_at) return '';
+    const days = Math.max(0, Math.ceil((new Date(row.delete_expires_at) - Date.now()) / DAYMS));
+    return days === 1 ? t('trashDayLeft') : t('trashDaysLeft', { count: days });
+  }
+  async function loadTrashItems() {
+    if (!isSuperPlus(state.profile)) return { items: [], error: null };
+    try { await db.rpc('purge_deleted_items', { p_only_expired: true }); }
+    catch (err) { /* migration may not be installed yet */ }
+    const { data, error } = await db.from('deleted_items').select('*').order('deleted_at', { ascending: false });
+    return { items: error ? [] : (data || []), error };
+  }
   function hiddenGroupsModal() {
     openModal(t('hiddenGroups'), async (body, close) => {
       await loadGroupDeleteRequests();
+      const trash = await loadTrashItems();
       const hidden = hiddenGroupIds();
       const groups = (state.groups || []).filter(g => hidden.has(g.id));
       const pending = pendingGroupDeleteRequests();
@@ -882,16 +945,21 @@
         ? pending.filter(r => r.group_id && !visiblePendingIds.has(r.group_id))
         : [];
 
-      if (!groups.length && !pendingOnly.length) {
+      if (!groups.length && !pendingOnly.length && !trash.items.length && !isSuperPlus(state.profile)) {
         body.append(el('p', { class: 'muted' }, t('noHiddenGroups')));
         return;
       }
 
-      groups.forEach(g => body.append(hiddenGroupRow(g, pendingDeleteForGroup(g.id), close)));
+      if (groups.length) groups.forEach(g => body.append(hiddenGroupRow(g, pendingDeleteForGroup(g.id), close)));
+      else body.append(el('p', { class: 'muted' }, t('noHiddenGroups')));
 
       if (pendingOnly.length) {
         body.append(el('h3', { style: 'margin:18px 0 8px' }, t('pendingDeleteRequests')));
         pendingOnly.forEach(r => body.append(hiddenGroupRequestRow(r, close)));
+      }
+
+      if (isSuperPlus(state.profile)) {
+        renderTrashBin(body, trash, close);
       }
     });
   }
@@ -906,7 +974,7 @@
         setGroupHidden(g.id, false); close(); toast(t('groupRestored')); go(homeView(), { reset: true });
       } }, t('restore')),
       isSuperPlus(state.profile)
-        ? el('button', { class: 'btn btn-danger', onclick: () => permanentlyDeleteGroup(g, close) }, t('permanentDelete'))
+        ? el('button', { class: 'btn btn-danger', onclick: () => deleteGroupToTrash(g, close) }, t('moveToTrash'))
         : el('button', { class: 'btn btn-danger', onclick: () => requestGroupDelete(g, close) },
             request ? t('pendingDeleteRequest') : t('permanentDelete')),
     ]);
@@ -938,23 +1006,76 @@
       );
     });
   }
-  async function permanentlyDeleteGroup(g, close) {
-    if (!confirm(`${t('permanentDelete')} ${groupName(g)}?`)) return;
-    const { error } = await db.rpc('delete_group_permanently', { target: g.id });
-    if (error) return toast(error.message + ' - run migration_group_delete_requests.sql first.', 'err');
+  async function deleteGroupToTrash(g, close) {
+    if (!confirm(`${t('confirmMoveToTrash')} ${groupName(g)}?`)) return;
+    const { error } = await db.rpc('soft_delete_group', { target: g.id });
+    if (error) return toast(error.message + ' - run migration_trash_soft_delete.sql first.', 'err');
     setGroupHidden(g.id, false);
     state.groups = state.groups.filter(x => x.id !== g.id);
     await loadGroupDeleteRequests();
-    close(); toast(t('groupDeleted')); go(homeView(), { reset: true });
+    close(); toast(t('movedToTrash')); go(homeView(), { reset: true });
   }
   async function approveGroupDeleteRequest(request, close) {
     if (!confirm(`${t('approveDelete')} ${request.group_name}?`)) return;
     const { error } = await db.rpc('approve_group_delete_request', { request_id: request.id });
-    if (error) return toast(error.message + ' - run migration_group_delete_requests.sql first.', 'err');
+    if (error) return toast(error.message + ' - run migration_trash_soft_delete.sql first.', 'err');
     setGroupHidden(request.group_id, false);
     state.groups = state.groups.filter(x => x.id !== request.group_id);
     await loadGroupDeleteRequests();
-    close(); toast(t('deleteApproved')); go(homeView(), { reset: true });
+    close(); toast(t('movedToTrash')); go(homeView(), { reset: true });
+  }
+
+  function renderTrashBin(body, trash, close) {
+    const items = trash.items || [];
+    body.append(el('div', { class: 'trash-head' }, [
+      el('div', {}, [
+        el('h3', {}, [el('span', { class: 'trash-glyph' }, '\u{1F5D1}'), ` ${t('trashBin')}`]),
+        el('p', { class: 'muted' }, t('trashRetentionHint')),
+      ]),
+      items.length ? el('button', { class: 'btn btn-danger', onclick: () => purgeTrashNow(close) }, t('deleteNow')) : null,
+    ]));
+    if (trash.error) {
+      body.append(el('p', { class: 'muted' }, `${t('runTrashMigration')} (${trash.error.message})`));
+      return;
+    }
+    if (!items.length) {
+      body.append(el('p', { class: 'muted' }, t('trashEmpty')));
+      return;
+    }
+    items.forEach(row => body.append(trashRow(row, close)));
+  }
+  function trashRow(row, close) {
+    const meta = [trashTypeLabel(row.item_type), row.deleted_at ? fmt(row.deleted_at) : '', trashDaysLeft(row)].filter(Boolean).join(' - ');
+    return el('div', { class: 'hidden-group-row trash-row' }, [
+      el('span', { style: 'flex:1' }, [
+        document.createTextNode(`${row.icon || '\u{1F5D1}'} ${row.title || t('deleted')}`),
+        el('span', { class: 'sub', style: 'display:block;margin-top:3px' }, meta),
+      ]),
+      el('button', { class: 'btn btn-ghost', onclick: () => restoreTrashItem(row, close) }, t('recover')),
+    ]);
+  }
+  function sidebarGroupLink(g, active, opts = {}) {
+    return el('button', {
+      class: `sidebar-link ${opts.draggable ? 'sidebar-link-draggable ' : ''}${active === `group:${g.id}` ? 'active' : ''}`,
+      draggable: opts.draggable ? 'true' : null,
+      onclick: opts.onclick || (() => go(groupView(g))),
+    }, [
+      el('span', { class: 'ic' }, g.icon || '•'),
+      el('span', { class: 'label' }, groupName(g)),
+      el('span', { class: 'sidebar-hide', title: t('hideGroup'),
+        onclick: e => { e.stopPropagation(); setGroupHidden(g.id, true); toast(t('groupHidden')); go(homeView(), { reset: true }); } }, '🛇'),
+    ]);
+  }
+  async function restoreTrashItem(row, close) {
+    const { error } = await db.rpc('restore_deleted_item', { p_item_type: row.item_type, p_item_id: row.item_id });
+    if (error) return toast(error.message + ' - run migration_trash_soft_delete.sql first.', 'err');
+    close(); toast(t('restoredFromTrash')); go(homeView(), { reset: true });
+  }
+  async function purgeTrashNow(close) {
+    if (!confirm(t('confirmDeleteTrashNow'))) return;
+    const { error } = await db.rpc('purge_deleted_items', { p_only_expired: false });
+    if (error) return toast(error.message + ' - run migration_trash_soft_delete.sql first.', 'err');
+    close(); toast(t('trashDeleted')); go(homeView(), { reset: true });
   }
 
   const DAYMS = 86400000;
@@ -2233,8 +2354,8 @@
         const grid = el('div', { class: 'tile-grid' });
         renderLogTiles(grid, [
           { glyph: '☑', name: t('checklists'), meta: t('checklistLogsMeta'), open: () => go(checklistLogsView()) },
-          { glyph: '⚠', name: t('reports'), meta: t('reportLogsMeta'), open: () => go(reportLogsView()) },
           { glyph: '▤', name: t('procedures'), meta: t('procedureLogsMeta'), open: () => go(procedureLogsView()) },
+          { glyph: '⚠', name: t('reports'), meta: t('reportLogsMeta'), open: () => go(reportLogsView()) },
           { glyph: '▣', name: t('courses'), meta: t('completedCoursesMeta'), open: () => go(completedCourseLogsView()) },
         ]);
         app.append(grid);
@@ -2848,6 +2969,39 @@
       );
     });
   }
+
+  async function editFolderModal(g) {
+    await loadDepartments();
+    openModal(`${t('edit')} ${groupName(g)}`, (body, close) => {
+      const name = el('input', { type: 'text', value: groupName(g), placeholder: t('exampleKitchen') });
+      const icon = el('input', { type: 'text', value: g.icon || '', placeholder: '\u{1F4C1}', maxlength: 2, style: 'width:80px' });
+      const visibility = departmentPicker(g.department_ids);
+      body.append(
+        labeled(t('name'), name, true),
+        labeled(t('icon'), icon),
+        visibility.field,
+        el('button', { class: 'btn btn-primary btn-block', onclick: async () => {
+          const cleanName = name.value.trim();
+          if (!cleanName) return toast(t('nameRequired'), 'err');
+          const patch = {
+            name: cleanName,
+            icon: icon.value.trim() || '\u{1F4C1}',
+            department_ids: visibility.get()
+          };
+          const { data, error } = await db.from('groups').update(patch).eq('id', g.id).select('*').single();
+          if (error) return toast(error.message, 'err');
+          const updated = data || { ...g, ...patch };
+          state.groups = state.groups.map(group => group.id === g.id ? updated : group);
+          close();
+          toast(t('saved'));
+          viewStack[viewStack.length - 1] = groupView(updated);
+          routeMotion = 'replace';
+          paint();
+        } }, t('save')),
+        isSuperPlus(state.profile) ? el('button', { class: 'btn btn-danger btn-block', style: 'margin-top:10px', onclick: () => deleteGroupToTrash(g, close) }, t('moveToTrash')) : null,
+      );
+    });
+  }
   const opt = (v, t) => el('option', { value: v }, t);
 
   // A submitted checklist photo is either a legacy inline data-URL (old rows) or
@@ -2908,13 +3062,13 @@
     document: t('documents'),
     procedure: t('procedures'),
   }[kind] || kind);
-  function libraryCard({ kind, title, meta, sub, image, icon, onclick, actions = [], handle = null, className = '' }) {
+  function libraryCard({ kind, title, meta, sub, image, icon, onclick, actions = [], handle = null, className = '', hideKind = false }) {
     const art = image
       ? el('div', { class: 'library-art' }, el('img', { src: image, alt: title }))
       : el('div', { class: 'library-art' }, el('span', { class: 'library-icon' }, icon || libraryIcon(kind, title)));
     const card = el('div', { class: `library-card library-card-kind-${kind} ${className}`.trim(), onclick, style: onclick ? 'cursor:pointer' : '' }, [
       handle,
-      el('div', { class: 'library-kind' }, libraryKindLabel(kind)),
+      hideKind ? null : el('div', { class: 'library-kind' }, libraryKindLabel(kind)),
       el('div', { class: 'library-title' }, title),
       art,
       el('div', {}, [
@@ -2927,6 +3081,26 @@
   }
   function firstChecklistImage(c) {
     return (c.items || []).find(i => i.image)?.image || '';
+  }
+
+  function renderDepartmentRow(bucket, emptyText, actions = []) {
+    const rowItems = el('div', { class: 'dept-group-row-items' });
+    if (bucket.items.length === 0) {
+      rowItems.append(el('div', { class: 'dept-group-row-empty' }, emptyText));
+    } else {
+      bucket.items.forEach(card => rowItems.append(card));
+    }
+    const displayName = bucket.name ? (bucket.name.charAt(0).toUpperCase() + bucket.name.slice(1)) : 'General';
+    return el('div', { class: `dept-group-row${bucket.isUnassigned ? ' dept-group-row-unassigned' : ''}` }, [
+      el('div', { class: 'dept-group-row-header' }, [
+        el('div', { class: 'dept-group-row-title-wrap' }, [
+          el('h4', { class: 'dept-group-row-title' }, displayName),
+          el('span', { class: 'dept-group-row-count' }, `${bucket.items.length}`),
+        ]),
+        actions.length ? el('div', { class: 'dept-group-row-actions' }, actions) : null,
+      ]),
+      el('div', { class: 'dept-group-row-scroll-container' }, rowItems)
+    ]);
   }
 
   // Preset "logo" emojis offered as a quick alternative to uploading an image.
@@ -2970,21 +3144,139 @@
   //  GROUP — routes by kind
   // ════════════════════════════════════════════════════════
   function groupView(g) {
-    const view =
-      g.kind === 'checklist' ? checklistGroupView(g) :
-      g.kind === 'reports' ? reportsGroupView(g) :
-      g.kind === 'documents' ? documentsGroupView(g) :
-      g.kind === 'courses' ? coursesGroupView(g, { go, back, state, departmentPicker, importBtn }) :
-      proceduresGroupView(g);
+    const mainProcedures = firstGroup('procedures');
+    const mainDocuments = firstGroup('documents');
+    const mainChecklist = firstGroup('checklist') || state.groups.find(g => g.kind === 'checklist');
+    const isMainGroup = g.id === mainProcedures?.id || g.id === mainDocuments?.id || g.id === mainChecklist?.id || g.kind === 'reports' || g.kind === 'courses';
+
+    const view = !isMainGroup
+      ? folderGroupView(g)
+      : g.kind === 'checklist' ? checklistGroupView(g) :
+        g.kind === 'reports' ? reportsGroupView(g) :
+        g.kind === 'documents' ? documentsGroupView(g) :
+        g.kind === 'courses' ? coursesGroupView(g, { go, back, state, departmentPicker, importBtn }) :
+        proceduresGroupView(g);
+
     const firstReports = firstGroup('reports');
-    const firstProcedures = firstGroup('procedures');
     const firstCourses = firstGroup('courses');
     view.side = (g.id === firstReports?.id) ? 'incidents'
-      : (g.id === firstProcedures?.id) ? 'procedures'
       : (g.id === firstCourses?.id) ? 'courses'
       : `group:${g.id}`;
-    view.minLoad = true; // entering a group runs the deliberate load window
+    view.minLoad = true;
     return view;
+  }
+
+  function folderGroupView(g) {
+    return {
+      title: groupName(g), tab: 'groups',
+      titleAction: el('button', { class: 'iconbtn', title: t('edit'), 'aria-label': t('edit'), onclick: () => editFolderModal(g) }, '\u270e'),
+      async render(app) {
+        await loadDepartments();
+        const [checklistsQ, documentsQ, proceduresQ] = await Promise.all([
+          fetchGroupItems('checklists', g.id),
+          fetchGroupItems('documents', g.id, { desc: true }),
+          fetchGroupItems('procedures', g.id)
+        ]);
+        
+        const checklists = checklistsQ.data || [];
+        const documents = documentsQ.data || [];
+        const procedures = proceduresQ.data || [];
+        const totalCount = checklists.length + documents.length + procedures.length;
+        
+        const listHost = el('div', { class: 'dept-group-container' });
+        
+        const customImportBtn = (label, table, titleOf) => el('button', {
+          class: 'btn btn-ghost',
+          style: 'display: flex; align-items: center; gap: 4px;',
+          onclick: () => importItemsModal(g, { table, titleOf, onDone: () => go(folderGroupView(g), { reset: true }) })
+        }, [el('span', {}, '⬇'), el('span', {}, `${t('import') || 'Import'} ${label}`)]);
+        
+        const toolbar = el('div', { style: 'display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap;' }, [
+          customImportBtn(t('checklists') || 'Checklists', 'checklists', c => c.title),
+          customImportBtn(t('documents') || 'Documents', 'documents', d => d.name),
+          customImportBtn(t('procedures') || 'Procedures', 'procedures', p => p.title),
+        ]);
+        
+        app.append(toolbar, listHost);
+        
+        if (totalCount === 0) {
+          listHost.append(emptyState(t('noEntries') || 'Empty Folder', t('noEntriesHint') || 'Import items using the buttons above.'));
+          return;
+        }
+        
+        const grid = el('div', { class: 'library-grid' });
+        listHost.append(grid);
+        
+        const addCard = (item, kind, title, meta, sub, actions) => {
+          const card = libraryCard({
+            kind,
+            title,
+            meta,
+            sub,
+            image: item.image || (kind === 'checklist' ? firstChecklistImage(item) : null),
+            icon: item.icon || null,
+            hideKind: false,
+            actions
+          });
+          grid.append(card);
+        };
+        
+        checklists.forEach(c => {
+          const linked = isLinkedItem(c, g.id);
+          addCard(c, 'checklist', c.title, t('items', { count: (c.items || []).length }), linked ? t('linked') : null, [
+            el('button', { class: 'btn btn-ghost', onclick: e => { e.stopPropagation(); go(checklistEdit(g, c)); } }, t('edit')),
+            linked ? el('button', { class: 'btn btn-ghost', title: t('removeFromGroup'), onclick: async e => {
+              e.stopPropagation();
+              const { error } = await unlinkItemFromGroup('checklists', c, g.id);
+              if (error) return toast(error.message, 'err');
+              toast(t('removedFromGroup')); go(folderGroupView(g), { reset: true });
+            } }, '×') : null,
+          ].filter(Boolean));
+        });
+        
+        documents.forEach(d => {
+          const linked = isLinkedItem(d, g.id);
+          addCard(d, 'document', d.name, `${(d.size_bytes / 1024 | 0)} KB`, linked ? `${t('linked')} · ${fmt(d.created_at)}` : fmt(d.created_at), [
+            el('button', { class: 'btn btn-ghost', onclick: e => { e.stopPropagation(); openDoc(d); } }, t('open')),
+            el('button', { class: 'btn btn-danger', title: linked ? t('removeFromGroup') : '', onclick: e => { e.stopPropagation(); removeDoc(d, 'documents'); } }, '×'),
+          ]);
+        });
+        
+        procedures.forEach(p => {
+          const linked = isLinkedItem(p, g.id);
+          addCard(p, 'procedure', p.title, `${(p.fields || []).length} ${t('fields')}`, linked ? `${t('linked')} · ${p.is_draft ? t('draft') : t('published')}` : (p.is_draft ? t('draft') : t('published')), [
+            el('button', { class: 'btn btn-ghost', onclick: e => { e.stopPropagation(); go(submissionsView(p)); } }, t('entries')),
+            el('button', { class: 'btn btn-ghost', onclick: e => { e.stopPropagation(); go(procedureBuild(g, p)); } }, t('edit')),
+            linked ? el('button', { class: 'btn btn-ghost', title: t('removeFromGroup'), onclick: async e => {
+              e.stopPropagation();
+              const { error } = await unlinkItemFromGroup('procedures', p, g.id);
+              if (error) return toast(error.message, 'err');
+              toast(t('removedFromGroup')); go(folderGroupView(g), { reset: true });
+            } }, '×') : null,
+          ].filter(Boolean));
+        });
+        
+        async function openDoc(d) {
+          const { data, error } = await db.storage.from('documents').createSignedUrl(d.storage_path, 60);
+          if (error) return toast(error.message, 'err');
+          window.open(data.signedUrl, '_blank');
+        }
+        async function removeDoc(d, table) {
+          const linked = isLinkedItem(d, g.id);
+          if (linked) {
+            const { error } = await unlinkItemFromGroup(table, d, g.id);
+            if (error) return toast(error.message, 'err');
+            toast(t('removedFromGroup')); go(folderGroupView(g), { reset: true });
+            return;
+          }
+          if (!confirm(`Delete "${d.name}"?`)) return;
+          await db.storage.from('documents').remove([d.storage_path]);
+          const { error } = await db.from('documents').delete().eq('id', d.id);
+          if (error) return toast(error.message, 'err');
+          go(folderGroupView(g), { reset: true });
+        }
+      }
+    };
   }
 
   // ─── CHECKLISTS ─────────────────────────────────────────
@@ -2997,23 +3289,41 @@
   function checklistGroupView(g) {
     return {
       title: groupName(g), tab: 'groups',
-      action: [
-        importBtn(g, { table: 'checklists', titleOf: c => c.title, onDone: () => go(checklistGroupView(g), { reset: true }) }),
-        el('button', { class: 'iconbtn', title: t('newChecklist'), onclick: () => go(checklistEdit(g, null)) }, '+'),
-      ],
+      action: [], // buttons moved into dept row headers
       async render(app) {
+        await loadDepartments();
         const q = await fetchGroupItems('checklists', g.id);
         const data = q.data || [];
-        if (!data?.length) return app.append(emptyState(t('noChecklists'), t('noChecklistsHint')));
+        const listHost = el('div', { class: 'dept-group-container' });
+        app.append(listHost);
+        if (!data?.length) {
+          const genDept = state.departments.find(d => d.name?.toLowerCase() === 'general') || state.departments[0] || { id: 'general', name: 'General' };
+          listHost.append(renderDepartmentRow(
+            { id: genDept.id, name: genDept.name, items: [] },
+            t('noChecklistsHint') || 'Tap + to build one.',
+            [
+              importBtn(g, { table: 'checklists', titleOf: c => c.title, onDone: () => go(checklistGroupView(g), { reset: true }) }),
+              el('button', { class: 'iconbtn', title: t('newChecklist'), onclick: () => go(checklistEdit(g, null)) }, '+'),
+            ]
+          ));
+          return;
+        }
         let rows = data.slice();
         let dragIdx = null;
-        const list = el('div', { class: 'library-grid' });
         const draw = () => {
-          list.innerHTML = '';
+          listHost.innerHTML = '';
+          const depts = state.departments;
+          const deptBuckets = depts.map(d => ({ id: d.id, name: d.name, items: [] }));
+          const unassignedBucket = { id: 'unassigned', name: t('unassigned') || 'Unassigned', items: [], isUnassigned: true };
+
           rows.forEach((c, idx) => {
+            let itemDepts = normalizeDepartmentIds(c.department_ids);
+            if (!itemDepts.length) {
+              const genId = generalDepartmentId();
+              if (genId) itemDepts = [genId];
+            }
             const linked = isLinkedItem(c, g.id);
-            const handle = el('span', { class: 'drag-handle', draggable: 'true', title: t('dragReorder') }, '⠿');
-            const row = libraryCard({
+            const card = libraryCard({
               kind: 'checklist',
               title: c.title,
               meta: t('items', { count: (c.items || []).length }),
@@ -3021,7 +3331,7 @@
               className: linked ? 'item-linked' : '',
               image: c.image || firstChecklistImage(c),
               icon: c.icon || null,
-              handle,
+              hideKind: true,
               actions: [
                 el('button', { class: 'btn btn-ghost', onclick: e => { e.stopPropagation(); go(checklistEdit(g, c)); } }, t('edit')),
                 linked ? el('button', { class: 'btn btn-ghost', title: t('removeFromGroup'), onclick: async e => {
@@ -3032,14 +3342,15 @@
                 } }, '×') : null,
               ].filter(Boolean),
             });
-            handle.addEventListener('dragstart', e => {
+            card.setAttribute('draggable', 'true');
+            card.addEventListener('dragstart', e => {
               dragIdx = idx;
               e.dataTransfer.effectAllowed = 'move';
-              row.classList.add('dragging');
+              card.classList.add('dragging');
             });
-            handle.addEventListener('dragend', () => { dragIdx = null; row.classList.remove('dragging'); });
-            row.addEventListener('dragover', e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; });
-            row.addEventListener('drop', async e => {
+            card.addEventListener('dragend', () => { dragIdx = null; card.classList.remove('dragging'); });
+            card.addEventListener('dragover', e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; });
+            card.addEventListener('drop', async e => {
               e.preventDefault();
               if (dragIdx === null || dragIdx === idx) return;
               const [moved] = rows.splice(dragIdx, 1);
@@ -3048,28 +3359,44 @@
               draw();
               await saveSortOrder('checklists', rows);
             });
-            list.append(row);
+
+            let placed = false;
+            if (itemDepts.length) {
+              itemDepts.forEach(did => {
+                const bucket = deptBuckets.find(b => b.id === did);
+                if (bucket) { bucket.items.push(card); placed = true; }
+              });
+            }
+            if (!placed) unassignedBucket.items.push(card);
           });
+
+          const makeRowActions = () => [
+            importBtn(g, { table: 'checklists', titleOf: c => c.title, onDone: () => go(checklistGroupView(g), { reset: true }) }),
+            el('button', { class: 'iconbtn', title: t('newChecklist'), onclick: () => go(checklistEdit(g, null)) }, '+'),
+          ];
+          deptBuckets.forEach(b => listHost.append(renderDepartmentRow(b, '', makeRowActions())));
+          if (unassignedBucket.items.length > 0) listHost.append(renderDepartmentRow(unassignedBucket, ''));
         };
         draw();
-        app.append(list);
       },
     };
   }
 
-  function checklistEdit(g, existing) {
+  function checklistEdit(g, existing, draft = null) {
+    const existingRecord = existing?.id ? existing : null;
+    const source = existingRecord || draft || {};
     return {
-      title: existing ? t('editChecklist') : t('newChecklist'), tab: 'groups',
+      title: existingRecord ? t('editChecklist') : t('newChecklist'), tab: 'groups',
       render(app) {
-        const title = el('input', { type: 'text', value: existing?.title || '', placeholder: 'Checklist title' });
-        const logo = { image: existing?.image || null, icon: existing?.icon || null };
-        let items = (existing?.items || []).map(i => ({ ...i }));
+        const title = el('input', { type: 'text', value: source?.title || '', placeholder: 'Checklist title' });
+        const logo = { image: source?.image || null, icon: source?.icon || null };
+        let items = (source?.items || []).map(i => ({ ...i }));
         const quota = el('input', { type: 'number', min: '0', step: '1',
-          value: existing?.daily_quota ?? 0, placeholder: '0' });
-        const visibility = departmentPicker(existing?.department_ids);
+          value: source?.daily_quota ?? 0, placeholder: '0' });
+        const visibility = departmentPicker(source?.department_ids);
 
         const WEEKDAYS = [['1','Mon'],['2','Tue'],['3','Wed'],['4','Thu'],['5','Fri'],['6','Sat'],['0','Sun']];
-        const quotaDays = new Set((existing?.quota_weekdays ?? [0,1,2,3,4,5,6]).map(Number));
+        const quotaDays = new Set((source?.quota_weekdays ?? [0,1,2,3,4,5,6]).map(Number));
         const dayRow = el('div', { class: 'weekday-row' }, WEEKDAYS.map(([v, lbl]) => {
           const n = Number(v);
           const b = el('button', { type: 'button', class: 'btn btn-ghost weekday-btn', onclick: () => {
@@ -3179,13 +3506,13 @@
             el('button', { class: 'btn btn-ghost btn-block', onclick: previewChecklist }, 'Preview'),
             el('button', { class: 'btn btn-primary btn-block', onclick: save }, t('saveChecklist')),
           ]),
-          existing && isLinkedItem(existing, g.id)
+          existingRecord && g?.id && isLinkedItem(existingRecord, g.id)
             ? el('button', { class: 'btn btn-ghost btn-block', style: 'margin-top:10px', onclick: async () => {
-                const { error } = await unlinkItemFromGroup('checklists', existing, g.id);
+                const { error } = await unlinkItemFromGroup('checklists', existingRecord, g.id);
                 if (error) return toast(error.message, 'err');
                 toast(t('removedFromGroup')); back();
               } }, t('removeFromGroup'))
-            : existing ? el('button', { class: 'btn btn-danger btn-block', style: 'margin-top:10px', onclick: del }, t('deleteChecklist')) : null,
+            : existingRecord ? el('button', { class: 'btn btn-danger btn-block', style: 'margin-top:10px', onclick: del }, t('deleteChecklist')) : null,
         );
         function cleanItems() {
           return items.filter(i => i.label.trim()).map(i => ({
@@ -3208,8 +3535,10 @@
         async function save() {
           const clean = cleanItems();
           if (!title.value.trim() || !clean.length) return toast(t('addTitleAndItem'), 'err');
+          const homeGroup = checklistHomeGroup(g, existingRecord);
+          if (!homeGroup?.id) return toast('No checklist group found. Create a checklist group first.', 'err');
           const payload = {
-            group_id: existing ? existing.group_id : g.id, // keep home group when editing a shared/linked item
+            group_id: homeGroup.id, // keep home group when editing a shared/linked item
             title: title.value.trim(),
             items: clean,
             image: logo.image || null,
@@ -3218,7 +3547,7 @@
             daily_quota: Math.max(0, parseInt(quota.value, 10) || 0),
             quota_weekdays: [...quotaDays].sort((a, b) => a - b),
           };
-          const q = existing ? db.from('checklists').update(payload).eq('id', existing.id)
+          const q = existingRecord ? db.from('checklists').update(payload).eq('id', existingRecord.id)
                              : db.from('checklists').insert(payload);
           const { error } = await q;
           if (error) return toast(error.message, 'err');
@@ -3226,7 +3555,8 @@
         }
         async function del() {
           if (!confirm(t('deleteChecklistConfirm'))) return;
-          await db.from('checklists').delete().eq('id', existing.id);
+          const { error } = await db.from('checklists').delete().eq('id', existingRecord.id);
+          if (error) return toast(error.message, 'err');
           toast(t('deleted')); back();
         }
       },
@@ -3451,11 +3781,11 @@
   async function fetchActiveReports() {
     let q = await db.from('incidents').select('*').eq('archived', false).order('created_at', { ascending: false });
     if (q.error) q = await db.from('incidents').select('*').order('created_at', { ascending: false });
-    return q.data || [];
+    return (q.data || []).filter(r => !r.deleted_at);
   }
   async function fetchArchivedReports() {
     const q = await db.from('incidents').select('*').eq('archived', true).order('archived_at', { ascending: false });
-    return q.error ? [] : (q.data || []);
+    return q.error ? [] : (q.data || []).filter(r => !r.deleted_at);
   }
 
   const REPORT_LOG_COLUMNS = [
@@ -3658,9 +3988,10 @@
     return {
       title: t('reports'), tab: 'groups',
       async render(app) {
-        const { data: inc } = await db.from('incidents').select('*').eq('id', id).single();
+        const { data: inc, error: incErr } = await db.from('incidents').select('*').eq('id', id).single();
+        if (incErr || !inc) return app.append(emptyState(t('error'), t('noReports')));
         const { data: cats } = await db.from('incident_categories').select('*');
-        const catName = (cid) => cats.find(c => c.id === cid)?.name || '—';
+        const catName = (cid) => (cats || []).find(c => c.id === cid)?.name || '—';
         const { data: actions } = await db.from('incident_actions').select('*').eq('incident_id', id).order('created_at');
 
         // summary card
@@ -3777,9 +4108,9 @@
           } else if (inc.status === 'resolved') {
             app.append(el('div', { class: 'card' }, [
               el('h3', {}, t('archive')),
-              el('p', { class: 'muted', style: 'font-size:.82rem' }, 'Moves this report into Logs, grouped by type. Super admins only.'),
+              el('p', { class: 'muted', style: 'font-size:.82rem' }, 'Moves this report into Archive, grouped by type. Super admins only.'),
               el('button', { class: 'btn btn-ghost', onclick: async () => {
-                if (!confirm('Archive this report? It moves to Logs.')) return;
+                if (!confirm('Archive this report? It moves to Archive.')) return;
                 const { error } = await db.rpc('archive_report', { p_id: id });
                 if (error) return toast(error.message, 'err');
                 toast(t('archived') + '.'); back();
@@ -4167,7 +4498,9 @@
                 el('div', { class: 'grow' }, c.name),
                 el('button', { class: 'btn btn-danger', onclick: async () => {
                   if (!confirm(`Delete "${c.name}"?`)) return;
-                  await db.from('incident_categories').delete().eq('id', c.id); refresh();
+                  const { error } = await db.from('incident_categories').delete().eq('id', c.id);
+                  if (error) return toast(error.message, 'err');
+                  refresh();
                 } }, '×'),
               ]);
               handle.addEventListener('dragstart', e => {
@@ -4195,7 +4528,8 @@
         async function add(kind) {
           const name = prompt(`New ${kind === 'root_cause' ? 'root cause' : 'consequence'} category:`);
           if (!name?.trim()) return;
-          await db.from('incident_categories').insert({ kind, name: name.trim(), sort_order: 99 });
+          const { error } = await db.from('incident_categories').insert({ kind, name: name.trim(), sort_order: 99 });
+          if (error) return toast(error.message, 'err');
           refresh();
         }
       },
@@ -4206,11 +4540,11 @@
   function documentsGroupView(g) {
     return {
       title: groupName(g), tab: 'groups',
-      action: importBtn(g, { table: 'documents', titleOf: d => d.name, onDone: () => go(documentsGroupView(g), { reset: true }) }),
+      action: [], 
       render(app) {
         const file = el('input', { type: 'file' });
         const visibility = departmentPicker(g.department_ids);
-        const listHost = el('div', { class: 'library-grid' });
+        const listHost = el('div', { class: 'dept-group-container' });
         app.append(el('div', { class: 'card' }, [
           el('h3', {}, t('uploadDocument')),
           fileButton(file),
@@ -4221,35 +4555,56 @@
 
         async function loadDocs() {
           listHost.innerHTML = '';
+          await loadDepartments();
           const q = await fetchGroupItems('documents', g.id, { desc: true });
           let rows = q.data || [];
-          if (!rows.length) { listHost.append(emptyState(t('noDocuments'), t('noDocumentsHint'))); return; }
+          if (!rows.length) {
+            const genDept = state.departments.find(d => d.name?.toLowerCase() === 'general') || state.departments[0] || { id: 'general', name: 'General' };
+            listHost.append(renderDepartmentRow(
+              { id: genDept.id, name: genDept.name, items: [] },
+              t('noDocumentsHint') || 'Nothing shared here yet.',
+              [
+                importBtn(g, { table: 'documents', titleOf: d2 => d2.name, onDone: () => loadDocs() }),
+              ]
+            ));
+            return;
+          }
           let dragIdx = null;
+
           const draw = () => {
             listHost.innerHTML = '';
+            const depts = state.departments;
+            const deptBuckets = depts.map(d => ({ id: d.id, name: d.name, items: [] }));
+            const unassignedBucket = { id: 'unassigned', name: t('unassigned') || 'Unassigned', items: [], isUnassigned: true };
+
             rows.forEach((d, idx) => {
+              let itemDepts = normalizeDepartmentIds(d.department_ids);
+              if (!itemDepts.length) {
+                const genId = generalDepartmentId();
+                if (genId) itemDepts = [genId];
+              }
               const linked = isLinkedItem(d, g.id);
-              const handle = el('span', { class: 'drag-handle', draggable: 'true', title: t('dragReorder') }, '⠿');
-              const row = libraryCard({
+              const card = libraryCard({
                 kind: 'document',
                 title: d.name,
                 meta: `${(d.size_bytes / 1024 | 0)} KB`,
                 sub: linked ? `${t('linked')} · ${fmt(d.created_at)}` : fmt(d.created_at),
                 className: linked ? 'item-linked' : '',
-                handle,
+                hideKind: true,
                 actions: [
                   el('button', { class: 'btn btn-ghost', onclick: e => { e.stopPropagation(); openDoc(d); } }, t('open')),
                   el('button', { class: 'btn btn-danger', title: linked ? t('removeFromGroup') : '', onclick: e => { e.stopPropagation(); removeDoc(d); } }, '×'),
                 ],
               });
-              handle.addEventListener('dragstart', e => {
+              card.setAttribute('draggable', 'true');
+              card.addEventListener('dragstart', e => {
                 dragIdx = idx;
                 e.dataTransfer.effectAllowed = 'move';
-                row.classList.add('dragging');
+                card.classList.add('dragging');
               });
-              handle.addEventListener('dragend', () => { dragIdx = null; row.classList.remove('dragging'); });
-              row.addEventListener('dragover', e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; });
-              row.addEventListener('drop', async e => {
+              card.addEventListener('dragend', () => { dragIdx = null; card.classList.remove('dragging'); });
+              card.addEventListener('dragover', e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; });
+              card.addEventListener('drop', async e => {
                 e.preventDefault();
                 if (dragIdx === null || dragIdx === idx) return;
                 const [moved] = rows.splice(dragIdx, 1);
@@ -4258,8 +4613,22 @@
                 draw();
                 await saveSortOrder('documents', rows);
               });
-              listHost.append(row);
+
+              let placed = false;
+              if (itemDepts.length) {
+                itemDepts.forEach(did => {
+                  const bucket = deptBuckets.find(b => b.id === did);
+                  if (bucket) { bucket.items.push(card); placed = true; }
+                });
+              }
+              if (!placed) unassignedBucket.items.push(card);
             });
+
+            const makeRowActions = () => [
+              importBtn(g, { table: 'documents', titleOf: d2 => d2.name, onDone: () => loadDocs() }),
+            ];
+            deptBuckets.forEach(b => listHost.append(renderDepartmentRow(b, '', makeRowActions())));
+            if (unassignedBucket.items.length > 0) listHost.append(renderDepartmentRow(unassignedBucket, ''));
           };
           draw();
         }
@@ -4281,14 +4650,15 @@
           window.open(data.signedUrl, '_blank');
         }
         async function removeDoc(d) {
-          if (isLinkedItem(d, g.id)) { // borrowed here — just unlink, keep the file & home group
+          if (isLinkedItem(d, g.id)) {
             const { error } = await unlinkItemFromGroup('documents', d, g.id);
             if (error) return toast(error.message, 'err');
             toast(t('removedFromGroup')); return loadDocs();
           }
           if (!confirm(`Delete "${d.name}"?`)) return;
           await db.storage.from('documents').remove([d.storage_path]);
-          await db.from('documents').delete().eq('id', d.id);
+          const { error } = await db.from('documents').delete().eq('id', d.id);
+          if (error) return toast(error.message, 'err');
           loadDocs();
         }
       },
@@ -4304,23 +4674,41 @@
   function proceduresGroupView(g) {
     return {
       title: groupName(g), tab: 'groups',
-      action: [
-        importBtn(g, { table: 'procedures', titleOf: p => p.title, onDone: () => go(proceduresGroupView(g), { reset: true }) }),
-        el('button', { class: 'iconbtn', title: t('newProcedure'), onclick: () => go(procedureBuild(g, null)) }, '+'),
-      ],
+      action: [], // buttons moved into dept row headers
       async render(app) {
+        await loadDepartments();
         const q = await fetchGroupItems('procedures', g.id);
         const data = q.data || [];
-        if (!data?.length) return app.append(emptyState(t('noProcedures'), t('noProceduresHint')));
+        const listHost = el('div', { class: 'dept-group-container' });
+        app.append(listHost);
+        if (!data?.length) {
+          const genDept = state.departments.find(d => d.name?.toLowerCase() === 'general') || state.departments[0] || { id: 'general', name: 'General' };
+          listHost.append(renderDepartmentRow(
+            { id: genDept.id, name: genDept.name, items: [] },
+            t('noProceduresHint') || 'Build a form users can fill in.',
+            [
+              importBtn(g, { table: 'procedures', titleOf: p => p.title, onDone: () => go(proceduresGroupView(g), { reset: true }) }),
+              el('button', { class: 'iconbtn', title: t('newProcedure'), onclick: () => go(procedureBuild(g, null)) }, '+'),
+            ]
+          ));
+          return;
+        }
         let rows = data.slice();
         let dragIdx = null;
-        const list = el('div', { class: 'library-grid' });
         const draw = () => {
-          list.innerHTML = '';
+          listHost.innerHTML = '';
+          const depts = state.departments;
+          const deptBuckets = depts.map(d => ({ id: d.id, name: d.name, items: [] }));
+          const unassignedBucket = { id: 'unassigned', name: t('unassigned') || 'Unassigned', items: [], isUnassigned: true };
+
           rows.forEach((p, idx) => {
+            let itemDepts = normalizeDepartmentIds(p.department_ids);
+            if (!itemDepts.length) {
+              const genId = generalDepartmentId();
+              if (genId) itemDepts = [genId];
+            }
             const linked = isLinkedItem(p, g.id);
-            const handle = el('span', { class: 'drag-handle', draggable: 'true', title: t('dragReorder') }, '⠿');
-            const row = libraryCard({
+            const card = libraryCard({
               kind: 'procedure',
               title: p.title,
               meta: `${(p.fields || []).length} ${t('fields')}`,
@@ -4328,7 +4716,7 @@
               className: linked ? 'item-linked' : '',
               image: p.image || null,
               icon: p.icon || null,
-              handle,
+              hideKind: true,
               actions: [
                 el('button', { class: 'btn btn-ghost', onclick: e => { e.stopPropagation(); go(submissionsView(p)); } }, t('entries')),
                 el('button', { class: 'btn btn-ghost', onclick: e => { e.stopPropagation(); go(procedureBuild(g, p)); } }, t('edit')),
@@ -4340,14 +4728,15 @@
                 } }, '×') : null,
               ].filter(Boolean),
             });
-            handle.addEventListener('dragstart', e => {
+            card.setAttribute('draggable', 'true');
+            card.addEventListener('dragstart', e => {
               dragIdx = idx;
               e.dataTransfer.effectAllowed = 'move';
-              row.classList.add('dragging');
+              card.classList.add('dragging');
             });
-            handle.addEventListener('dragend', () => { dragIdx = null; row.classList.remove('dragging'); });
-            row.addEventListener('dragover', e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; });
-            row.addEventListener('drop', async e => {
+            card.addEventListener('dragend', () => { dragIdx = null; card.classList.remove('dragging'); });
+            card.addEventListener('dragover', e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; });
+            card.addEventListener('drop', async e => {
               e.preventDefault();
               if (dragIdx === null || dragIdx === idx) return;
               const [moved] = rows.splice(dragIdx, 1);
@@ -4356,11 +4745,25 @@
               draw();
               await saveSortOrder('procedures', rows);
             });
-            list.append(row);
+
+            let placed = false;
+            if (itemDepts.length) {
+              itemDepts.forEach(did => {
+                const bucket = deptBuckets.find(b => b.id === did);
+                if (bucket) { bucket.items.push(card); placed = true; }
+              });
+            }
+            if (!placed) unassignedBucket.items.push(card);
           });
+
+          const makeRowActions = () => [
+            importBtn(g, { table: 'procedures', titleOf: p => p.title, onDone: () => go(proceduresGroupView(g), { reset: true }) }),
+            el('button', { class: 'iconbtn', title: t('newProcedure'), onclick: () => go(procedureBuild(g, null)) }, '+'),
+          ];
+          deptBuckets.forEach(b => listHost.append(renderDepartmentRow(b, '', makeRowActions())));
+          if (unassignedBucket.items.length > 0) listHost.append(renderDepartmentRow(unassignedBucket, ''));
         };
         draw();
-        app.append(list);
       },
     };
   }
@@ -4463,7 +4866,7 @@
             el('button', { class: 'btn btn-ghost btn-block', onclick: () => saveProc(true) }, t('saveDraft')),
             el('button', { class: 'btn btn-primary btn-block', onclick: () => saveProc(false) }, t('publish')),
           ]),
-          existing && isLinkedItem(existing, g.id)
+          existing && g?.id && isLinkedItem(existing, g.id)
             ? el('button', { class: 'btn btn-ghost btn-block', style: 'margin-top:10px', onclick: async () => {
                 const { error } = await unlinkItemFromGroup('procedures', existing, g.id);
                 if (error) return toast(error.message, 'err');
@@ -4484,7 +4887,9 @@
         async function saveProc(is_draft) {
           const clean = cleanProcFields();
           if (!title.value.trim() || !clean.length) return toast(t('addTitleAndField'), 'err');
-          const payload = { group_id: existing ? existing.group_id : g.id, title: title.value.trim(), description: desc.value.trim() || null,
+          const homeGroup = procedureHomeGroup(g, existing);
+          if (!homeGroup?.id) return toast('No procedure group found. Create a procedure group first.', 'err');
+          const payload = { group_id: homeGroup.id, title: title.value.trim(), description: desc.value.trim() || null,
             fields: clean, is_draft, image: logo.image || null, icon: logo.icon || null,
             department_ids: visibility.get(), created_by: state.profile.id };
           const q = existing ? db.from('procedures').update(payload).eq('id', existing.id)
@@ -4495,7 +4900,9 @@
         }
         async function del() {
           if (!confirm('Delete this procedure?')) return;
-          await db.from('procedures').delete().eq('id', existing.id); toast(t('deleted')); back();
+          const { error } = await db.from('procedures').delete().eq('id', existing.id);
+          if (error) return toast(error.message, 'err');
+          toast(t('deleted')); back();
         }
       },
     };
@@ -4521,15 +4928,17 @@
     return {
       title: 'Entries', tab: 'groups',
       async render(app) {
-        const { data } = await db.from('procedure_submissions').select('*').eq('procedure_id', p.id).order('created_at', { ascending: false });
+        const { data, error } = await db.from('procedure_submissions').select('*').eq('procedure_id', p.id).order('created_at', { ascending: false });
         app.append(el('h2', { class: 'display', style: 'margin-top:0' }, p.title));
+        if (error) return app.append(emptyState('Could not load entries', error.message));
         if (!data?.length) return app.append(emptyState('No entries yet', 'Submissions from users appear here.'));
+        const fields = p.fields || [];
         for (const s of data) {
           const card = el('div', { class: 'card' }, [
             el('div', { class: 'muted', style: 'font-size:.8rem;margin-bottom:8px' }, `${nameOf(s.user_id)} · ${fmt(s.created_at)}`),
           ]);
-          for (const f of p.fields) {
-            const v = s.answers[f.key];
+          for (const f of fields) {
+            const v = s.answers?.[f.key];
             card.append(el('div', { style: 'margin-bottom:6px' }, [
               el('span', { class: 'muted', style: 'font-size:.82rem' }, f.label + ': '),
               el('span', {}, v === true ? 'Yes' : v === false ? 'No'
@@ -4555,18 +4964,20 @@
         const p = state.profile;
         const requests = await loadProfileChangeRequests(p.id, false);
         const hasPending = requests.some(r => r.status === 'pending');
-        const fullName = el('input', { type: 'text', autocomplete: 'name' }); fullName.value = p.full_name || '';
+        const safeFullName = displayName(p);
+        const fullName = el('input', { type: 'text', autocomplete: 'off', placeholder: safeFullName ? '' : maskEmail(p.full_name) });
+        fullName.value = safeFullName || '';
         const username = el('input', { type: 'text', autocomplete: 'username' }); username.value = p.username || '';
-        const email = el('input', { type: 'email', autocomplete: 'email' }); email.value = p.email || '';
+        const email = el('input', { type: 'email', autocomplete: 'off', placeholder: maskEmail(p.email) || t('email') });
         const mobile = el('input', { type: 'tel', autocomplete: 'tel' }); mobile.value = p.mobile_number || '';
 
         app.append(el('div', { class: 'card settings-card' }, [
           el('h3', {}, t('yourDetails')),
           languageSelect(() => go(settingsView(), { reset: true })),
           el('div', { class: 'settings-current' }, [
-            kv('Name', p.full_name || '—'),
+            kv('Name', safeFullName || maskEmail(p.full_name) || '—'),
             kv('Username', p.username ? `@${p.username}` : '—'),
-            kv('Email', p.email || '—'),
+            emailKv(p),
             kv('Mobile', p.mobile_number || '—'),
           ]),
           kv('Access', roleName(p.role)),
@@ -4577,7 +4988,8 @@
           labeled('Mobile number', mobile),
           hasPending ? el('p', { class: 'muted' }, 'You already have a pending profile change. Wait for it to be approved or rejected before sending another one.') : null,
           el('button', { class: 'btn btn-primary btn-block', disabled: hasPending ? 'disabled' : null, onclick: async () => {
-            const next = { full_name: fullName.value.trim(), username: username.value.trim(), email: email.value.trim(), mobile_number: mobile.value.trim() };
+            const requestedFullName = fullName.value.trim() || (safeFullName ? '' : (p.full_name || ''));
+            const next = { full_name: requestedFullName, username: username.value.trim(), email: email.value.trim() || p.email || '', mobile_number: mobile.value.trim() };
             if (!next.username || !next.email) return toast(t('usernameEmailRequired'), 'err');
             const unchanged = (p.full_name || '') === next.full_name && (p.username || '') === next.username && (p.email || '') === next.email && (p.mobile_number || '') === next.mobile_number;
             if (unchanged) return toast(t('nothingChanged'), 'err');
@@ -4610,6 +5022,12 @@
         ]));
 
         app.append(notificationCard());
+
+        // Sysadmins: who un-masked whose email, when — the leak-detection signal.
+        if (isSysadmin(state.profile)) {
+          const revealCard = await emailRevealLogCard();
+          if (revealCard) app.append(revealCard);
+        }
 
         app.append(el('div', { class: 'row', onclick: () => go(usersView()), style: 'cursor:pointer' }, [
           el('div', { class: 'grow' }, [el('div', {}, 'Users'),
@@ -4648,9 +5066,26 @@
   }
 
 
+  async function emailRevealLogCard() {
+    const { data, error } = await db.from('email_reveal_log')
+      .select('*').order('revealed_at', { ascending: false }).limit(20);
+    if (error) return null; // migration_email_privacy.sql not run yet
+    const card = el('div', { class: 'card' }, [el('h3', {}, t('emailAccessLog'))]);
+    if (!data?.length) card.append(el('p', { class: 'muted' }, t('noEmailReveals')));
+    else data.forEach(r => card.append(el('div', { class: 'email-log-item' }, [
+      el('div', {}, `${nameOf(r.admin_id)} → ${r.target_user_id ? labelOf(state.profiles.find(p => p.id === r.target_user_id)) : t('allUsersLabel')}`),
+      el('div', { class: 'sub' }, `${r.context || 'ui'} · ${fmt(r.revealed_at)}`),
+    ])));
+    return card;
+  }
+
   function missingOptionalTable(error) {
     if (!error) return false;
     return ['42P01', 'PGRST116'].includes(error.code) || /does not exist|schema cache|Could not find/i.test(error.message || '');
+  }
+  function missingOptionalColumn(error) {
+    if (!error) return false;
+    return ['42703', 'PGRST204', '42P01'].includes(error.code) || /does not exist|schema cache|Could not find/i.test(error.message || '');
   }
   function missingOptionalRpc(error) {
     if (!error) return false;
@@ -4687,10 +5122,14 @@
 
   async function exportUsersExcel(rows) {
     if (!rows.length) return toast(t('nothingToExport'), 'err');
+    // Superusers+ export real emails — logged as one bulk reveal so sysadmins
+    // see it in the email access log. Everyone else gets masked addresses.
+    const revealed = isSuperPlus(state.profile);
+    if (revealed) await db.rpc('log_bulk_email_reveal', { p_count: rows.length, p_context: 'users-export' }).then(() => {}, () => {});
     await writeExcel(rows.map(p => ({
       'Full name': p.full_name || '',
       Username: p.username || '',
-      Email: p.email || '',
+      Email: (revealed ? p.email : maskEmail(p.email)) || '',
       'Mobile number': p.mobile_number || '',
       Role: roleName(p.role),
       Approved: p.role === 'user' ? (p.is_verified ? 'Yes' : 'No') : 'Yes',
@@ -4720,8 +5159,9 @@
       const role = parseRole(r.Role);
       const email = String(r.Email || '').trim().toLowerCase();
       const username = String(r.Username || '').trim().toLowerCase();
-      if (!email || !username || !String(r['Temporary password'] || '').trim()) {
-        return toast(`Row ${idx + 2} needs Email, Username, and Temporary password.`, 'err');
+      const fullName = String(r['Full name'] || '').trim();
+      if (!email || !fullName || !username || !String(r['Temporary password'] || '').trim()) {
+        return toast(`Row ${idx + 2} needs Full name, Email, Username, and Temporary password.`, 'err');
       }
       if (existingEmails.has(email)) return toast(`Row ${idx + 2}: email "${email}" already exists.`, 'err');
       if (existingUsernames.has(username)) return toast(`Row ${idx + 2}: username "${username}" already exists.`, 'err');
@@ -4752,8 +5192,10 @@
         await auth.auth.signOut();
         return toast(`Row ${idx + 2}: username "${username}" is taken.`, 'err');
       }
-      const { data, error } = await auth.auth.signUp({ email, password,
-        options: { data: { full_name: fullName, username, mobile_number: mobile }, emailRedirectTo: new URL('confirmed.html', location.href).href } });
+      const { data, error } = await signUpWithProfile(auth, {
+        email, password, full_name: fullName, username, mobile_number: mobile,
+        emailRedirectTo: new URL('confirmed.html', location.href).href,
+      });
       if (error) {
         await auth.auth.signOut();
         return toast(`Row ${idx + 2}: ${error.message}`, 'err');
@@ -5031,7 +5473,7 @@
 
   function userCard(p) {
     const meta = [
-      p.email || 'No email',
+      maskEmail(p.email) || 'No email',
       p.username ? `@${p.username}` : null,
       p.mobile_number || null,
       departmentLabelsForUser(p.id),
@@ -5182,9 +5624,9 @@
         app.append(el('div', { class: 'card' }, [
           el('div', { class: 'section-head' }, [el('h3', {}, labelOf(p)), ...accessControls(p)]),
           el('div', { class: 'detail-grid' }, [
-            kv('Name', p.full_name || '—'),
+            kv('Name', displayName(p) || (p.full_name ? maskEmail(p.full_name) : '—')),
             kv('Username', p.username ? `@${p.username}` : '—'),
-            kv('Email', p.email || '—'),
+            emailKv(p),
             kv('Mobile', p.mobile_number || '—'),
             kv(t('departments'), departmentLabelsForUser(p.id)),
             kv('Access', `${roleName(p.role)}${p.role === 'user' ? (p.is_verified ? ' · approved' : ' · awaiting approval') : ''}`),
@@ -5216,7 +5658,7 @@
           el('h3', {}, 'Previous emails'),
           logs.length ? null : el('p', { class: 'muted' }, 'No previous email changes recorded.'),
           ...logs.map(l => el('div', { class: 'email-log-item' }, [
-            el('div', {}, `${l.old_email || '—'} → ${l.new_email || '—'}`),
+            el('div', {}, `${maskEmail(l.old_email) || '—'} → ${maskEmail(l.new_email) || '—'}`),
             el('div', { class: 'sub' }, `${fmt(l.changed_at)}${l.source ? ` · ${l.source}` : ''}`),
           ])),
         ]));
@@ -5415,6 +5857,28 @@
     return el('div', { class: 'kv' }, [el('div', { class: 'k' }, k), el('div', { class: 'v' }, v)]);
   }
 
+  // Email cell for another user's detail view: masked by default; superusers+
+  // may un-mask via the reveal_email RPC, which writes the audited
+  // email_reveal_log row (sysadmins watch that log in Settings).
+  function emailKv(p) {
+    const value = el('div', { class: 'v' }, maskEmail(p.email) || '—');
+    const box = el('div', { class: 'kv' }, [el('div', { class: 'k' }, 'Email'), value]);
+    if (isSuperPlus(state.profile) && p.email) {
+      const revealBtn = el('button', {
+        class: 'btn btn-ghost btn-sm', style: 'margin-top:8px',
+        title: t('emailAccessLogged'),
+        onclick: async () => {
+          const { data, error } = await db.rpc('reveal_email', { target: p.id, p_context: 'user-detail' });
+          if (error) return toast(error.message + ' - run migration_email_privacy.sql first.', 'err');
+          value.textContent = data || '—';
+          revealBtn.remove();
+        },
+      }, `👁 ${t('showEmail')}`);
+      box.append(revealBtn);
+    }
+    return box;
+  }
+
   function changeRequestCard(r, { compact = false, embedded = false, readOnly = false } = {}) {
     const user = state.profiles.find(p => p.id === r.user_id);
     const lines = profileChangeLines(r);
@@ -5441,17 +5905,19 @@
   }
 
   function profileChangeLines(r) {
+    // Emails compare on the raw values (so a change is still detected) but
+    // render masked — reveal goes through the audited user-detail button.
     const pairs = [
-      ['Name', r.current_full_name, r.requested_full_name],
-      ['Username', r.current_username, r.requested_username],
-      ['Email', r.current_email, r.requested_email],
-      ['Mobile', r.current_mobile_number, r.requested_mobile_number],
+      ['Name', r.current_full_name, r.requested_full_name, null],
+      ['Username', r.current_username, r.requested_username, null],
+      ['Email', r.current_email, r.requested_email, maskEmail],
+      ['Mobile', r.current_mobile_number, r.requested_mobile_number, null],
     ];
     return pairs
       .filter(([, a, b]) => (a || '') !== (b || ''))
-      .map(([label, a, b]) => el('div', { class: 'change-line' }, [
+      .map(([label, a, b, fmtVal]) => el('div', { class: 'change-line' }, [
         el('strong', {}, label),
-        document.createTextNode(`${a || '—'} → ${b || '—'}`),
+        document.createTextNode(`${(fmtVal ? fmtVal(a) : a) || '—'} → ${(fmtVal ? fmtVal(b) : b) || '—'}`),
       ]));
   }
 
@@ -5504,7 +5970,7 @@
       body.append(
         labeled('Email', email, true),
         labeled('Username', username, true),
-        labeled('Full name', fullName),
+        labeled('Full name', fullName, true),
         labeled('Mobile number', mobile),
         labeled('Temporary password', password, true),
         labeled('Role', role),
@@ -5516,14 +5982,16 @@
           const fn = fullName.value.trim();
           const mob = mobile.value.trim();
           const pw = password.value.trim();
-          if (!em || !un || !pw) return toast(t('emailUsernameTempPasswordRequired'), 'err');
+          if (!em || !fn || !un || !pw) return toast(t('nameEmailUsernameTempPasswordRequired'), 'err');
           if (pw.length < 6) return toast(t('passwordMinLength'), 'err');
           const { data: free, error: freeErr } = await db.rpc('username_available', { p_username: un });
           if (!freeErr && free === false) return toast(t('usernameTaken'), 'err');
 
           const auth = newAuthClient();
-          const { data, error } = await auth.auth.signUp({ email: em, password: pw,
-            options: { data: { full_name: fn, username: un, mobile_number: mob }, emailRedirectTo: new URL('confirmed.html', location.href).href } });
+          const { data, error } = await signUpWithProfile(auth, {
+            email: em, password: pw, full_name: fn, username: un, mobile_number: mob,
+            emailRedirectTo: new URL('confirmed.html', location.href).href,
+          });
           await auth.auth.signOut();
           if (error) return toast(error.message, 'err');
           const id = data?.user?.id;
