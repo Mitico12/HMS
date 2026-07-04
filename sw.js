@@ -1,10 +1,11 @@
-const CACHE_NAME = 'hms-shell-v70';
+const CACHE_NAME = 'hms-shell-v88';
 const SHELL_ASSETS = [
   './',
   './index.html',
   './user.html',
   './admin.html',
   './confirmed.html',
+  './varsling.html',
   './styles.css',
   './config.js',
   './courses.js',
@@ -35,12 +36,38 @@ self.addEventListener('fetch', event => {
   // Network-first for HTML *and* CSS/JS: an online user always gets the freshly
   // deployed asset, and the cache is only a fallback when offline. This is what
   // prevents a stale/poisoned styles.css from getting "stuck" and rendering the
-  // app unstyled after a bad or superseded deploy. cacheFirst kept only for
-  // anything else we might cache later.
+  // app unstyled after a bad or superseded deploy.
   if (request.mode === 'navigate' ||
       ['document', 'style', 'script', 'worker'].includes(request.destination)) {
     event.respondWith(networkFirst(request));
   }
+});
+
+// Web push: payload is JSON { title, body, url } sent by the send-push edge
+// function. Clicking the notification focuses an open app tab or opens one.
+self.addEventListener('push', event => {
+  let data = {};
+  try { data = event.data ? event.data.json() : {}; } catch (_) {}
+  event.waitUntil(self.registration.showNotification(data.title || 'HMS', {
+    body: data.body || '',
+    data: { url: data.url || './user.html' },
+  }));
+});
+
+self.addEventListener('notificationclick', event => {
+  event.notification.close();
+  const target = new URL(event.notification.data?.url || './user.html', self.registration.scope).href;
+  event.waitUntil(
+    clients.matchAll({ type: 'window', includeUncontrolled: true }).then(list => {
+      for (const c of list) {
+        if (c.url.startsWith(self.registration.scope) && 'focus' in c) {
+          c.navigate(target).catch(() => {});
+          return c.focus();
+        }
+      }
+      return clients.openWindow(target);
+    })
+  );
 });
 
 async function networkFirst(request) {

@@ -1,9 +1,10 @@
-const SHELL_VERSION = 'hms-shell-v70';
+const SHELL_VERSION = 'hms-shell-v88';
 const SHELL_ASSETS = [
   './index.html',
   './user.html',
   './admin.html',
   './confirmed.html',
+  './varsling.html',
   './styles.css',
   './config.js',
   './courses.js',

@@ -1,34 +1,34 @@
 :root {
   color-scheme: light;
-  --bg: #eef4f8;
-  --paper: #fbf8f5;
-  --paper-2: #e4eef2;
-  --ink: #172333;
-  --steel: #6b7786;
-  --line: rgba(45, 66, 86, .13);
-  --soft-line: rgba(45, 66, 86, .08);
-  --primary: #477fa3;
-  --primary-hover: #386f91;
+  --bg: #eaeae6;
+  --paper: #f6f6f4;
+  --paper-2: #dfdfda;
+  --ink: #2b2927;
+  --steel: #6e6a64;
+  --line: rgba(43, 41, 39, 0.16);
+  --soft-line: rgba(43, 41, 39, 0.08);
+  --primary: #5c5346;
+  --primary-hover: #453e34;
   --primary-ink: #ffffff;
-  --accent: #c57d68;
-  --danger: #b9584f;
-  --danger-soft: #f8e7e1;
-  --ok: #378763;
-  --warning: #c88b33;
-  --nav: #1a2735;
-  --sidebar-bg: linear-gradient(180deg, #f4f8fa 0%, #e5f0f3 100%);
-  --sidebar-ink: #243243;
-  --sidebar-muted: #6c7887;
-  --sidebar-faint: #9aa7b3;
-  --sidebar-line: rgba(45, 66, 86, .11);
-  --sidebar-hover: rgba(71, 127, 163, .10);
-  --sidebar-active: rgba(71, 127, 163, .17);
-  --sidebar-icon: #477fa3;
-  --sidebar-card: rgba(251, 248, 245, .80);
-  --sidebar-switch: rgba(45, 66, 86, .06);
-  --sidebar-switch-active: #ffffff;
-  --shadow: 0 22px 60px rgba(45, 66, 86, .12);
-  --shadow-soft: 0 8px 24px rgba(45, 66, 86, .07);
+  --accent: #a75d3b;
+  --danger: #b91c1c;
+  --danger-soft: #fee2e2;
+  --ok: #15803d;
+  --warning: #b45309;
+  --nav: #2b2927;
+  --sidebar-bg: #eaeae6;
+  --sidebar-ink: #2b2927;
+  --sidebar-muted: #6e6a64;
+  --sidebar-faint: #9c978f;
+  --sidebar-line: rgba(43, 41, 39, 0.12);
+  --sidebar-hover: rgba(92, 83, 70, 0.06);
+  --sidebar-active: rgba(92, 83, 70, 0.10);
+  --sidebar-icon: #5c5346;
+  --sidebar-card: #f6f6f4;
+  --sidebar-switch: rgba(43, 41, 39, 0.04);
+  --sidebar-switch-active: #f6f6f4;
+  --shadow: 0 20px 40px -15px rgba(43, 41, 39, 0.12);
+  --shadow-soft: 0 4px 20px -2px rgba(43, 41, 39, 0.06);
   /* role colours: orange=verneombud, blue=user, black=admin, red=superuser, green=sysadmin */
   --role-user: #3b82f6;
   --role-verneombud: #e08a1e;
@@ -3217,4 +3217,28 @@ input[type="checkbox"]:focus, input[type="radio"]:focus {
 @keyframes status-dot-pulse {
   0%, 100% { transform: scale(.88); opacity: .62; }
   50% { transform: scale(1.18); opacity: 1; }
+}
+
+/* ── Risk assessment matrix (risksView, admin) ─────────────────────────── */
+.risk-matrix { display: grid; grid-template-columns: auto repeat(5, 1fr); gap: 4px; margin: 4px 0 6px; }
+.risk-axis { display: flex; align-items: center; justify-content: center; font-size: .72rem; color: var(--text-muted); padding: 2px 6px; }
+.risk-cell { border: 1px solid transparent; border-radius: 8px; min-height: 42px; display: flex; align-items: center; justify-content: center; font-weight: 700; cursor: pointer; opacity: .92; transition: opacity .15s; }
+.risk-cell:hover { opacity: 1; }
+.risk-cell.dim { opacity: .3; }
+.risk-cell.sel { outline: 2px solid var(--text); opacity: 1; }
+.risk-axis-label { font-size: .75rem; color: var(--text-muted); text-align: center; margin-top: 4px; }
+
+/* ── Varsling QR poster (admin, printable) ─────────────────────────────── */
+.qr-poster-overlay { position: fixed; inset: 0; z-index: 999; background: var(--paper); overflow: auto; display: flex; align-items: flex-start; justify-content: center; }
+.qr-poster { text-align: center; max-width: 640px; padding: 48px 32px; }
+.qr-poster h1 { font-size: 2rem; margin: 0 0 10px; }
+.qr-poster-lead { font-size: 1.05rem; line-height: 1.5; margin: 0 0 20px; }
+.qr-poster img { width: 100%; max-width: 440px; border-radius: 8px; }
+.qr-poster-url { font-family: monospace; font-size: .85rem; word-break: break-all; color: var(--text-muted); margin: 14px 0 6px; }
+.qr-poster-foot { font-size: .9rem; color: var(--text-muted); margin: 0 0 22px; }
+.qr-poster-actions { display: flex; gap: 10px; justify-content: center; }
+@media print {
+  body.qr-printing > *:not(.qr-poster-overlay) { display: none !important; }
+  body.qr-printing .qr-poster-overlay { position: static; background: #fff; }
+  body.qr-printing .qr-poster { color: #000; }
 }

@@ -74,6 +74,9 @@
             document.createTextNode(t('needAccount')),
             el('a', { href: './user.html', onclick: e => { e.preventDefault(); navigateShell('./user.html'); } }, t('createOne')),
           ]),
+          el('div', { class: 'launch-foot muted', style: 'margin-top:10px' }, [
+            el('a', { href: './varsling.html', onclick: e => { e.preventDefault(); navigateShell('./varsling.html'); } }, `${t('varsling')} · ${t('followCase')}`),
+          ]),
         ])
       ));
     }
