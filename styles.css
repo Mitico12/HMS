@@ -2555,6 +2555,50 @@ input[type="checkbox"]:focus, input[type="radio"]:focus {
 .act-row.act-course-passed .act-ico { border-color: var(--warning); background: color-mix(in srgb, var(--warning) 12%, var(--paper)); }
 .act-row.act-course-attempt .act-ico { border-color: #a855f7; background: color-mix(in srgb, #a855f7 12%, var(--paper)); }
 .act-row.act-procedure .act-ico { border-color: #06b6d4; background: color-mix(in srgb, #06b6d4 12%, var(--paper)); }
+
+.procedure-reader-card {
+  display: grid;
+  gap: 10px;
+}
+
+.procedure-lead {
+  margin: 0;
+  color: var(--ink);
+  line-height: 1.65;
+  white-space: pre-wrap;
+}
+
+.procedure-meta-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.procedure-step-list {
+  display: grid;
+  gap: 12px;
+}
+
+.procedure-step-card h3 {
+  margin: 4px 0 8px;
+  line-height: 1.35;
+}
+
+.procedure-step-kicker {
+  color: var(--steel);
+  font-size: .78rem;
+  font-weight: 800;
+  letter-spacing: .03em;
+  text-transform: uppercase;
+}
+
+.procedure-option-list {
+  margin: 8px 0 0;
+  padding-left: 20px;
+  color: var(--ink);
+  line-height: 1.55;
+}
 .act-row.act-document .act-ico { border-color: #f43f5e; background: color-mix(in srgb, #f43f5e 12%, var(--paper)); }
 .act-row.act-member .act-ico { border-color: #8b5cf6; background: color-mix(in srgb, #8b5cf6 12%, var(--paper)); }
 .act-row.act-varsling .act-ico { border-color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, var(--paper)); }

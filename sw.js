@@ -1,4 +1,4 @@
-const CACHE_NAME = 'hms-shell-v88';
+const CACHE_NAME = 'hms-shell-v89';
 const SHELL_ASSETS = [
   './',
   './index.html',

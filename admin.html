@@ -2918,14 +2918,23 @@
     return ({
       check: t('checklistTypeCheck'),
       choice: t('checklistTypeChoice'),
+      short: t('selectTypeShort'),
       number: t('selectTypeNumber'),
       text: t('checklistTypeText'),
+      long: t('selectTypeLong'),
+      dropdown: t('selectTypeDropdown'),
+      checkbox: t('selectTypeCheckbox'),
+      checkboxes: t('selectTypeCheckboxes'),
+      slider: t('selectTypeSlider'),
     })[type] || type || t('checklistTypeCheck');
   }
 
   function answerValueText(type, answer) {
     if (type === 'check') return answer.value || answer.done ? t('completed') : '-';
     const value = answer.value;
+    if (Array.isArray(value)) return value.length ? value.join(', ') : '-';
+    if (value === true) return t('yes');
+    if (value === false) return t('no');
     return value == null || value === '' ? '-' : String(value);
   }
 
@@ -3291,7 +3300,7 @@
         
         procedures.forEach(p => {
           const linked = isLinkedItem(p, g.id);
-          addCard(p, 'procedure', p.title, `${(p.fields || []).length} ${t('fields')}`, linked ? `${t('linked')} · ${p.is_draft ? t('draft') : t('published')}` : (p.is_draft ? t('draft') : t('published')), [
+          addCard(p, 'procedure', p.title, `${(p.fields || []).length} ${t('procedureSteps')}`, linked ? `${t('linked')} · ${p.is_draft ? t('draft') : t('published')}` : (p.is_draft ? t('draft') : t('published')), [
             el('button', { class: 'btn btn-ghost', onclick: e => { e.stopPropagation(); go(submissionsView(p)); } }, t('entries')),
             el('button', { class: 'btn btn-ghost', onclick: e => { e.stopPropagation(); go(procedureBuild(g, p)); } }, t('edit')),
             linked ? el('button', { class: 'btn btn-ghost', title: t('removeFromGroup'), onclick: async e => {
@@ -3330,8 +3339,14 @@
   const CHECKLIST_ITEM_TYPES = [
     ['check', 'checklistTypeCheck'],
     ['choice', 'checklistTypeChoice'],
-    ['number', 'selectTypeNumber'],
+    ['short', 'selectTypeShort'],
     ['text', 'checklistTypeText'],
+    ['long', 'selectTypeLong'],
+    ['number', 'selectTypeNumber'],
+    ['dropdown', 'selectTypeDropdown'],
+    ['checkbox', 'selectTypeCheckbox'],
+    ['checkboxes', 'selectTypeCheckboxes'],
+    ['slider', 'selectTypeSlider'],
   ];
   function checklistGroupView(g) {
     return {
@@ -3493,11 +3508,37 @@
                 el('button', { class: 'btn btn-danger', onclick: () => { delete it.image; draw(); } }, t('removeImage')),
               ]));
             }
-            if (it.type === 'choice') {
+            if (it.type === 'choice' || it.type === 'dropdown' || it.type === 'checkboxes') {
               const optsInp = el('input', { type: 'text', value: (it.options || []).join(', '),
                 placeholder: 'Option A, Option B, Option C',
                 oninput: e => it.options = e.target.value.split(',').map(s => s.trim()).filter(Boolean) });
               card.append(labeled(t('optionsComma'), optsInp));
+            }
+            if (it.type === 'slider') {
+              if (it.min == null) it.min = 1;
+              if (it.max == null) it.max = 5;
+              if (it.round == null) it.round = 'nearest';
+              const minInp = el('input', { type: 'number', value: it.min, oninput: e => it.min = Number(e.target.value) });
+              const maxInp = el('input', { type: 'number', value: it.max, oninput: e => it.max = Number(e.target.value) });
+              const leftInp = el('input', { type: 'text', value: it.leftLabel || '',
+                placeholder: 'e.g. Not at all', oninput: e => it.leftLabel = e.target.value });
+              const rightInp = el('input', { type: 'text', value: it.rightLabel || '',
+                placeholder: 'e.g. Very much', oninput: e => it.rightLabel = e.target.value });
+              const roundSel = el('select', { onchange: e => it.round = e.target.value }, [
+                opt('nearest', t('roundNearest')), opt('up', t('roundUp')),
+              ]);
+              roundSel.value = it.round;
+              card.append(
+                el('div', { style: 'display:flex;gap:10px' }, [
+                  el('div', { style: 'flex:1' }, labeled(t('sliderMin'), minInp)),
+                  el('div', { style: 'flex:1' }, labeled(t('sliderMax'), maxInp)),
+                ]),
+                labeled(t('sliderLeft'), leftInp),
+                labeled(t('sliderRight'), rightInp),
+                labeled(t('sliderRound'), roundSel),
+              );
+            }
+            if (it.type === 'choice') {
               const expectedInp = el('input', { type: 'text', value: (it.expectedValues || it.expected?.values || []).join(', '),
                 placeholder: 'Yes, OK, Passed',
                 oninput: e => it.expectedValues = e.target.value.split(',').map(s => s.trim()).filter(Boolean) });
@@ -3507,7 +3548,7 @@
                 labeled(t('expectedValues'), expectedInp),
                 labeled(t('fixOnNo'), fixOnNo),
               );
-            } else if (it.type === 'number') {
+            } else if (it.type === 'number' || it.type === 'slider') {
               const minInp = el('input', { type: 'number', value: it.expectedMin ?? it.expected?.min ?? '',
                 oninput: e => it.expectedMin = e.target.value });
               const maxInp = el('input', { type: 'number', value: it.expectedMax ?? it.expected?.max ?? '',
@@ -3516,11 +3557,22 @@
                 labeled(t('expectedMin'), minInp),
                 labeled(t('expectedMax'), maxInp),
               ]));
-            } else if (it.type === 'text') {
+            } else if (['text', 'short', 'long', 'dropdown', 'checkboxes'].includes(it.type)) {
               const expectedInp = el('input', { type: 'text', value: (it.expectedValues || it.expected?.values || []).join(', '),
                 placeholder: 'OK, Clean, Complete',
                 oninput: e => it.expectedValues = e.target.value.split(',').map(s => s.trim()).filter(Boolean) });
               card.append(labeled(t('expectedValues'), expectedInp));
+            } else if (it.type === 'checkbox') {
+              const current = it.expectedChecked ?? it.expected?.checked;
+              const sel = el('select', { onchange: e => {
+                it.expectedChecked = e.target.value === '' ? '' : e.target.value === 'true';
+              } }, [
+                opt('', '-'),
+                opt('true', t('yes')),
+                opt('false', t('no')),
+              ]);
+              sel.value = current === true ? 'true' : current === false ? 'false' : '';
+              card.append(labeled(t('expectedChecked'), sel));
             }
             handle.addEventListener('dragstart', e => {
               dragIdx = idx;
@@ -3570,7 +3622,12 @@
             id: i.id || crypto.randomUUID(),
             label: i.label.trim(),
             type: i.type || 'check',
-            options: i.type === 'choice' ? (i.options || []).filter(Boolean) : [],
+            options: ['choice', 'dropdown', 'checkboxes'].includes(i.type) ? (i.options || []).filter(Boolean) : [],
+            min: i.type === 'slider' ? Number(i.min ?? 1) : undefined,
+            max: i.type === 'slider' ? Number(i.max ?? 5) : undefined,
+            leftLabel: i.type === 'slider' ? (i.leftLabel || '') : undefined,
+            rightLabel: i.type === 'slider' ? (i.rightLabel || '') : undefined,
+            round: i.type === 'slider' ? (i.round || 'nearest') : undefined,
             expected: expectedRule(i),
             fixOnNo: i.type === 'choice' ? (i.fixOnNo ?? hasNoOption(i.options || [])) : false,
             image: i.image || null,
@@ -3676,13 +3733,33 @@
         el('input', { type: 'checkbox' }),
         el('span', {}, it.label),
       ]));
-    } else if (type === 'choice') {
+    } else if (type === 'choice' || type === 'dropdown') {
       card.append(labeled(it.label, el('select', {}, [
         opt('', `- ${t('choose')} -`),
         ...(it.options || []).map(o => opt(o, o)),
       ])));
     } else if (type === 'number') {
       card.append(labeled(it.label, el('input', { type: 'number' })));
+    } else if (type === 'short') {
+      card.append(labeled(it.label, el('input', { type: 'text' })));
+    } else if (type === 'checkbox') {
+      card.append(el('label', { class: 'check-item' }, [
+        el('input', { type: 'checkbox' }),
+        el('span', {}, it.label),
+      ]));
+    } else if (type === 'checkboxes') {
+      card.append(el('div', { class: 'field' }, [
+        el('span', {}, it.label),
+        el('div', {}, (it.options || []).map(o => el('label', { class: 'check-item' }, [
+          el('input', { type: 'checkbox' }),
+          el('span', {}, o),
+        ]))),
+      ]));
+    } else if (type === 'slider') {
+      card.append(el('div', { class: 'field' }, [
+        el('span', {}, it.label),
+        previewFieldControl(it),
+      ]));
     } else {
       card.append(labeled(it.label, el('textarea', {})));
     }
@@ -4753,7 +4830,7 @@
           const genDept = state.departments.find(d => d.name?.toLowerCase() === 'general') || state.departments[0] || { id: 'general', name: 'General' };
           listHost.append(renderDepartmentRow(
             { id: genDept.id, name: genDept.name, items: [] },
-            t('noProceduresHint') || 'Build a form users can fill in.',
+            t('noProceduresHint') || 'Create readable procedures users can follow.',
             [
               importBtn(g, { table: 'procedures', titleOf: p => p.title, onDone: () => go(proceduresGroupView(g), { reset: true }) }),
               el('button', { class: 'iconbtn', title: t('newProcedure'), onclick: () => go(procedureBuild(g, null)) }, '+'),
@@ -4779,7 +4856,7 @@
             const card = libraryCard({
               kind: 'procedure',
               title: p.title,
-              meta: `${(p.fields || []).length} ${t('fields')}`,
+              meta: `${(p.fields || []).length} ${t('procedureSteps')}`,
               sub: linked ? `${t('linked')} · ${p.is_draft ? t('draft') : t('published')}` : (p.is_draft ? t('draft') : t('published')),
               className: linked ? 'item-linked' : '',
               image: p.image || null,
@@ -4864,7 +4941,7 @@
             const card = el('div', { class: 'card' }, [
               el('div', { class: 'section-head' }, [
                 el('div', { style: 'display:flex;align-items:center;gap:8px;min-width:0' }, [
-                  handle, el('strong', {}, t('field', { n: idx + 1 })),
+                  handle, el('strong', {}, t('procedureStep') + ` ${idx + 1}`),
                 ]),
                 el('button', { class: 'btn btn-danger', onclick: () => { fields.splice(idx, 1); draw(); } }, '✕'),
               ]),
@@ -4929,7 +5006,7 @@
           labeled(t('title'), title, true), labeled(t('profileImage'), logoPicker(logo)), visibility.field, labeled(t('description'), desc), list,
           el('button', { class: 'btn btn-ghost btn-block', style: 'margin-bottom:16px', onclick: () => {
             fields.push({ key: crypto.randomUUID(), type: 'short', label: '', required: false, options: [] }); draw();
-          } }, t('addField')),
+          } }, t('addProcedureStep')),
           el('div', { style: 'display:flex;gap:10px;flex-wrap:wrap' }, [
             el('button', { class: 'btn btn-ghost btn-block', onclick: previewProc }, 'Preview'),
             el('button', { class: 'btn btn-ghost btn-block', onclick: () => saveProc(true) }, t('saveDraft')),
@@ -5063,10 +5140,26 @@
         p.description ? el('p', { class: 'muted', style: 'margin-top:0' }, p.description) : null,
       ]);
       if (p.fields?.length) {
-        appendPreviewFields(shell, p.fields);
-        shell.append(el('button', { class: 'btn btn-primary btn-block btn-lg', type: 'button' }, t('submit')));
+        shell.append(el('div', { class: 'procedure-step-list' }, p.fields.map((f, idx) => {
+          const options = (f.options || []).filter(Boolean);
+          const card = el('div', { class: 'card procedure-step-card' }, [
+            el('div', { class: 'procedure-step-kicker' }, `${t('procedureStep')} ${idx + 1}`),
+            el('h3', {}, f.label),
+          ]);
+          if (options.length) {
+            card.append(el('ul', { class: 'procedure-option-list' }, options.map(o => el('li', {}, o))));
+          }
+          if (f.type === 'slider') {
+            card.append(el('p', { class: 'muted' },
+              `${t('sliderMin')}: ${f.min ?? 1} - ${t('sliderMax')}: ${f.max ?? 5}`));
+            if (f.leftLabel || f.rightLabel) card.append(el('p', { class: 'muted' },
+              [f.leftLabel, f.rightLabel].filter(Boolean).join(' - ')));
+          }
+          if (f.required) card.append(el('span', { class: 'pill' }, t('required')));
+          return card;
+        })));
       } else {
-        shell.append(emptyState(t('noProcedures'), t('addField')));
+        shell.append(emptyState(t('noProcedures'), t('addProcedureStep')));
       }
       body.append(shell);
     });
