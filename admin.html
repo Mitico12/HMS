@@ -548,7 +548,7 @@
       mod.initAIAssistant?.({
         db, el, toast, t, labeled,
         openKind, logsView, go, usersView, departmentsView, communicationsView,
-        homeView, state, groupView, checklistEdit,
+        homeView, state, groupView, checklistEdit, procedureBuild,
       });
     } catch (err) {
       console.warn('HMS AI Assistant unavailable; continuing without widget.', err);
@@ -2514,7 +2514,7 @@
           const checklist = byChecklist.get(run.checklist_id);
           const items = checklist?.items || [];
           const missing = items.filter(i => !run.checked?.[i.id]?.done);
-          const issues = items.filter(i => run.checked?.[i.id]?.needs_fix);
+          const issues = items.filter(i => checklistAnswerNeedsFix(i, run.checked?.[i.id] || {}));
           return missing.length > 0 || issues.length > 0 || !!(run.notes || '').trim();
         }).length;
         app.append(el('div', { class: 'kpi-grid', style: 'margin-bottom:14px' }, [
@@ -2559,7 +2559,7 @@
             const checklist = byChecklist.get(run.checklist_id);
             const items = checklist?.items || [];
             const missing = items.filter(i => !run.checked?.[i.id]?.done);
-            const issues = items.filter(i => run.checked?.[i.id]?.needs_fix);
+            const issues = items.filter(i => checklistAnswerNeedsFix(i, run.checked?.[i.id] || {}));
             const needsReview = !run.reviewed_at && (missing.length > 0 || issues.length > 0 || !!(run.notes || '').trim());
             return {
               Checklist: checklist?.title || '',
@@ -2582,7 +2582,7 @@
             const checklist = byChecklist.get(run.checklist_id);
             const items = checklist?.items || [];
             const missing = items.filter(i => !run.checked?.[i.id]?.done);
-            const issues = items.filter(i => run.checked?.[i.id]?.needs_fix);
+            const issues = items.filter(i => checklistAnswerNeedsFix(i, run.checked?.[i.id] || {}));
             const hasNotes = !!(run.notes || '').trim();
             const needsReview = !run.reviewed_at && (missing.length > 0 || issues.length > 0 || hasNotes);
             const card = el('div', {
@@ -2749,6 +2749,7 @@
         ]));
         app.append(el('div', { class: 'kpi-grid', style: 'margin-bottom:14px' }, [
           metricCard({ label: t('procedureSubmissions'), value: submissions.length }),
+          metricCard({ label: t('checklistLogNeedsAttention'), value: submissions.filter(s => procedureFieldIssues(byProc.get(s.procedure_id)?.fields || [], s.answers).length).length }),
           metricCard({ label: t('uniqueUsers'), value: new Set(submissions.map(s => s.user_id).filter(Boolean)).size }),
           metricCard({ label: t('procedures'), value: procIds.length }),
         ]));
@@ -2788,7 +2789,14 @@
             : Array.isArray(v) ? v.join(', ') : (v == null ? '' : String(v));
           const sheet = rows.map(s => {
             const p = byProc.get(s.procedure_id);
-            const row = { Form: p?.title || '', User: nameOf(s.user_id), Submitted: fmt(s.created_at) };
+            const issues = procedureFieldIssues(p?.fields || [], s.answers);
+            const row = {
+              Form: p?.title || '',
+              User: nameOf(s.user_id),
+              Submitted: fmt(s.created_at),
+              Status: issues.length ? t('checklistLogNeedsAttention') : t('completed'),
+              [t('expectedIssues')]: issues.map(i => i.field.label).join('; '),
+            };
             for (const f of (p?.fields || [])) row[f.label] = fmtVal(s.answers?.[f.key]);
             return row;
           });
@@ -2802,22 +2810,34 @@
           for (const s of rows) {
             const p = byProc.get(s.procedure_id);
             const fields = p?.fields || [];
-            const card = el('div', { class: 'card' }, [
+            const issues = procedureFieldIssues(fields, s.answers);
+            const issueKeys = new Set(issues.map(i => i.field.key));
+            const card = el('div', { class: 'card log-card' + (issues.length ? ' log-warning' : '') }, [
               el('div', { class: 'section-head' }, [
                 el('div', {}, [
                   el('h3', {}, p?.title || t('form')),
                   el('div', { class: 'sub' }, `${nameOf(s.user_id)} - ${fmt(s.created_at)}`),
                 ]),
+                el('span', { class: 'pill', style: issues.length ? 'background:#f2c94c;color:#17212b;border-color:#f2c94c' : '' },
+                  issues.length ? t('checklistLogNeedsAttention') : t('completed')),
               ]),
             ]);
             for (const f of fields) {
               const v = s.answers?.[f.key];
-              card.append(el('div', { style: 'margin-bottom:6px' }, [
+              const isIssue = issueKeys.has(f.key);
+              if (isIssue || expectedText(f)) {
+                card.append(el('div', { class: 'sub', style: 'margin:0 0 4px 8px' }, [
+                  isIssue ? el('span', { class: 'pill inspection-status-pill', style: 'margin-right:8px' }, t('outsideExpected')) : null,
+                  expectedText(f) ? document.createTextNode(`${t('expected')}: ${expectedText(f)}`) : null,
+                ]));
+              }
+              card.append(el('div', { class: isIssue ? 'inspection-row inspection-bad' : '', style: 'margin-bottom:6px;padding:6px 8px;border-radius:8px' }, [
                 el('span', { class: 'muted', style: 'font-size:.82rem' }, f.label + ': '),
                 el('span', {}, v === true ? t('yes') : v === false ? t('no')
                   : Array.isArray(v) ? (v.length ? v.join(', ') : '—') : String(v ?? '—')),
               ]));
             }
+            if (issues.length) card.append(el('ul', { class: 'log-missing' }, issues.map(i => el('li', {}, `${i.field.label}: ${i.reason}`))));
             host.append(card);
           }
         }
@@ -2837,7 +2857,7 @@
           .filter(photo => photo && !(typeof photo === 'string' && photo.startsWith('data:')));
         const checklistPhotoUrls = await signedUrls('checklist-photos', storagePhotos, 300);
         const missingItems = items.filter(i => !answers[i.id]?.done);
-        const issueItems = items.filter(i => answers[i.id]?.needs_fix);
+        const issueItems = items.filter(i => checklistAnswerNeedsFix(i, answers[i.id] || {}));
         const flagged = missingItems.length > 0 || issueItems.length > 0 || !!(run.notes || '').trim();
         const needsReview = flagged && !run.reviewed_at;
 
@@ -2870,7 +2890,7 @@
         for (const item of items) {
           const answer = answers[item.id] || {};
           const complete = !!answer.done;
-          const needsFix = !!answer.needs_fix;
+          const needsFix = checklistAnswerNeedsFix(item, answer);
           const type = item.type || 'check';
           const statusClass = !complete ? 'inspection-missing' : needsFix ? 'inspection-bad' : 'inspection-ok';
           const card = el('div', { class: `card checklist-answer-card inspection-row ${statusClass}` }, [
@@ -2936,8 +2956,55 @@
     if (Array.isArray(rule?.values) && rule.values.length) parts.push(rule.values.join(', '));
     if (rule?.min != null) parts.push(`${t('expectedMin')}: ${rule.min}`);
     if (rule?.max != null) parts.push(`${t('expectedMax')}: ${rule.max}`);
+    if (rule?.checked != null) parts.push(`${t('expectedChecked')}: ${rule.checked ? t('yes') : t('no')}`);
     if (item.fixOnNo) parts.push(t('fixOnNo'));
     return parts.join(' - ');
+  }
+
+  function checklistAnswerNeedsFix(item, answer = {}) {
+    if (!answer || answer.value == null || answer.value === '') return !!answer.needs_fix;
+    if (item.type === 'choice' && item.fixOnNo && ['no', 'nei'].includes(String(answer.value).trim().toLowerCase())) return true;
+    return answerOutsideExpected(item, answer.value) || !!answer.needs_fix;
+  }
+
+  function procedureFieldIssues(fields = [], answers = {}) {
+    return (fields || []).map(f => {
+      const value = answers?.[f.key];
+      if (f.required && emptyProcedureAnswer(f, value)) return { field: f, reason: t('missing') };
+      if (answerOutsideExpected(f, value)) return { field: f, reason: t('outsideExpected') };
+      return null;
+    }).filter(Boolean);
+  }
+
+  function emptyProcedureAnswer(field, value) {
+    if (field.type === 'checkbox') return value !== true;
+    if (field.type === 'slider') return value == null || value === '';
+    if (field.type === 'checkboxes') return !Array.isArray(value) || !value.length;
+    return value == null || String(value).trim() === '';
+  }
+
+  function answerOutsideExpected(def, value) {
+    const rule = def?.expected || null;
+    if (!rule) return false;
+    if (rule.checked != null) return !!value !== !!rule.checked;
+    if (value == null || value === '') return false;
+    if (rule.min != null || rule.max != null) {
+      const n = Number(value);
+      if (Number.isNaN(n)) return false;
+      if (rule.min != null && n < Number(rule.min)) return true;
+      if (rule.max != null && n > Number(rule.max)) return true;
+      return false;
+    }
+    if (Array.isArray(rule.values) && rule.values.length) {
+      const expected = rule.values.map(v => String(v).trim().toLowerCase()).filter(Boolean);
+      if (!expected.length) return false;
+      if (Array.isArray(value)) {
+        const actual = value.map(v => String(v).trim().toLowerCase()).filter(Boolean);
+        return expected.some(v => !actual.includes(v)) || actual.some(v => !expected.includes(v));
+      }
+      return !expected.includes(String(value).trim().toLowerCase());
+    }
+    return false;
   }
 
   function addGroupModal() {
@@ -3568,7 +3635,7 @@
   }
 
   function expectedRule(item) {
-    if (item.type === 'number') {
+    if (item.type === 'number' || item.type === 'slider') {
       const min = item.expectedMin ?? item.expected?.min;
       const max = item.expectedMax ?? item.expected?.max;
       const rule = {};
@@ -3576,9 +3643,13 @@
       if (max !== '' && max != null && !Number.isNaN(Number(max))) rule.max = Number(max);
       return Object.keys(rule).length ? rule : null;
     }
-    if (['choice', 'text'].includes(item.type)) {
+    if (['choice', 'text', 'short', 'long', 'dropdown', 'checkboxes'].includes(item.type)) {
       const values = (item.expectedValues || item.expected?.values || []).map(v => String(v).trim()).filter(Boolean);
       return values.length ? { values } : null;
+    }
+    if (item.type === 'checkbox') {
+      const checked = item.expectedChecked ?? item.expected?.checked;
+      return checked === true || checked === false ? { checked } : null;
     }
     return null;
   }
@@ -4216,6 +4287,7 @@
         leftLabel: f.type === 'slider' ? (f.leftLabel || '') : undefined,
         rightLabel: f.type === 'slider' ? (f.rightLabel || '') : undefined,
         round: f.type === 'slider' ? (f.round || 'nearest') : undefined,
+        expected: expectedRule(f),
       }));
   }
   function previewFieldControl(f) {
@@ -4768,15 +4840,15 @@
     };
   }
 
-  function procedureBuild(g, existing) {
+  function procedureBuild(g, existing, draft = null) {
     return {
       title: existing ? t('editProcedure') : t('newProcedure'), tab: 'groups',
       render(app) {
-        const title = el('input', { type: 'text', value: existing?.title || '', placeholder: 'Procedure title' });
-        const desc = el('textarea', { placeholder: 'Short description (optional)' }); desc.value = existing?.description || '';
-        const logo = { image: existing?.image || null, icon: existing?.icon || null };
-        const visibility = departmentPicker(existing?.department_ids);
-        let fields = (existing?.fields || []).map(f => ({ ...f }));
+        const title = el('input', { type: 'text', value: existing?.title || draft?.title || '', placeholder: 'Procedure title' });
+        const desc = el('textarea', { placeholder: 'Short description (optional)' }); desc.value = existing?.description || draft?.description || '';
+        const logo = { image: existing?.image || draft?.image || null, icon: existing?.icon || draft?.icon || null };
+        const visibility = departmentPicker(existing?.department_ids || draft?.department_ids);
+        let fields = (existing?.fields || draft?.fields || []).map(f => ({ ...f }));
         let dragIdx = null;
         const list = el('div', {});
         const draw = () => {
@@ -4852,6 +4924,7 @@
                 labeled(t('sliderRound'), roundSel),
               );
             }
+            appendExpectedFieldControls(card, f);
             list.append(card);
           });
         };
@@ -4908,6 +4981,40 @@
     };
   }
 
+  function appendExpectedFieldControls(card, field) {
+    const rule = field.expected || {};
+    if (['short', 'long', 'dropdown', 'checkboxes'].includes(field.type)) {
+      const expectedInp = el('input', { type: 'text', value: (field.expectedValues || rule.values || []).join(', '),
+        placeholder: field.type === 'checkboxes' ? 'Option A, Option B' : 'OK, Complete',
+        oninput: e => field.expectedValues = e.target.value.split(',').map(s => s.trim()).filter(Boolean) });
+      card.append(labeled(t('expectedValues'), expectedInp));
+      return;
+    }
+    if (field.type === 'number' || field.type === 'slider') {
+      const minInp = el('input', { type: 'number', value: field.expectedMin ?? rule.min ?? '',
+        oninput: e => field.expectedMin = e.target.value });
+      const maxInp = el('input', { type: 'number', value: field.expectedMax ?? rule.max ?? '',
+        oninput: e => field.expectedMax = e.target.value });
+      card.append(el('div', { class: 'expected-grid' }, [
+        labeled(t('expectedMin'), minInp),
+        labeled(t('expectedMax'), maxInp),
+      ]));
+      return;
+    }
+    if (field.type === 'checkbox') {
+      const current = field.expectedChecked ?? rule.checked;
+      const sel = el('select', { onchange: e => {
+        field.expectedChecked = e.target.value === '' ? '' : e.target.value === 'true';
+      } }, [
+        opt('', '-'),
+        opt('true', t('yes')),
+        opt('false', t('no')),
+      ]);
+      sel.value = current === true ? 'true' : current === false ? 'false' : '';
+      card.append(labeled(t('expectedChecked'), sel));
+    }
+  }
+
   function showProcedurePreview(p) {
     openModal('Preview', (body) => {
       const shell = el('div', { class: 'preview-shell' }, [
@@ -4934,17 +5041,28 @@
         if (!data?.length) return app.append(emptyState('No entries yet', 'Submissions from users appear here.'));
         const fields = p.fields || [];
         for (const s of data) {
-          const card = el('div', { class: 'card' }, [
+          const issues = procedureFieldIssues(fields, s.answers);
+          const issueKeys = new Set(issues.map(i => i.field.key));
+          const card = el('div', { class: 'card log-card' + (issues.length ? ' log-warning' : '') }, [
             el('div', { class: 'muted', style: 'font-size:.8rem;margin-bottom:8px' }, `${nameOf(s.user_id)} · ${fmt(s.created_at)}`),
           ]);
+          if (issues.length) card.append(el('span', { class: 'pill inspection-status-pill', style: 'margin-bottom:8px' }, t('checklistLogNeedsAttention')));
           for (const f of fields) {
             const v = s.answers?.[f.key];
-            card.append(el('div', { style: 'margin-bottom:6px' }, [
+            const isIssue = issueKeys.has(f.key);
+            if (isIssue || expectedText(f)) {
+              card.append(el('div', { class: 'sub', style: 'margin:4px 0' }, [
+                isIssue ? el('span', { class: 'pill inspection-status-pill', style: 'margin-right:8px' }, t('outsideExpected')) : null,
+                expectedText(f) ? document.createTextNode(`${t('expected')}: ${expectedText(f)}`) : null,
+              ]));
+            }
+            card.append(el('div', { class: isIssue ? 'inspection-row inspection-bad' : '', style: 'margin-bottom:6px;padding:6px 8px;border-radius:8px' }, [
               el('span', { class: 'muted', style: 'font-size:.82rem' }, f.label + ': '),
               el('span', {}, v === true ? 'Yes' : v === false ? 'No'
                 : Array.isArray(v) ? (v.length ? v.join(', ') : '—') : String(v ?? '—')),
             ]));
           }
+          if (issues.length) card.append(el('ul', { class: 'log-missing' }, issues.map(i => el('li', {}, `${i.field.label}: ${i.reason}`))));
           app.append(card);
         }
       },
