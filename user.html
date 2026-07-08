@@ -22,7 +22,7 @@
   <div id="screen"></div>
 
   <script type="module">
-  import { db, requireSession, signInWithIdentifier, signUpWithProfile, readWorkerPrefetch, cacheWorkerGroups, cacheWorkerDepartments, el, $, fmt, toast, initTheme, themeToggleButton, connectionStatusDot, initLanguage, languageSelect, t, roleRank, fileButton, maskEmail } from './config.js';
+  import { db, requireSession, signInWithIdentifier, signUpWithProfile, readWorkerPrefetch, cacheWorkerGroups, cacheWorkerDepartments, el, $, fmt, toast, initTheme, themeToggleButton, connectionStatusDot, initLanguage, languageSelect, t, roleRank, fileButton, maskEmail, VAPID_PUBLIC_KEY, urlBase64ToUint8Array } from './config.js';
   import { courseListView } from './courses.js';
   import { navigateShell, setupPageTransition, warmAppShell } from './app-shell.js';
 
@@ -92,20 +92,9 @@
   // Falls back to owned-only if the group_ids column isn't there yet.
   async function fetchGroupItems(table, gid, { desc = false, extra } = {}) {
     const member = `group_id.eq.${gid},group_ids.cs.{${gid}}`;
-    const run = (useOr, useSort) => {
-      let qb = db.from(table).select('*');
-      qb = useOr ? qb.or(member) : qb.eq('group_id', gid);
-      if (extra) qb = extra(qb);
-      if (useSort) qb = qb.order('sort_order');
-      return qb.order('created_at', { ascending: !desc });
-    };
-    // Fall back ONLY on missing-column/table errors (fresh install where the
-    // sort_order / group_ids migrations haven't run) — real errors surface.
-    let q = await run(true, true);
-    if (q.error && missingOptionalColumn(q.error)) q = await run(true, false);
-    if (q.error && missingOptionalColumn(q.error)) q = await run(false, true);
-    if (q.error && missingOptionalColumn(q.error)) q = await run(false, false);
-    return q;
+    let qb = db.from(table).select('*').or(member);
+    if (extra) qb = extra(qb);
+    return qb.order('sort_order').order('created_at', { ascending: !desc });
   }
 
   // Which course groups have a course assigned to me that I haven't passed yet.
@@ -148,11 +137,11 @@
     screen.append(el('div', { class: 'auth-screen' },
       el('div', { class: 'auth-card', style: 'text-align:center' }, [
         el('div', { style: 'font-size:2.4rem;margin-bottom:8px' }, suspended ? '🔒' : '⏳'),
-        el('div', { class: 'brand' }, suspended ? t('accountSuspended') : 'Waiting for verification'),
+        el('div', { class: 'brand' }, suspended ? t('accountSuspended') : t('waitingVerification')),
         el('div', { class: 'tag' }, suspended ? t('accountSuspendedBody')
-          : 'Your account is set up, but an admin needs to approve it before you can use the app. You\'ll get in as soon as they do.'),
-        el('button', { class: 'btn btn-primary btn-block', onclick: () => location.reload() }, 'Check again'),
-        el('button', { class: 'btn btn-ghost btn-block', style: 'margin-top:10px', onclick: signOut }, 'Sign out'),
+          : t('waitingVerificationBody')),
+        el('button', { class: 'btn btn-primary btn-block', onclick: () => location.reload() }, t('checkAgain')),
+        el('button', { class: 'btn btn-ghost btn-block', style: 'margin-top:10px', onclick: signOut }, t('signOut')),
       ])));
   }
 
@@ -167,8 +156,8 @@
         ? [labeled(t('usernameOrEmail'), el('input', { type: 'text', id: 'lid', autocomplete: 'username' })),
            labeled(t('password'), el('input', { type: 'password', id: 'pw', autocomplete: 'current-password' }))]
         : [labeled(t('email'), el('input', { type: 'email', id: 'em', autocomplete: 'email' })),
-           labeled('Username', el('input', { type: 'text', id: 'un', autocomplete: 'username' })),
-           labeled('Full name', el('input', { type: 'text', id: 'fn', autocomplete: 'name' }), true),
+           labeled(t('username'), el('input', { type: 'text', id: 'un', autocomplete: 'username' })),
+           labeled(t('fullName'), el('input', { type: 'text', id: 'fn', autocomplete: 'name' }), true),
            labeled(t('password'), el('input', { type: 'password', id: 'pw', autocomplete: 'new-password' }))];
       card.append(
         el('div', { class: 'card-actions' }, themeToggleButton()),
@@ -520,6 +509,8 @@
     renderWorkerHero(app, todo);
     // 2. Primary — today's checklists to do.
     renderWorkerChecklistTodo(app, todo);
+    // 2b. Actions assigned to me (tiltak) — hidden entirely when there are none.
+    await renderWorkerActions(app);
     // 3. Communications — private messages first, then news broadcasts.
     await renderWorkerCommunications(app);
 
@@ -561,6 +552,46 @@
       ]),
       total ? el('div', { class: 'hero-progress-track' }, el('div', { class: 'hero-progress-fill', style: `width:${pct}%` })) : null,
     ]));
+  }
+
+  // Actions (tiltak) assigned to this worker — open/in-progress only, with a
+  // one-tap "mark as done". Degrades to nothing before migration_actions.sql.
+  async function renderWorkerActions(app) {
+    const res = await db.from('actions').select('*')
+      .eq('assigned_to', state.profile.id).in('status', ['open', 'in_progress'])
+      .order('due_at', { ascending: true, nullsFirst: false })
+      .then(r => r, () => ({ error: true }));
+    if (res.error) return; // table not migrated yet → show nothing, don't break the home
+    const rows = res.data || [];
+    if (!rows.length) return;
+    const today = new Date().toISOString().slice(0, 10);
+    app.append(el('div', { class: 'worker-home-section' }, [
+      el('h2', { class: 'display worker-section-title' }, t('myActions')),
+    ]));
+    const wrap = el('div', { class: 'comm-feed' });
+    rows.forEach(a => {
+      const isOverdue = a.due_at && a.due_at < today;
+      const subBits = [
+        a.description ? a.description.slice(0, 80) : null,
+        a.due_at ? `${t('dueDate')}: ${a.due_at}${isOverdue ? ` · ${t('overdue')}` : ''}` : null,
+      ].filter(Boolean).join(' · ');
+      const row = el('div', { class: 'comm-row' + (isOverdue ? ' comm-safety' : '') }, [
+        el('div', { class: 'comm-main' }, [
+          el('div', { class: 'comm-title' }, a.title),
+          subBits ? el('div', { class: 'comm-snippet' }, subBits) : null,
+        ]),
+        el('button', { class: 'btn btn-ghost', style: 'flex-shrink:0', onclick: async () => {
+          const { error } = await db.from('actions').update({
+            status: 'done', completed_at: new Date().toISOString(), completed_by: state.profile.id,
+          }).eq('id', a.id);
+          if (error) return toast(error.message, 'err');
+          toast(t('done'));
+          row.remove();
+        } }, t('markDone')),
+      ]);
+      wrap.append(row);
+    });
+    app.append(wrap);
   }
 
   // Communications — private messages first, then news broadcasts. Each is a
@@ -656,9 +687,7 @@
     // Include checklists owned by a visible checklist group OR imported into one.
     const idList = groupIds.join(',');
     const member = `group_id.in.(${idList}),group_ids.ov.{${idList}}`;
-    let q = await db.from('checklists').select('*').or(member).order('sort_order').order('created_at');
-    if (q.error && missingOptionalColumn(q.error)) q = await db.from('checklists').select('*').or(member).order('created_at');
-    if (q.error && missingOptionalColumn(q.error)) q = await db.from('checklists').select('*').in('group_id', groupIds).order('created_at'); // group_ids column pending
+    const q = await db.from('checklists').select('*').or(member).order('sort_order').order('created_at');
     const all = (q.data || []).filter(visibleToMyDepartments);
     if (!all.length) return { items: [], total: 0 };
 
@@ -676,9 +705,37 @@
       : { data: [] };
     const doneToday = new Set((runs || []).map(r => r.checklist_id));
     const groupById = new Map(checklistGroups.map(g => [g.id, g]));
+    const dailyItems = scoped.filter(c => !doneToday.has(c.id))
+      .map(c => ({ ...c, group: groupById.get(c.group_id), dueDate: today }));
+
+    // Weekly/monthly recurring checklists (schedule_frequency, SECTION 43):
+    // shared cadence — due until ANY user completes them this week/month.
+    // Pre-migration the column is absent, so `recurring` is simply empty.
+    const recurring = all.filter(c => ['weekly', 'monthly'].includes(c.schedule_frequency));
+    let recDue = [];
+    if (recurring.length) {
+      const weekStart = new Date(); // ISO week, Monday 00:00 local
+      weekStart.setHours(0, 0, 0, 0);
+      weekStart.setDate(weekStart.getDate() - ((weekStart.getDay() + 6) % 7));
+      const monthStart = new Date(); monthStart.setHours(0, 0, 0, 0); monthStart.setDate(1);
+      const oldest = (weekStart < monthStart ? weekStart : monthStart).toISOString();
+      const rr = await db.from('checklist_runs').select('checklist_id,submitted_at')
+        .eq('completed', true).gte('submitted_at', oldest)
+        .in('checklist_id', recurring.map(c => c.id))
+        .then(r => r, () => ({ data: [] }));
+      const doneInPeriod = new Set((rr.data || []).filter(r => {
+        const c = recurring.find(x => x.id === r.checklist_id);
+        const bound = c.schedule_frequency === 'weekly' ? weekStart : monthStart;
+        return r.submitted_at >= bound.toISOString();
+      }).map(r => r.checklist_id));
+      const dailyIds = new Set(dailyItems.map(c => c.id));
+      recDue = recurring.filter(c => !doneInPeriod.has(c.id) && !dailyIds.has(c.id))
+        .map(c => ({ ...c, group: groupById.get(c.group_id),
+          dueDate: c.schedule_frequency === 'weekly' ? t('thisWeek') : t('thisMonth') }));
+    }
     return {
-      total: scoped.length,
-      items: scoped.filter(c => !doneToday.has(c.id)).map(c => ({ ...c, group: groupById.get(c.group_id), dueDate: today })),
+      total: scoped.length + recDue.length,
+      items: [...dailyItems, ...recDue],
     };
   }
 
@@ -1243,6 +1300,7 @@
       reportActionButton({ iconClass: 'report-action-icon-warn', icon: '!', label: t('reportHazard'), onclick: () => go(hazardForm()) }),
       reportActionButton({ iconClass: 'report-action-icon-suggestion', icon: '+', label: t('reportSuggestion'), onclick: () => go(suggestionForm()) }),
       reportActionButton({ iconClass: 'report-action-icon-varsling', icon: 'V', label: t('varsling'), onclick: () => go(varslingForm()) }),
+      reportActionButton({ iconClass: 'report-action-icon-follow', icon: '?', label: t('followCase'), onclick: () => navigateShell('./varsling.html') }),
     ]));
   }
 
@@ -1451,8 +1509,10 @@
         const where = el('input', { type: 'text', placeholder: t('locationOptional') });
         const anonBox = el('input', { type: 'checkbox' });
         anonBox.addEventListener('change', () => {
-          if (anonBox.checked && !confirm('Are you sure you want to stay anonymous? Handlers will not see who filed this.'))
-            anonBox.checked = false;
+          if (!anonBox.checked) return;
+          anonBox.checked = false; // never submit an anonymous varsling from the logged-in app
+          if (confirm(t('anonLeaveAppConfirm')))
+            navigateShell('./varsling.html'); // logged-out page → no JWT in the API logs
         });
         app.append(
           el('p', { class: 'muted', style: 'margin:0 0 12px' }, t('varslingDesc')),
@@ -1467,8 +1527,8 @@
           if (!title.value.trim()) return toast(t('varslingTitle'), 'err');
           if (!custom.validate()) return;
           const { error } = await insertReportRow('varslinger', {
-            reporter_id: anonBox.checked ? null : state.profile.id,
-            is_anonymous: anonBox.checked,
+            reporter_id: state.profile.id,
+            is_anonymous: false,
             title: title.value.trim(),
             description: desc.value.trim() || null,
             location: where.value.trim() || null,
@@ -2012,6 +2072,28 @@
     return {
       title: p.title, tab: 'groups',
       render(app) {
+        if (p.description) app.append(el('p', { class: 'muted', style: 'margin:0 0 12px;white-space:pre-wrap' }, p.description));
+        // "Read and understood" — per procedure version; hidden pre-migration.
+        const readCard = el('div', { class: 'card', style: 'margin-bottom:14px' });
+        app.append(readCard);
+        (async () => {
+          const v = p.version || 1;
+          const res = await db.from('procedure_reads').select('id')
+            .eq('procedure_id', p.id).eq('user_id', state.profile.id).eq('version', v)
+            .maybeSingle().then(r => r, () => ({ error: true }));
+          if (res.error) { readCard.remove(); return; } // table not migrated yet
+          if (res.data) {
+            readCard.append(el('div', { class: 'sub', style: 'color:#2f9e5b' }, `✓ ${t('procedureConfirmed')}`));
+            return;
+          }
+          readCard.append(el('button', { class: 'btn btn-ghost btn-block', onclick: async (e) => {
+            const { error } = await db.from('procedure_reads').insert({
+              procedure_id: p.id, user_id: state.profile.id, version: v });
+            if (error) return toast(error.message, 'err');
+            toast(t('confirmedRead'));
+            e.target.replaceWith(el('div', { class: 'sub', style: 'color:#2f9e5b' }, `✓ ${t('procedureConfirmed')}`));
+          } }, t('confirmReadBtn')));
+        })();
         const answers = {};
         for (const f of p.fields || []) {
           let input;
@@ -2087,6 +2169,52 @@
   }
 
   // ── helpers ────────────────────────────────────────────
+  // Web-push enable/disable for this device. Requires the VAPID public key in
+  // config.js and migration_push_subscriptions.sql; degrades to a hint if not.
+  async function renderPushControls(card) {
+    if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+      card.append(el('p', { class: 'muted' }, t('pushUnsupported'))); return;
+    }
+    if (!VAPID_PUBLIC_KEY) {
+      card.append(el('p', { class: 'muted' }, t('pushNotConfigured'))); return;
+    }
+    const reg = await navigator.serviceWorker.ready;
+    const existing = await reg.pushManager.getSubscription();
+    const btn = el('button', { class: 'btn btn-ghost btn-block' }, existing ? t('disablePush') : t('enablePush'));
+    card.append(el('p', { class: 'muted', style: 'font-size:.85rem' }, t('pushHint')), btn);
+    btn.onclick = async () => {
+      try {
+        const cur = await reg.pushManager.getSubscription();
+        if (cur) {
+          db.from('push_subscriptions').delete().eq('endpoint', cur.endpoint).then(() => {}, () => {});
+          await cur.unsubscribe();
+          btn.textContent = t('enablePush');
+          toast(t('pushDisabled'));
+          return;
+        }
+        const perm = await Notification.requestPermission();
+        if (perm !== 'granted') return toast(t('pushDenied'), 'err');
+        const sub = await reg.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY),
+        });
+        const j = sub.toJSON();
+        const { error } = await db.from('push_subscriptions').insert({
+          user_id: state.profile.id, endpoint: sub.endpoint,
+          p256dh: j.keys.p256dh, auth: j.keys.auth,
+          user_agent: navigator.userAgent.slice(0, 200),
+        });
+        if (error) {
+          await sub.unsubscribe();
+          return toast(/push_subscriptions/.test(error.message || '') && /exist|schema/.test(error.message || '')
+            ? t('pushMigrationHint') : error.message, 'err');
+        }
+        btn.textContent = t('disablePush');
+        toast(t('pushEnabled'));
+      } catch (e) { toast(e.message || String(e), 'err'); }
+    };
+  }
+
   function settingsView() {
     return {
       title: t('settings'), tab: 'settings',
@@ -2130,6 +2258,10 @@
           requests.length ? null : el('p', { class: 'muted' }, 'No change requests yet.'),
           ...requests.map(changeRequestCard),
         ]));
+
+        const pushCard = el('div', { class: 'card' }, [el('h3', {}, t('pushNotifications'))]);
+        app.append(pushCard);
+        renderPushControls(pushCard);
 
         async function submitChange() {
           const requestedFullName = fullName.value.trim() || (safeFullName ? '' : (p.full_name || ''));

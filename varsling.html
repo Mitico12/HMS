@@ -1,0 +1,333 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <script>try{document.documentElement.dataset.theme=localStorage.getItem('theme')||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light')}catch(e){}</script>
+  <title>Anonymous Report</title>
+  <link rel="stylesheet" href="./styles.css">
+  <style>
+    body { padding-bottom: 0; }
+    .tab-btn { flex: 1; padding: 10px; font-weight: 600; font-size: 0.95rem; border: none; background: transparent; border-bottom: 2px solid transparent; cursor: pointer; color: var(--text-muted); }
+    .tab-btn.active { color: var(--text); border-bottom-color: var(--primary); }
+    .status-board-list { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; max-height: 180px; overflow-y: auto; padding-right: 4px; }
+    .status-board-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; background: var(--paper-2); border-radius: 6px; font-size: 0.88rem; border: 1px solid var(--soft-line); transition: background-color 0.2s, border-color 0.2s; }
+    .status-board-row.highlight { background: color-mix(in srgb, var(--primary) 15%, var(--paper)); border-color: var(--primary); font-weight: 600; }
+    .status-dot { color: var(--danger); font-size: 1.1rem; line-height: 1; }
+    .code-display { font-family: monospace; font-size: 1.25rem; font-weight: bold; background: var(--paper-2); padding: 12px; border-radius: 6px; border: 1px dashed var(--line); letter-spacing: 0.05em; text-align: center; margin: 16px 0; color: var(--primary-ink); }
+    .chat-bubble { margin: 8px 0; padding: 10px 12px; border-radius: 8px; font-size: 0.88rem; line-height: 1.4; }
+    .chat-bubble.handler { background: color-mix(in srgb, var(--primary) 10%, var(--paper-2)); border-left: 3px solid var(--primary); }
+    .chat-bubble.reporter { background: var(--paper-2); border-left: 3px solid var(--text-muted); }
+    .form-group { margin-bottom: 12px; text-align: left; }
+    .form-group label { display: block; font-weight: 500; font-size: 0.88rem; margin-bottom: 4px; }
+    .form-group input, .form-group textarea { width: 100%; padding: 8px 10px; border-radius: 6px; border: 1px solid var(--line); background: var(--paper); color: var(--text); }
+  </style>
+</head>
+<body>
+  <div class="auth-screen">
+    <div style="position: absolute; top: 16px; right: 16px; display: flex; gap: 8px; align-items: center;">
+      <div id="lang-container"></div>
+    </div>
+    <div class="auth-card" id="card-stage" style="width: 100%; max-width: 500px; padding: 24px;">
+      <!-- Content dynamically injected here -->
+    </div>
+    <div style="margin-top: 16px; font-size: 0.88rem;">
+      <a href="./index.html" class="link-btn" id="back-link"></a>
+    </div>
+  </div>
+
+  <script type="module">
+    import { el, $, toast, initTheme, initLanguage, languageSelect, t, generateCaseCode, caseCodeHash, callPublicFunction, fmt } from './config.js';
+
+    initTheme();
+    initLanguage();
+
+    const stage = $('#card-stage');
+    $('#lang-container').append(languageSelect(() => render()));
+    
+    let activeTab = 'file'; // 'file' | 'follow'
+    let currentCode = ''; // only held in memory during the session
+
+    function render() {
+      document.title = activeTab === 'file' ? t('fileVarsling') : t('followCase');
+      $('#back-link').textContent = `← ${t('back')}`;
+      stage.textContent = '';
+
+      // Brand Title
+      stage.append(el('h2', { class: 'brand', style: 'margin-bottom: 6px; text-align: center;' }, t('varsling')));
+      stage.append(el('p', { class: 'muted', style: 'margin: 0 0 16px; font-size: 0.84rem; text-align: center; line-height: 1.4;' }, t('varslingDesc')));
+
+      // Tab switcher
+      const tabFile = el('button', { class: `tab-btn ${activeTab === 'file' ? 'active' : ''}` }, t('fileVarsling'));
+      const tabFollow = el('button', { class: `tab-btn ${activeTab === 'follow' ? 'active' : ''}` }, t('followCase'));
+      tabFile.addEventListener('click', () => { activeTab = 'file'; render(); });
+      tabFollow.addEventListener('click', () => { activeTab = 'follow'; render(); });
+
+      stage.append(el('div', { style: 'display: flex; border-bottom: 1px solid var(--soft-line); margin-bottom: 20px;' }, [
+        tabFile, tabFollow
+      ]));
+
+      if (activeTab === 'file') {
+        renderFileTab();
+      } else {
+        renderFollowTab();
+      }
+    }
+
+    function renderFileTab() {
+      const titleInput = el('input', { type: 'text', required: true });
+      const descInput = el('textarea', { rows: 5 });
+      const locInput = el('input', { type: 'text' });
+
+      const form = el('form', { style: 'display: flex; flex-direction: column; gap: 12px;' }, [
+        el('div', { class: 'form-group' }, [
+          el('label', {}, t('varslingTitle')),
+          titleInput
+        ]),
+        el('div', { class: 'form-group' }, [
+          el('label', {}, t('varslingDetails')),
+          descInput
+        ]),
+        el('div', { class: 'form-group' }, [
+          el('label', {}, t('locationOptional')),
+          locInput
+        ]),
+        el('button', { class: 'btn btn-primary btn-block', type: 'submit' }, t('fileAnonymously'))
+      ]);
+
+      form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const title = titleInput.value.trim();
+        const description = descInput.value.trim();
+        const location = locInput.value.trim();
+
+        if (!title) return toast(t('varslingTitle'), 'err');
+
+        let code = generateCaseCode();
+        let anon_id = await caseCodeHash(code);
+
+        let res = await callPublicFunction('submit-varsling', { anon_id, title, description, location });
+        
+        // Regenerate once on 409 conflict
+        if (res.error && res.error.status === 409) {
+          code = generateCaseCode();
+          anon_id = await caseCodeHash(code);
+          res = await callPublicFunction('submit-varsling', { anon_id, title, description, location });
+        }
+
+        if (res.error) {
+          return toast(res.error.message, 'err');
+        }
+
+        showCodeScreen(code);
+      });
+
+      stage.append(form);
+    }
+
+    function showCodeScreen(code) {
+      stage.textContent = '';
+      stage.append(el('h2', { class: 'brand', style: 'text-align: center;' }, t('anonCaseCodeTitle')));
+      stage.append(el('p', { class: 'muted', style: 'font-size: 0.88rem; line-height: 1.4; text-align: center;' }, t('anonCaseCodeIntro')));
+
+      stage.append(el('div', { class: 'code-display' }, code));
+
+      const copyBtn = el('button', { class: 'btn btn-secondary btn-block', style: 'margin-bottom: 8px;' }, t('anonCaseCodeCopy'));
+      copyBtn.addEventListener('click', () => {
+        navigator.clipboard.writeText(code);
+        toast(t('copied'));
+      });
+
+      const downloadBtn = el('button', { class: 'btn btn-secondary btn-block', style: 'margin-bottom: 12px;' }, t('anonCaseCodeDownload'));
+      downloadBtn.addEventListener('click', () => {
+        const blob = new Blob([`HMS Case Code: ${code}\nKeep this safe. It cannot be recovered.`], { type: 'text/plain' });
+        const a = el('a', { href: URL.createObjectURL(blob), download: 'varsling-case-code.txt' });
+        document.body.append(a);
+        a.click();
+        a.remove();
+      });
+
+      const confirmBtn = el('button', { class: 'btn btn-primary btn-block' }, t('anonCaseCodeConfirm'));
+      confirmBtn.addEventListener('click', () => {
+        activeTab = 'follow';
+        render();
+      });
+
+      stage.append(copyBtn, downloadBtn, confirmBtn);
+    }
+
+    async function renderFollowTab() {
+      const codeInput = el('input', { type: 'text', placeholder: 'HMS-XXXXX-XXXXX-XXXXX-XXXXX', style: 'font-family: monospace; text-align: center; text-transform: uppercase;' });
+      const submitBtn = el('button', { class: 'btn btn-primary btn-block', type: 'submit' }, t('search'));
+      const form = el('form', { style: 'display: flex; flex-direction: column; gap: 8px;' }, [
+        el('div', { class: 'form-group' }, [
+          el('label', {}, t('caseCode')),
+          codeInput
+        ]),
+        submitBtn
+      ]);
+
+      const threadContainer = el('div', { style: 'margin-top: 16px;' });
+      stage.append(form, threadContainer);
+
+      // Status Board placeholder
+      const boardContainer = el('div', { style: 'margin-top: 24px; border-top: 1px solid var(--soft-line); padding-top: 16px;' });
+      stage.append(boardContainer);
+
+      const renderBoard = async () => {
+        boardContainer.textContent = '';
+        boardContainer.append(el('h3', { style: 'font-size: 0.95rem; margin: 0 0 6px;' }, t('caseStatusBoard')));
+        boardContainer.append(el('p', { class: 'muted', style: 'font-size: 0.8rem; line-height: 1.3; margin: 0 0 10px;' }, t('caseStatusBoardHint')));
+
+        const list = el('div', { class: 'status-board-list' });
+        boardContainer.append(list);
+
+        const res = await callPublicFunction('follow-varsling', { action: 'board' });
+        if (res.error || !res.data?.rows) {
+          list.append(el('p', { class: 'muted', style: 'font-size: 0.82rem;' }, 'Could not load case board.'));
+          return;
+        }
+
+        const inputVal = codeInput.value.trim();
+        const hash = inputVal ? await caseCodeHash(inputVal) : '';
+        const activePrefix = hash ? hash.slice(0, 8).toUpperCase() : '';
+
+        res.data.rows.forEach(r => {
+          const prefix = String(r.p).toUpperCase();
+          const isHighlighted = prefix === activePrefix;
+          const row = el('div', { class: `status-board-row ${isHighlighted ? 'highlight' : ''}` }, [
+            el('span', { style: 'font-family: monospace;' }, `HMS-…${prefix}`),
+            r.n ? el('span', { class: 'status-dot', title: 'New reply' }, '●') : el('span', { style: 'visibility: hidden;' }, '●')
+          ]);
+          list.append(row);
+        });
+      };
+
+      await renderBoard();
+
+      // Typing locally highlights the case board matching row
+      codeInput.addEventListener('input', async () => {
+        const val = codeInput.value.trim();
+        const hash = val ? await caseCodeHash(val) : '';
+        const activePrefix = hash ? hash.slice(0, 8).toUpperCase() : '';
+
+        const rows = boardContainer.querySelectorAll('.status-board-row');
+        rows.forEach(row => {
+          const text = row.querySelector('span').textContent;
+          const prefix = text.replace('HMS-…', '').toUpperCase();
+          if (prefix && prefix === activePrefix) {
+            row.classList.add('highlight');
+          } else {
+            row.classList.remove('highlight');
+          }
+        });
+      });
+
+      form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const code = codeInput.value.trim();
+        if (!code) return;
+
+        submitBtn.disabled = true;
+        const hash = await caseCodeHash(code);
+
+        const res = await callPublicFunction('follow-varsling', { action: 'fetch', anon_id: hash });
+        submitBtn.disabled = false;
+
+        if (res.error) return toast(res.error.message, 'err');
+        if (!res.data?.found) return toast(t('caseNotFound'), 'err');
+
+        const { case: c, messages = [] } = res.data;
+
+        // Render case detail inside threadContainer
+        threadContainer.textContent = '';
+        
+        // Status indicator mapping
+        const colors = {
+          resolved: ['#2f9e5b', '#ffffff'],
+          in_progress: ['#2f80ed', '#ffffff'],
+          open: ['#f2c94c', '#17212b'],
+        };
+        const [bg, fg] = colors[c.status] || ['#8a94a6', '#ffffff'];
+        const statusLabel = { open: t('open'), in_progress: t('inProgress'), resolved: t('resolved') }[c.status] || c.status;
+
+        threadContainer.append(
+          el('div', { style: 'display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 12px; border-bottom: 1px solid var(--soft-line); padding-bottom: 8px;' }, [
+            el('div', { class: 'grow', style: 'text-align: left;' }, [
+              el('h3', { style: 'margin:0; font-size: 1.05rem; font-weight:600' }, c.title),
+              el('div', { class: 'sub', style: 'font-size: 0.8rem; margin-top: 2px;' }, fmt(c.created_at))
+            ]),
+            el('span', { class: 'pill', style: `background:${bg};color:${fg};border-color:${bg}; font-size: 0.8rem; padding: 2px 8px; border-radius: 4px; font-weight: 600` }, statusLabel)
+          ])
+        );
+
+        if (c.resolution) {
+          threadContainer.append(el('div', { class: 'card', style: 'background: color-mix(in srgb, var(--primary) 8%, var(--paper)); padding: 12px; margin-bottom: 16px; text-align: left; font-size: 0.88rem; border: 1px solid var(--soft-line); border-radius: 6px;' }, [
+            el('h4', { style: 'margin:0 0 4px; font-weight:600' }, t('resolution')),
+            el('p', { style: 'margin:0; white-space:pre-wrap; line-height: 1.4' }, c.resolution)
+          ]));
+        }
+
+        // Messages Thread list
+        threadContainer.append(el('h4', { style: 'text-align: left; font-size: 0.95rem; font-weight: 600; margin: 16px 0 8px;' }, t('caseThread')));
+        const messagesList = el('div', { style: 'display: flex; flex-direction: column; gap: 8px; margin-bottom: 16px; text-align: left;' });
+        threadContainer.append(messagesList);
+
+        const drawMessages = () => {
+          messagesList.textContent = '';
+          if (!messages.length) {
+            messagesList.append(el('p', { class: 'muted', style: 'font-size: 0.84rem; text-align: center;' }, t('caseNoMessages')));
+          } else {
+            messages.forEach(m => {
+              const label = m.sender === 'handler' ? t('caseTeam') : t('you');
+              messagesList.append(el('div', { class: `chat-bubble ${m.sender}` }, [
+                el('div', { class: 'sub', style: 'font-size: 0.76rem; font-weight: 500; margin-bottom: 2px;' }, `${label} · ${fmt(m.created_at)}`),
+                el('div', { style: 'white-space: pre-wrap;' }, m.body)
+              ]));
+            });
+          }
+        };
+        drawMessages();
+
+        // Reply field
+        const replyText = el('textarea', { rows: 3, placeholder: t('caseReplyPlaceholder') });
+        const replyBtn = el('button', { class: 'btn btn-primary btn-block', style: 'margin-top: 8px;' }, t('send'));
+
+        replyBtn.addEventListener('click', async () => {
+          const body = replyText.value.trim();
+          if (!body) return;
+
+          replyBtn.disabled = true;
+          const repRes = await callPublicFunction('follow-varsling', { action: 'reply', anon_id: hash, body });
+          replyBtn.disabled = false;
+
+          if (repRes.error) return toast(repRes.error.message, 'err');
+
+          toast(t('caseReplySent'));
+          replyText.value = '';
+          
+          // Re-fetch thread messages
+          const freshRes = await callPublicFunction('follow-varsling', { action: 'fetch', anon_id: hash });
+          if (!freshRes.error && freshRes.data?.messages) {
+            messages.splice(0, messages.length, ...freshRes.data.messages);
+            drawMessages();
+          }
+          await renderBoard();
+        });
+
+        threadContainer.append(
+          el('div', { class: 'form-group', style: 'margin-top: 12px;' }, [
+            replyText,
+            replyBtn
+          ])
+        );
+
+        // Hide Board on active thread viewing to save vertical space
+        boardContainer.style.display = 'none';
+      });
+    }
+
+    render();
+  </script>
+</body>
+</html>
