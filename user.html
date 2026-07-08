@@ -1034,6 +1034,7 @@
           kind: 'document',
           title: d.name,
           meta: `${(d.size_bytes / 1024 | 0)} KB`,
+          image: d.image || null,
           hideKind: false,
           onclick: async () => {
             const { data: u, error } = await db.storage.from('documents').createSignedUrl(d.storage_path, 60);
@@ -2084,6 +2085,7 @@
           kind: 'document',
           title: d.name,
           meta: `${(d.size_bytes / 1024 | 0)} KB`,
+          image: d.image || null,
           hideKind: true,
           actions: [el('button', { class: 'btn btn-ghost', onclick: async e => {
               e.stopPropagation();

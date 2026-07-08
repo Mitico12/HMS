@@ -3104,6 +3104,51 @@
     });
   }
 
+  async function documentThumbnailDataUrl(file) {
+    try {
+      if (file.type?.startsWith('image/')) return await imageFileThumbnail(file);
+      const isPdf = file.type === 'application/pdf' || /\.pdf$/i.test(file.name || '');
+      if (isPdf) return await pdfFirstPageThumbnail(file);
+    } catch (err) {
+      console.warn('Document thumbnail generation failed; using file icon.', err);
+    }
+    return null;
+  }
+
+  async function imageFileThumbnail(file, maxSide = 640) {
+    const src = await fileToDataUrl(file);
+    const img = await new Promise((resolve, reject) => {
+      const image = new Image();
+      image.onload = () => resolve(image);
+      image.onerror = reject;
+      image.src = src;
+    });
+    const scale = Math.min(1, maxSide / Math.max(img.width || 1, img.height || 1));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round((img.width || 1) * scale));
+    canvas.height = Math.max(1, Math.round((img.height || 1) * scale));
+    canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL('image/jpeg', 0.78);
+  }
+
+  async function pdfFirstPageThumbnail(file) {
+    const pdfjs = await import('https://esm.sh/pdfjs-dist@4.10.38/build/pdf.mjs');
+    if (pdfjs.GlobalWorkerOptions) {
+      pdfjs.GlobalWorkerOptions.workerSrc = 'https://esm.sh/pdfjs-dist@4.10.38/build/pdf.worker.mjs';
+    }
+    const data = new Uint8Array(await file.arrayBuffer());
+    const pdf = await pdfjs.getDocument({ data, disableFontFace: true }).promise;
+    const page = await pdf.getPage(1);
+    const baseViewport = page.getViewport({ scale: 1 });
+    const scale = Math.min(1.4, 640 / Math.max(baseViewport.width || 1, baseViewport.height || 1));
+    const viewport = page.getViewport({ scale });
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(viewport.width));
+    canvas.height = Math.max(1, Math.round(viewport.height));
+    await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+    return canvas.toDataURL('image/jpeg', 0.78);
+  }
+
   function libraryIcon(kind, text = '') {
     const s = String(text || '').toLowerCase();
     if (kind === 'checklist') return s.includes('lock') ? '🔒' : s.includes('shift') ? '🌅' : s.includes('audit') ? '📋' : '✅';
@@ -4734,6 +4779,7 @@
                 title: d.name,
                 meta: `${(d.size_bytes / 1024 | 0)} KB`,
                 sub: linked ? `${t('linked')} · ${fmt(d.created_at)}` : fmt(d.created_at),
+                image: d.image || null,
                 className: linked ? 'item-linked' : '',
                 hideKind: true,
                 actions: [
@@ -4780,12 +4826,18 @@
         async function upload() {
           const f = file.files[0];
           if (!f) return toast(t('chooseFileFirst'), 'err');
+          const image = await documentThumbnailDataUrl(f);
           const path = `${g.id}/${crypto.randomUUID()}-${f.name}`;
           const { error: upErr } = await db.storage.from('documents').upload(path, f);
           if (upErr) return toast(upErr.message, 'err');
-          const { error } = await db.from('documents').insert({
+          const payload = {
             group_id: g.id, name: f.name, storage_path: path, mime_type: f.type, size_bytes: f.size,
-            department_ids: visibility.get(), uploaded_by: state.profile.id });
+            department_ids: visibility.get(), uploaded_by: state.profile.id, image };
+          let { error } = await db.from('documents').insert(payload);
+          if (error && /image|schema cache|Could not find/i.test(error.message || '')) {
+            delete payload.image;
+            ({ error } = await db.from('documents').insert(payload));
+          }
           if (error) return toast(error.message, 'err');
           file.value = ''; toast(t('uploaded')); loadDocs();
         }
